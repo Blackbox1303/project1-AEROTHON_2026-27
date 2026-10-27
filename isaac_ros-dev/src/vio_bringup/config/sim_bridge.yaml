@@ -1,0 +1,66 @@
+# ros_gz_bridge topics for the PX4 SITL tunnel sim (Gazebo Harmonic -> ROS 2), same names as the real D435
+- ros_topic_name: /clock
+  gz_topic_name: /clock
+  ros_type_name: rosgraph_msgs/msg/Clock
+  gz_type_name: gz.msgs.Clock
+  direction: GZ_TO_ROS
+- ros_topic_name: /camera/infra1/image_rect_raw
+  gz_topic_name: /camera/infra1/image_rect_raw
+  ros_type_name: sensor_msgs/msg/Image
+  gz_type_name: gz.msgs.Image
+  direction: GZ_TO_ROS
+- ros_topic_name: /camera/infra1/camera_info
+  gz_topic_name: /camera/infra1/camera_info
+  ros_type_name: sensor_msgs/msg/CameraInfo
+  gz_type_name: gz.msgs.CameraInfo
+  direction: GZ_TO_ROS
+- ros_topic_name: /camera/infra2/image_rect_raw
+  gz_topic_name: /camera/infra2/image_rect_raw
+  ros_type_name: sensor_msgs/msg/Image
+  gz_type_name: gz.msgs.Image
+  direction: GZ_TO_ROS
+- ros_topic_name: /camera/infra2/camera_info
+  gz_topic_name: /camera/infra2/camera_info
+  ros_type_name: sensor_msgs/msg/CameraInfo
+  gz_type_name: gz.msgs.CameraInfo
+  direction: GZ_TO_ROS
+- ros_topic_name: /camera/depth/image_rect_raw
+  gz_topic_name: /camera/depth/image_rect_raw
+  ros_type_name: sensor_msgs/msg/Image
+  gz_type_name: gz.msgs.Image
+  direction: GZ_TO_ROS
+- ros_topic_name: /camera/depth/camera_info
+  gz_topic_name: /camera/depth/camera_info
+  ros_type_name: sensor_msgs/msg/CameraInfo
+  gz_type_name: gz.msgs.CameraInfo
+  direction: GZ_TO_ROS
+# D435 colour (the banner camera, 2026-10-25)
+- ros_topic_name: /camera/color/image_raw
+  gz_topic_name: /camera/color/image_raw
+  ros_type_name: sensor_msgs/msg/Image
+  gz_type_name: gz.msgs.Image
+  direction: GZ_TO_ROS
+- ros_topic_name: /camera/color/camera_info
+  gz_topic_name: /camera/color/camera_info
+  ros_type_name: sensor_msgs/msg/CameraInfo
+  gz_type_name: gz.msgs.CameraInfo
+  direction: GZ_TO_ROS
+- ros_topic_name: /sim/ground_truth/odom
+  gz_topic_name: /sim/ground_truth/odom
+  ros_type_name: nav_msgs/msg/Odometry
+  gz_type_name: gz.msgs.Odometry
+  direction: GZ_TO_ROS
+# Arducam fisheye (QR / red-zone camera). Its camera_info comes from fisheye_camera_info
+# (sim_arducam.launch.py): Gazebo's own is a pinhole model, wrong for this lens.
+- ros_topic_name: /arducam/image_raw
+  gz_topic_name: /arducam/image_raw
+  ros_type_name: sensor_msgs/msg/Image
+  gz_type_name: gz.msgs.Image
+  direction: GZ_TO_ROS
+# SIM-ONLY stand-in for the full-resolution Arducam's view straight down (QR reading tests);
+# see sim/models/arducam_imx219_fisheye/model.sdf
+- ros_topic_name: /arducam/nadir_hd/image_raw
+  gz_topic_name: /arducam/nadir_hd/image_raw
+  ros_type_name: sensor_msgs/msg/Image
+  gz_type_name: gz.msgs.Image
+  direction: GZ_TO_ROS

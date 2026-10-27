@@ -1,0 +1,52 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Image
+      Name: Left IR
+      Enabled: true
+      Topic:
+        Value: /camera/infra1/image_rect_raw
+        Reliability Policy: Best Effort
+    - Class: rviz_default_plugins/Image
+      Name: Right IR
+      Enabled: true
+      Topic:
+        Value: /camera/infra2/image_rect_raw
+        Reliability Policy: Best Effort
+    - Class: rviz_default_plugins/Grid
+      Name: Grid (10 cm)
+      Enabled: true
+      Cell Size: 0.1
+      Plane Cell Count: 10
+    # the camera's own fixed frames (camera_link, IR optical frames 5 cm apart);
+    # they don't move here - nothing estimates motion in this launch
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+      Show Names: true
+      Marker Scale: 0.15
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+  Global Options:
+    Fixed Frame: camera_link
+    Frame Rate: 30
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 0.4
+      Focal Point: {X: 0.0, Y: -0.025, Z: 0.0}
+      Pitch: 0.4
+      Yaw: 2.6
+      Target Frame: <Fixed Frame>
+Window Geometry:
+  Height: 800
+  Width: 1400

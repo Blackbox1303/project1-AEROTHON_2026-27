@@ -1,0 +1,15 @@
+# offboard_bridge (aerothon_nav/offboard_bridge.py)
+offboard_bridge:
+  ros__parameters:
+    rate_hz: 20.0
+    max_xy: 2.5          # m/s; rules: 5-10 km/h
+    max_vz: 2.0          # m/s (1.0 made the 1.5 -> 10 -> 5 -> 10 m climbs ~25 s; PX4 MPC_Z_VEL_MAX_DN 1.5 caps the descent)
+    max_yaw_rate: 1.2    # rad/s (= Nav2 MPPI wz_max)
+    alt_kp: 0.8          # 1/s
+    cmd_timeout: 0.5     # s without /cmd_vel -> hold position
+    clamp: true          # safety clamp on /vio/obstacle_scan (D435, +-45 deg ahead only)
+    stop_dist: 0.65      # m from the drone centre: no motion toward an obstacle (0.22 m beyond the 0.42 m half span)
+    slow_dist: 1.1       # m: approach speed scaled down from here
+    scan_timeout: 0.5    # s
+    alt_ki: 0.3          # 1/s^2: removes the steady 0.1-0.2 m altitude offset of P alone
+    alt_i_max: 0.3       # m/s

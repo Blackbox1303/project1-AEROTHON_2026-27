@@ -1,0 +1,70 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+      Show Names: true
+    - Class: rviz_default_plugins/Path
+      Name: VIO path
+      Enabled: true
+      Topic:
+        Value: /visual_slam/tracking/slam_path
+      Color: 25; 255; 0
+    - Class: rviz_default_plugins/PointCloud2
+      Name: Landmarks
+      Enabled: true
+      Topic:
+        Value: /visual_slam/vis/landmarks_cloud
+      Size (m): 0.02
+    - Class: rviz_default_plugins/PointCloud2
+      Name: Depth cloud (dense)
+      Enabled: true
+      Topic:
+        Value: /vio/depth_points
+        Reliability Policy: Best Effort
+      Size (m): 0.02
+      Style: Points
+      Size (Pixels): 2
+      Decay Time: 5
+      Color Transformer: AxisColor
+      Axis: Z
+    - Class: rviz_default_plugins/LaserScan
+      Name: Obstacle scan
+      Enabled: true
+      Topic:
+        Value: /vio/obstacle_scan
+      Size (m): 0.04
+      Color Transformer: FlatColor
+      Color: 255; 50; 50
+    - Class: rviz_default_plugins/Image
+      Name: Left IR
+      Enabled: true
+      Topic:
+        Value: /camera/infra1/image_rect_raw
+        Reliability Policy: Best Effort
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+  Global Options:
+    Fixed Frame: map
+    Frame Rate: 30
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 1.5
+      Target Frame: imu_link
+Window Geometry:
+  Height: 900
+  Width: 1400

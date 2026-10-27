@@ -1,0 +1,11 @@
+# Corridor-node and mission settings for course v2:
+# Take off to 5 m -> 1 m forward -> scan start QR -> VIO corridor navigation -> 10 m delivery zone QR search -> match start QR -> winch/drop.
+entry_align:
+  ros__parameters: {}
+corridor_nav:
+  ros__parameters: {}
+mission_supervisor:
+  ros__parameters:
+    takeoff_altitude: 5.0
+    search_altitude: 10.0
+    deliver_altitude: 5.0

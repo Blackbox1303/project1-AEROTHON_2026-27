@@ -1,0 +1,15 @@
+# MAVROS plugin list for this project: PX4's px4_pluginlists.yaml plus guided_target.
+# guided_target converts PX4's POSITION_TARGET_GLOBAL_INT to local coordinates; without a
+# GPS origin it warns ~10x/s during flight ("PositionTargetGlobal failed because no origin")
+# and nothing here uses it.
+/**:
+  ros__parameters:
+    plugin_denylist:
+      # common
+      - guided_target
+
+      # extras (as in px4_pluginlists.yaml; its image_pub entry is dropped: no such plugin in MAVROS 2.16)
+      - vibration
+      - distance_sensor
+      - rangefinder
+      - wheel_odometry

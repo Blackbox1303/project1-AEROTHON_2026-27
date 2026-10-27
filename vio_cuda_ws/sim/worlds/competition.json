@@ -1,0 +1,305 @@
+{
+  "frame": "world ENU, spawn at the origin facing +x",
+  "seed": 11,
+  "start_qr": {
+    "name": "qr_start",
+    "x": 1.0,
+    "y": 0.0,
+    "size": 1.0,
+    "payload": "AEROTHON26-HOTEL-4111",
+    "modules": 25
+  },
+  "course": "v3",
+  "corridors": [
+    {
+      "lap": "forward",
+      "centre_y": 2.33,
+      "x_from": 5.0,
+      "x_to": 11.706,
+      "width": 3.353,
+      "wall_height": 3.048,
+      "cruise": 1.4,
+      "entrance_x": 5.0,
+      "banner_colour": "green",
+      "roof": true,
+      "banners": [
+        {
+          "mount": "top",
+          "end": "start",
+          "colour": "green",
+          "centre": [
+            4.95,
+            2.327,
+            3.3
+          ],
+          "normal": [
+            -1,
+            0,
+            0
+          ],
+          "width": 3.5,
+          "height": 0.305
+        },
+        {
+          "mount": "ground",
+          "end": "start",
+          "colour": "green",
+          "centre": [
+            3.5,
+            2.327,
+            0.008
+          ],
+          "normal": [
+            0,
+            0,
+            1
+          ],
+          "width": 3.5,
+          "height": 0.305
+        },
+        {
+          "mount": "top",
+          "end": "zone",
+          "colour": "blue",
+          "centre": [
+            11.756,
+            2.327,
+            3.3
+          ],
+          "normal": [
+            1,
+            0,
+            0
+          ],
+          "width": 3.5,
+          "height": 0.305
+        },
+        {
+          "mount": "ground",
+          "end": "zone",
+          "colour": "blue",
+          "centre": [
+            13.206,
+            2.327,
+            0.008
+          ],
+          "normal": [
+            0,
+            0,
+            1
+          ],
+          "width": 3.5,
+          "height": 0.305
+        }
+      ],
+      "obstacles": []
+    },
+    {
+      "lap": "return",
+      "centre_y": -2.33,
+      "x_from": 5.0,
+      "x_to": 11.706,
+      "width": 3.353,
+      "wall_height": 3.048,
+      "cruise": 1.4,
+      "entrance_x": 11.706,
+      "banner_colour": "green",
+      "roof": true,
+      "banners": [
+        {
+          "mount": "top",
+          "end": "start",
+          "colour": "blue",
+          "centre": [
+            4.95,
+            -2.327,
+            3.3
+          ],
+          "normal": [
+            -1,
+            0,
+            0
+          ],
+          "width": 3.5,
+          "height": 0.305
+        },
+        {
+          "mount": "ground",
+          "end": "start",
+          "colour": "blue",
+          "centre": [
+            3.5,
+            -2.327,
+            0.008
+          ],
+          "normal": [
+            0,
+            0,
+            1
+          ],
+          "width": 3.5,
+          "height": 0.305
+        },
+        {
+          "mount": "top",
+          "end": "zone",
+          "colour": "green",
+          "centre": [
+            11.756,
+            -2.327,
+            3.3
+          ],
+          "normal": [
+            1,
+            0,
+            0
+          ],
+          "width": 3.5,
+          "height": 0.305
+        },
+        {
+          "mount": "ground",
+          "end": "zone",
+          "colour": "green",
+          "centre": [
+            13.206,
+            -2.327,
+            0.008
+          ],
+          "normal": [
+            0,
+            0,
+            1
+          ],
+          "width": 3.5,
+          "height": 0.305
+        }
+      ],
+      "obstacles": [
+        {
+          "kind": "standing",
+          "x": 6.56,
+          "y": -3.47,
+          "z": 0.914,
+          "size_x": 0.5,
+          "size_y": 1.067,
+          "size_z": 1.829,
+          "parts": [
+            {
+              "x": 6.56,
+              "y": -3.47,
+              "z": 0.9144,
+              "size_x": 0.5,
+              "size_y": 1.0668,
+              "size_z": 1.8288
+            }
+          ]
+        },
+        {
+          "kind": "hanging",
+          "x": 8.37,
+          "y": -1.38,
+          "z": 2.134,
+          "size_x": 0.5,
+          "size_y": 1.067,
+          "size_z": 1.829,
+          "parts": [
+            {
+              "x": 8.37,
+              "y": -1.384,
+              "z": 2.1336,
+              "size_x": 0.5,
+              "size_y": 1.0668,
+              "size_z": 1.8288
+            }
+          ]
+        },
+        {
+          "kind": "standing",
+          "x": 10.16,
+          "y": -3.47,
+          "z": 0.914,
+          "size_x": 0.5,
+          "size_y": 1.067,
+          "size_z": 1.829,
+          "parts": [
+            {
+              "x": 10.16,
+              "y": -3.47,
+              "z": 0.9144,
+              "size_x": 0.5,
+              "size_y": 1.0668,
+              "size_z": 1.8288
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "delivery_zone": {
+    "x_from": 11.706,
+    "x_to": 51.706,
+    "y_from": -15.0,
+    "y_to": 15.0
+  },
+  "red_zones": [
+    {
+      "x": 34.756,
+      "y": -0.54,
+      "size_x": 3.048,
+      "size_y": 3.048,
+      "x_from": 33.232,
+      "x_to": 36.28,
+      "y_from": -2.064,
+      "y_to": 0.984
+    }
+  ],
+  "delivery_qrs": [
+    {
+      "name": "qr_0",
+      "x": 27.05,
+      "y": -11.73,
+      "size": 1.0,
+      "payload": "AEROTHON26-HOTEL-4111",
+      "modules": 25,
+      "target": true
+    },
+    {
+      "name": "qr_1",
+      "x": 20.42,
+      "y": -1.45,
+      "size": 1.0,
+      "payload": "AEROTHON26-KILO-4025",
+      "modules": 21,
+      "target": false
+    },
+    {
+      "name": "qr_2",
+      "x": 41.65,
+      "y": -1.43,
+      "size": 1.0,
+      "payload": "AEROTHON26-LIMA-9387",
+      "modules": 21,
+      "target": false
+    },
+    {
+      "name": "qr_3",
+      "x": 30.49,
+      "y": -5.08,
+      "size": 1.0,
+      "payload": "AEROTHON26-DELTA-8794",
+      "modules": 25,
+      "target": false
+    },
+    {
+      "name": "qr_4",
+      "x": 35.82,
+      "y": -9.68,
+      "size": 1.0,
+      "payload": "AEROTHON26-ECHO-4050",
+      "modules": 21,
+      "target": false
+    }
+  ],
+  "target": "qr_0"
+}

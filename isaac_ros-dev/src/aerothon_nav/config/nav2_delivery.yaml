@@ -1,0 +1,256 @@
+# Nav2 for the DELIVERY ZONE (aerothon_nav delivery_nav.launch.py, namespace `delivery`). Everything in `odom`
+# (PX4's estimate). The map is /delivery/map from delivery_mapper: -1 unexplored, 0 explored, 100 red zone (+1.5 m)
+# or zone boundary. Planner NavFn A* (allow_unknown: frontier goals lie at the edge of the unknown), controller
+# MPPI omni, faster than in the corridors (open zone at 10 m). Velocity -> /delivery/cmd_vel -> offboard_bridge.
+# The corridor Nav2 (nav2_corridor.yaml) is a separate instance and is not touched.
+
+bt_navigator:
+  ros__parameters:
+    global_frame: odom
+    robot_base_frame: base_link
+    odom_topic: /nav/odom
+    bt_loop_duration: 10
+    default_server_timeout: 20000       # ms for Nav2's own servers to acknowledge a BT action: at 20, and still at
+    #                                    1000, actions timed out on the loaded Jetson sim and every goal aborted
+    # default navigate-to-pose tree (replanning + recovery)
+    plugin_lib_names:
+      - nav2_compute_path_to_pose_action_bt_node
+      - nav2_compute_path_through_poses_action_bt_node
+      - nav2_smooth_path_action_bt_node
+      - nav2_follow_path_action_bt_node
+      - nav2_spin_action_bt_node
+      - nav2_wait_action_bt_node
+      - nav2_assisted_teleop_action_bt_node
+      - nav2_back_up_action_bt_node
+      - nav2_drive_on_heading_bt_node
+      - nav2_clear_costmap_service_bt_node
+      - nav2_is_stuck_condition_bt_node
+      - nav2_goal_reached_condition_bt_node
+      - nav2_goal_updated_condition_bt_node
+      - nav2_globally_updated_goal_condition_bt_node
+      - nav2_is_path_valid_condition_bt_node
+      - nav2_initial_pose_received_condition_bt_node
+      - nav2_reinitialize_global_localization_service_bt_node
+      - nav2_rate_controller_bt_node
+      - nav2_distance_controller_bt_node
+      - nav2_speed_controller_bt_node
+      - nav2_truncate_path_action_bt_node
+      - nav2_truncate_path_local_action_bt_node
+      - nav2_goal_updater_node_bt_node
+      - nav2_recovery_node_bt_node
+      - nav2_pipeline_sequence_bt_node
+      - nav2_round_robin_node_bt_node
+      - nav2_transform_available_condition_bt_node
+      - nav2_time_expired_condition_bt_node
+      - nav2_path_expiring_timer_condition
+      - nav2_distance_traveled_condition_bt_node
+      - nav2_single_trigger_bt_node
+      - nav2_goal_updated_controller_bt_node
+      - nav2_is_battery_low_condition_bt_node
+      - nav2_navigate_through_poses_action_bt_node
+      - nav2_navigate_to_pose_action_bt_node
+      - nav2_remove_passed_goals_action_bt_node
+      - nav2_planner_selector_bt_node
+      - nav2_controller_selector_bt_node
+      - nav2_goal_checker_selector_bt_node
+      - nav2_controller_cancel_bt_node
+      - nav2_path_longer_on_approach_bt_node
+      - nav2_wait_cancel_bt_node
+      - nav2_spin_cancel_bt_node
+      - nav2_back_up_cancel_bt_node
+      - nav2_assisted_teleop_cancel_bt_node
+      - nav2_drive_on_heading_cancel_bt_node
+      - nav2_is_battery_charging_condition_bt_node
+
+controller_server:
+  ros__parameters:
+    controller_frequency: 20.0
+    min_x_velocity_threshold: 0.001
+    min_y_velocity_threshold: 0.001
+    min_theta_velocity_threshold: 0.001
+    failure_tolerance: 0.3
+    progress_checker_plugin: "progress_checker"
+    goal_checker_plugins: ["general_goal_checker"]
+    controller_plugins: ["FollowPath"]
+    odom_topic: /nav/odom
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"
+      required_movement_radius: 0.5
+      movement_time_allowance: 90.0
+    general_goal_checker:
+      plugin: "nav2_controller::SimpleGoalChecker"
+      stateful: True
+      xy_goal_tolerance: 0.75
+      yaw_goal_tolerance: 3.2          # heading at a frontier doesn't matter
+    FollowPath:
+      plugin: "nav2_mppi_controller::MPPIController"
+      motion_model: "Omni"
+      time_steps: 56                   # x model_dt = 2.8 s horizon
+      model_dt: 0.05                   # = 1 / controller_frequency
+      batch_size: 2000
+      iteration_count: 1
+      vx_std: 0.5                      # 0.2: on a clear straight 27 m sweep lane MPPI never got past 0.6 m/s of the
+      vy_std: 0.5                      # 1.5 allowed (1 iteration per cycle, missing 20 Hz under load, 2026-10-22)
+      wz_std: 0.4
+      # speed caps: the drone follows a command ~0.85 s late (PX4 velocity loop + tilt, measured), and
+      # MPPI (Humble) plans as if instantly - overshoot ~ speed x lag clipped slalom corners at 1.0 / 0.6 / 1.2
+      vx_max: 2.5                      # the fisheye reads ~2.5 m out at 2.4 m height: a QR is in view ~3 s at 1.5 m/s
+      vx_min: 0.0                      # (~9 decodes at 3 Hz); one read in passing is flown back to (frontier_explorer)
+      vy_max: 2.5                      # omni: the sweep lanes are often flown sideways (0.72 m/s at vy_max 1.0)
+      wz_max: 1.0
+      temperature: 0.3
+      gamma: 0.015
+      prune_distance: 2.0
+      transform_tolerance: 0.3
+      reset_period: 1.0
+      regenerate_noises: false
+      visualize: false
+      critics: ["ConstraintCritic", "CostCritic", "GoalCritic", "GoalAngleCritic", "PathAlignCritic",
+                "PathFollowCritic", "PathAngleCritic", "PreferForwardCritic"]
+      ConstraintCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 4.0
+      CostCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0               # 3.81 (Nav2 default) passed obstacles at 0.50-0.55 m centre clearance
+        critical_cost: 300.0
+        consider_footprint: true       # the square drone in a narrow corridor: check its outline, not a circle
+        collision_cost: 1000000.0
+        near_goal_distance: 1.0
+        trajectory_point_step: 2
+      GoalCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        threshold_to_consider: 1.4
+      GoalAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 0.0               # heading at the (rolling) goal doesn't matter
+        threshold_to_consider: 0.5
+      PathAlignCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 14.0
+        max_path_occupancy_ratio: 0.05
+        trajectory_point_step: 4
+        threshold_to_consider: 0.5
+        offset_from_furthest: 20
+        use_path_orientations: false
+      PathFollowCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        offset_from_furthest: 5
+        threshold_to_consider: 1.4
+      PathAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 2.0
+        offset_from_furthest: 4
+        threshold_to_consider: 0.5
+        max_angle_to_furthest: 1.0
+        forward_preference: true
+      PreferForwardCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        threshold_to_consider: 0.5
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      update_frequency: 5.0
+      publish_frequency: 2.0
+      global_frame: odom
+      robot_base_frame: base_link
+      rolling_window: true
+      width: 12
+      height: 12
+      resolution: 0.25
+      footprint: "[[0.43, 0.43], [0.43, -0.43], [-0.43, -0.43], [-0.43, 0.43]]"   # 847 mm prop tip to tip
+      transform_tolerance: 0.3
+      track_unknown_space: false       # unexplored = FREE: as NO_INFORMATION NavFn (allow_unknown) costs it 253 -
+      #                                  every sweep leg flew back through explored ground, 20 m round the red
+      #                                  zone instead of straight into the unexplored (2026-10-24 sim)
+      plugins: ["static_layer", "inflation_layer"]
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_topic: /delivery/map
+        map_subscribe_transient_local: True
+        subscribe_to_updates: False
+        trinary_costmap: False         # delivery_mapper's rejected QRs (reject_cost 90) = expensive, not lethal
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 2.0
+        inflation_radius: 1.0          # beyond the 1.5 m red margin already in the map
+      always_send_full_costmap: True
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      update_frequency: 2.0
+      publish_frequency: 1.0
+      global_frame: odom
+      robot_base_frame: base_link
+      rolling_window: false            # the static layer sizes it from /delivery/map
+      resolution: 0.25
+      footprint: "[[0.43, 0.43], [0.43, -0.43], [-0.43, -0.43], [-0.43, 0.43]]"   # 847 mm prop tip to tip
+      transform_tolerance: 0.3
+      track_unknown_space: false       # unexplored = FREE: as NO_INFORMATION NavFn (allow_unknown) costs it 253 -
+      #                                  every sweep leg flew back through explored ground, 20 m round the red
+      #                                  zone instead of straight into the unexplored (2026-10-24 sim)
+      plugins: ["static_layer", "inflation_layer"]
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_topic: /delivery/map
+        map_subscribe_transient_local: True
+        subscribe_to_updates: False
+        trinary_costmap: False         # delivery_mapper's rejected QRs (reject_cost 90) = expensive, not lethal
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 2.0
+        inflation_radius: 1.0
+      always_send_full_costmap: True
+
+planner_server:
+  ros__parameters:
+    expected_planner_frequency: 1.0
+    planner_plugins: ["GridBased"]
+    GridBased:
+      plugin: "nav2_navfn_planner/NavfnPlanner"
+      tolerance: 0.5
+      use_astar: true
+      allow_unknown: true
+
+behavior_server:
+  ros__parameters:
+    costmap_topic: local_costmap/costmap_raw
+    footprint_topic: local_costmap/published_footprint
+    cycle_frequency: 10.0
+    behavior_plugins: ["spin", "backup", "wait"]
+    spin:
+      plugin: "nav2_behaviors/Spin"
+    backup:
+      plugin: "nav2_behaviors/BackUp"
+    wait:
+      plugin: "nav2_behaviors/Wait"
+    global_frame: odom
+    robot_base_frame: base_link
+    transform_tolerance: 0.3
+
+velocity_smoother:
+  ros__parameters:
+    smoothing_frequency: 20.0
+    scale_velocities: False
+    feedback: "OPEN_LOOP"
+    max_velocity: [2.5, 2.5, 1.0]   # 2.5 m/s (rules: <= 10 km/h = 2.78): a QR is still ~2.5 s in view at 10 m
+    min_velocity: [0.0, -1.5, -1.0]
+    max_accel: [2.5, 2.5, 2.0]
+    max_decel: [-2.5, -2.5, -2.0]
+    odom_topic: "/nav/odom"
+    odom_duration: 0.1
+    deadband_velocity: [0.0, 0.0, 0.0]
+    velocity_timeout: 1.0

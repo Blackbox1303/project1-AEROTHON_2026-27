@@ -1,0 +1,330 @@
+{
+  "frame": "world ENU, spawn at the origin facing +x",
+  "seed": 0,
+  "start_qr": {
+    "name": "qr_start",
+    "x": 1.5,
+    "y": 0.0,
+    "size": 1.5,
+    "payload": "AEROTHON26-LIMA-7634",
+    "modules": 21
+  },
+  "course": "v2",
+  "corridors": [
+    {
+      "lap": "forward",
+      "centre_y": 1.5,
+      "x_from": 5.0,
+      "x_to": 15.0,
+      "width": 1.7,
+      "wall_height": 2.74,
+      "entrance_x": 5.0,
+      "banner_colour": "green",
+      "banners": [
+        {
+          "mount": "top",
+          "centre": [
+            4.95,
+            1.5,
+            2.89
+          ],
+          "normal": [
+            -1,
+            0,
+            0
+          ],
+          "width": 2.0,
+          "height": 0.3
+        },
+        {
+          "mount": "ground",
+          "centre": [
+            3.5,
+            1.5,
+            0.008
+          ],
+          "normal": [
+            0,
+            0,
+            1
+          ],
+          "width": 2.0,
+          "height": 0.6
+        }
+      ],
+      "obstacles": []
+    },
+    {
+      "lap": "return",
+      "centre_y": -1.55,
+      "x_from": 5.0,
+      "x_to": 15.0,
+      "width": 1.8,
+      "wall_height": 2.74,
+      "entrance_x": 15.0,
+      "banner_colour": "orange",
+      "banners": [
+        {
+          "mount": "top",
+          "centre": [
+            15.05,
+            -1.55,
+            2.89
+          ],
+          "normal": [
+            1,
+            0,
+            0
+          ],
+          "width": 2.1,
+          "height": 0.3
+        },
+        {
+          "mount": "ground",
+          "centre": [
+            16.5,
+            -1.55,
+            0.008
+          ],
+          "normal": [
+            0,
+            0,
+            1
+          ],
+          "width": 2.1,
+          "height": 0.6
+        }
+      ],
+      "obstacles": [
+        {
+          "kind": "hanging",
+          "x": 7.0,
+          "y": -1.08,
+          "z": 1.93,
+          "size_x": 0.27,
+          "size_y": 0.65,
+          "size_z": 1.62,
+          "parts": [
+            {
+              "x": 7.0,
+              "y": -1.075,
+              "z": 1.5,
+              "size_x": 0.27,
+              "size_y": 0.65,
+              "size_z": 0.76
+            },
+            {
+              "x": 7.0,
+              "y": -1.075,
+              "z": 2.31,
+              "size_x": 0.04,
+              "size_y": 0.04,
+              "size_z": 0.86
+            }
+          ]
+        },
+        {
+          "kind": "window",
+          "x": 9.19,
+          "y": -1.55,
+          "z": 1.37,
+          "size_x": 0.39,
+          "size_y": 1.8,
+          "size_z": 2.74,
+          "parts": [
+            {
+              "x": 9.19,
+              "y": -2.405,
+              "z": 1.37,
+              "size_x": 0.39,
+              "size_y": 0.09,
+              "size_z": 2.74
+            },
+            {
+              "x": 9.19,
+              "y": -1.025,
+              "z": 1.37,
+              "size_x": 0.39,
+              "size_y": 0.75,
+              "size_z": 2.74
+            },
+            {
+              "x": 9.19,
+              "y": -1.88,
+              "z": 0.36,
+              "size_x": 0.39,
+              "size_y": 0.96,
+              "size_z": 0.72
+            },
+            {
+              "x": 9.19,
+              "y": -1.88,
+              "z": 2.185,
+              "size_x": 0.39,
+              "size_y": 0.96,
+              "size_z": 1.11
+            }
+          ],
+          "opening": {
+            "y": -1.88,
+            "z_bottom": 0.72,
+            "width": 0.96,
+            "height": 0.91
+          }
+        },
+        {
+          "kind": "hanging",
+          "x": 10.94,
+          "y": -1.1,
+          "z": 1.965,
+          "size_x": 0.34,
+          "size_y": 0.7,
+          "size_z": 1.55,
+          "parts": [
+            {
+              "x": 10.94,
+              "y": -1.1,
+              "z": 1.53,
+              "size_x": 0.34,
+              "size_y": 0.7,
+              "size_z": 0.68
+            },
+            {
+              "x": 10.94,
+              "y": -1.1,
+              "z": 2.305,
+              "size_x": 0.04,
+              "size_y": 0.04,
+              "size_z": 0.87
+            }
+          ]
+        },
+        {
+          "kind": "window",
+          "x": 12.9,
+          "y": -1.55,
+          "z": 1.37,
+          "size_x": 0.39,
+          "size_y": 1.8,
+          "size_z": 2.74,
+          "parts": [
+            {
+              "x": 12.9,
+              "y": -2.12,
+              "z": 1.37,
+              "size_x": 0.39,
+              "size_y": 0.66,
+              "size_z": 2.74
+            },
+            {
+              "x": 12.9,
+              "y": -0.69,
+              "z": 1.37,
+              "size_x": 0.39,
+              "size_y": 0.08,
+              "size_z": 2.74
+            },
+            {
+              "x": 12.9,
+              "y": -1.26,
+              "z": 0.7,
+              "size_x": 0.39,
+              "size_y": 1.06,
+              "size_z": 1.4
+            },
+            {
+              "x": 12.9,
+              "y": -1.26,
+              "z": 2.54,
+              "size_x": 0.39,
+              "size_y": 1.06,
+              "size_z": 0.4
+            }
+          ],
+          "opening": {
+            "y": -1.26,
+            "z_bottom": 1.4,
+            "width": 1.06,
+            "height": 0.94
+          }
+        }
+      ]
+    }
+  ],
+  "delivery_zone": {
+    "x_from": 15.0,
+    "x_to": 55.0,
+    "y_from": -15.0,
+    "y_to": 15.0
+  },
+  "red_zones": [
+    {
+      "x": 42.9,
+      "y": 2.0,
+      "size_x": 10.0,
+      "size_y": 6.0,
+      "x_from": 37.9,
+      "x_to": 47.9,
+      "y_from": -1.0,
+      "y_to": 5.0
+    },
+    {
+      "x": 30.0,
+      "y": 4.5,
+      "size_x": 4.0,
+      "size_y": 3.0,
+      "x_from": 28.0,
+      "x_to": 32.0,
+      "y_from": 3.0,
+      "y_to": 6.0
+    }
+  ],
+  "delivery_qrs": [
+    {
+      "name": "qr_0",
+      "x": 21.8,
+      "y": 10.9,
+      "size": 1.5,
+      "payload": "AEROTHON26-GOLF-8961",
+      "modules": 21,
+      "target": false
+    },
+    {
+      "name": "qr_1",
+      "x": 49.4,
+      "y": 10.9,
+      "size": 1.5,
+      "payload": "AEROTHON26-LIMA-7634",
+      "modules": 21,
+      "target": true
+    },
+    {
+      "name": "qr_2",
+      "x": 23.3,
+      "y": -3.0,
+      "size": 1.5,
+      "payload": "AEROTHON26-ALPHA-5969",
+      "modules": 25,
+      "target": false
+    },
+    {
+      "name": "qr_3",
+      "x": 32.9,
+      "y": -11.6,
+      "size": 1.5,
+      "payload": "AEROTHON26-CHARLIE-8808",
+      "modules": 25,
+      "target": false
+    },
+    {
+      "name": "qr_4",
+      "x": 43.4,
+      "y": -8.0,
+      "size": 1.5,
+      "payload": "AEROTHON26-ECHO-6866",
+      "modules": 21,
+      "target": false
+    }
+  ],
+  "target": "qr_1"
+}

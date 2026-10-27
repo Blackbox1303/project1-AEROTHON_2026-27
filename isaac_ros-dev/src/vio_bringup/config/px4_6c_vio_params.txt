@@ -1,0 +1,31 @@
+# Pixhawk 6C Mini (board px4_fmu-v6c), current PX4 (names checked against PX4-Autopilot
+# v1.18.0-beta1; same EKF2 names as the SITL in sim/px4_sim_params.txt).
+# VIO -> EKF2 as external-vision BODY-frame velocity (vio_to_px4), alongside GPS.
+# NOT applied automatically: set with QGroundControl or
+#   ros2 run mavros mav param set NAME VALUE
+# with props off, then reboot. Flash the same PX4 release you develop the sim against.
+
+# --- External vision: 3D velocity only (bit 2). Position (0,1) and yaw (3) stay off: VIO's
+#     world frame is not aligned to north, body velocity needs no alignment.
+EKF2_EV_CTRL 4
+# noise from EKF2_EVV_NOISE, not from the message covariance
+EKF2_EV_NOISE_MD 1
+EKF2_EVV_NOISE 0.1
+# real stamps = image capture time mapped to PX4 time by MAVROS; tune from EV innovations (M7-2)
+EKF2_EV_DELAY 0
+# lever arm of the velocity source: vio_to_px4 reports imu_link = the flight controller
+EKF2_EV_POS_X 0
+EKF2_EV_POS_Y 0
+EKF2_EV_POS_Z 0
+# GPS stays on (default EKF2_GPS_CTRL 7 = lon/lat + alt + 3D vel); baro height (EKF2_HGT_REF default)
+
+# --- Companion computer (Jetson) on TELEM2 instead of USB. Uncomment when wiring the Jetson UART
+#     (MAVROS fcu_url:=/dev/ttyTHS1:921600 on the Jetson; check the port name there).
+# MAV_1_CONFIG 102        # MAVLink instance 1 on TELEM2 (/dev/ttyS3 on fmu-v6c)
+# MAV_1_MODE 2            # Onboard
+# SER_TEL2_BAUD 921600
+# MAV_1_RATE 0            # 0 = half the link's max; IMU rate is requested by imu_rate_setter
+
+# --- Data-link loss: decide for the competition (0 = no action). In SITL we use 0 because no
+#     ground station is connected; on the real drone keep a deliberate failsafe.
+# NAV_DLL_ACT 0

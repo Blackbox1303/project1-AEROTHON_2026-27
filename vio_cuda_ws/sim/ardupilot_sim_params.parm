@@ -1,0 +1,41 @@
+# ArduCopter 4.7.2 SITL parameters for the Gazebo competition sim (run_competition_ap.sh), loaded after ArduPilot's
+# copter.parm + gazebo-iris.parm. The eeprom is wiped on every start: THIS file is the source of truth, not QGC.
+# The real drone (Pixhawk 6C Mini) has its own file: src/vio_bringup/config/ardupilot_vio_params.parm.
+
+# Lock-step with Gazebo at 400 Hz (world step 2.5 ms, set by run_competition_ap.sh). The pre-arm check wants the IMU
+# sampled at >= 1.8 x the loop rate ("Gyro 0 rate 401Hz < loop rate*1.8 720Hz" at 400): loop 200 Hz. 800 Hz physics
+# would allow 400 but costs real-time factor on the Jetson (0.7-0.8 with Gazebo + SITL alone, 2026-10-27)
+SCHED_LOOP_RATE 200
+
+# No RC transmitter and no GCS heartbeat requirement in autonomous sim runs (PX4 sim: NAV_DLL_ACT 0)
+FS_THR_ENABLE 0
+FS_GCS_ENABLE 0
+
+# Telemetry streams on SERIAL0 (the UDP link to mavlink-router 14540). ArduPilot streams nothing unless asked;
+# MAVROS, the dashboard and QGC all read these. Rates in Hz.
+#   EXTRA1   ATTITUDE (MAVROS imu/data orientation, local_position/pose orientation)
+#   POSITION LOCAL_POSITION_NED, GLOBAL_POSITION_INT (local_position/*, global_position/global)
+#   RAW_SENS RAW_IMU, SCALED_PRESSURE (imu/data_raw)
+MAV1_EXTRA1 50
+MAV1_POSITION 30
+MAV1_RAW_SENS 50
+MAV1_EXT_STAT 2
+MAV1_EXTRA2 4
+MAV1_EXTRA3 2
+MAV1_RC_CHAN 1
+# ...and keep them: QGC on the Lenovo (via the router) sends REQUEST_DATA_STREAM with its own defaults (POSITION 3,
+# EXTRA1 10, RAW_SENS 2 seen 2026-10-27) - the offboard bridge then steered on 3 Hz poses. Bit 2: ignore those requests
+MAV1_OPTIONS 4
+
+# Payload drop: servo gripper on SERVO9 (MAV_CMD_DO_GRIPPER from the supervisor), simulated by SITL's servo gripper
+GRIP_ENABLE 1
+GRIP_TYPE 1
+GRIP_GRAB 1900
+GRIP_RELEASE 1100
+SERVO9_FUNCTION 28
+SIM_GRPS_ENABLE 1
+SIM_GRPS_PIN 9
+
+# gazebo-iris.parm's precision-landing / rangefinder test setup is not used here
+PLND_ENABLED 0
+RNGFND1_TYPE 0

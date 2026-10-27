@@ -1,0 +1,41 @@
+# ArduCopter 4.7.2 (Pixhawk 6C Mini): cuVSLAM VIO from the Jetson as EKF3 SOURCE SET 2 (indoors), set 1 untouched
+# (GPS + compass, outdoors). Names checked against the Copter-4.7.2 source (2026-10-27). NOT applied automatically:
+#   scripts/ardupilot_params.py vio_bringup/config/ardupilot_vio_params.parm            (dry run: current vs new)
+#   scripts/ardupilot_params.py vio_bringup/config/ardupilot_vio_params.parm --write    (props off, then reboot)
+#
+# This drone's serial ports (read 2026-10-27): SERIAL0 USB MAVLink, SERIAL1 TELEM1 ESC telemetry, SERIAL2 TELEM2 RC
+# receiver (CRSF/ELRS 420k), SERIAL3 GPS, SERIAL4 telemetry radio (MAVLink 57600), SERIAL7 2nd USB MAVLink. No UART is
+# free: the Jetson connects by USB (SERIAL0, already MAVLink -> /dev/ttyACM0 on the Jetson). Do NOT turn SERIAL2 into
+# MAVLink: that is the RC link.
+#
+# The feed: cuvslam.launch.py autopilot:=ardupilot -> vio_to_px4 -> /mavros/odometry/out -> MAVROS -> MAVLink ODOMETRY
+# (frame LOCAL_FRD / child BODY_FRD - ArduPilot drops any other frame) over USB.
+# Indoors, switch the EKF to source set 2 before arming: an RC switch (RCn_OPTION 90 = EKF Pos Source: low/mid/high
+# = set 1/2/3) or MAV_CMD_SET_EKF_SOURCE_SET (42007) param1 = 2.
+
+# --- Telemetry streams on the USB port (MAV1 = SERIAL0) for MAVROS on the Jetson: IMU for the obstacle scan, local
+#     position / velocity for odom_tf and the VIO consistency check. (Mission Planner on USB gets them too.)
+MAV1_RAW_SENS 20
+MAV1_EXT_STAT 2
+MAV1_POSITION 20
+MAV1_EXTRA1 30
+MAV1_EXTRA2 4
+MAV1_EXTRA3 2
+
+# --- Visual odometry over MAVLink
+VISO_TYPE 1
+# pose is reported for imu_link = the flight controller itself: no lever arm
+VISO_POS_X 0
+VISO_POS_Y 0
+VISO_POS_Z 0
+# camera capture -> ODOMETRY at the FC (cuVSLAM + MAVROS + USB), roughly
+VISO_DELAY_MS 50
+# 0 = take good or unknown quality (MAVROS sends 0); the bridge itself withholds bad frames
+VISO_QUAL_MIN 0
+
+# --- EKF3 source set 2 = indoors on VIO (ArduPilot's recommended ExternalNav setup: height from the barometer)
+EK3_SRC2_POSXY 6
+EK3_SRC2_VELXY 6
+EK3_SRC2_POSZ 1
+EK3_SRC2_VELZ 6
+EK3_SRC2_YAW 6

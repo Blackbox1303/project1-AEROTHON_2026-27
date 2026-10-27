@@ -1,0 +1,9 @@
+<?xml version='1.0'?>
+<!-- Streams the running Gazebo scene over a websocket for viewing in a browser (sim/web_gui.sh). -->
+<gz version='1.0'>
+  <plugin name='gz::launch::WebsocketServer' filename='gz-launch-websocket-server'>
+    <port>9002</port>
+    <publication_hz>20</publication_hz>
+    <max_connections>4</max_connections>
+  </plugin>
+</gz>

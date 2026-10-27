@@ -1,0 +1,13 @@
+# Course v2 + timings for a sim much slower than real time (Jetson running Gazebo, PX4 and the whole stack:
+# ~0.15-0.3x, 2026-10-20). DirectFlight holds and stall timers run on wall time while sensors pace on sim time.
+#   ros2 launch aerothon_nav container_all.launch.py vslam:=false course:=v2_slowsim
+entry_align:
+  ros__parameters:
+    look_time: 5.0          # s per banner-search heading (1.5: one detection per heading, needs 2)
+    look_time_axis: 3.0     # s of depth clouds per wall-fit heading (2.5: too few clouds for a wall pair at v2's 1.7 m
+    #                         corridors; v3 tunnels are 3.35 m wide and the fits had 1200+ points: 3 is plenty)
+corridor_nav:
+  ros__parameters:
+    stall_time: 180.0       # s (sim) without 0.3 m of progress before FAILED: 30 failed a run whose sim had
+    #                         slowed to 0.015x (2026-10-21) - let the mission run
+    stage_timeout: 300.0    # s per STAGE / DESCEND leg (60 ran out mid-leg)

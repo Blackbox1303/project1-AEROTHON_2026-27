@@ -1,0 +1,32 @@
+image_width: 3280
+image_height: 2464
+camera_name: arducam_imx219_fisheye
+distortion_model: equidistant
+camera_matrix:
+  rows: 3
+  cols: 3
+  data:
+  - 701.8058726843771
+  - 0.0
+  - 1725.216909856584
+  - 0.0
+  - 705.3441217732658
+  - 1240.208787942949
+  - 0.0
+  - 0.0
+  - 1.0
+distortion_coefficients:
+  rows: 1
+  cols: 4
+  data:
+  - 0.12214127003924949
+  - -0.025061845745906034
+  - -0.032114659403958835
+  - 0.015287146309879715
+rms_px: 1.638
+views: 8
+dropped_ill_conditioned: []
+dropped_high_rms_outliers: []
+board: 10x7
+focal_scale_applied: 1.046
+date: 2026-10-26 20:40

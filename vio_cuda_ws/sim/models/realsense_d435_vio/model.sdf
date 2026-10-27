@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  RealSense D435 as this project uses it (corrected copy of PX4's realsense_d435):
+  - IR stereo pair (infra1 / infra2, 50 mm baseline, 87 deg HFOV, global shutter) - cuVSLAM input
+  - depth aligned to infra1, 640x360 like the real config (87 x 56 deg), with noise
+  - no IMU: the D435 has none (that is the D435i); the project uses the Pixhawk IMU
+  - no colour camera: the project never enables it
+  Frame names match realsense-ros, so the ROS nodes run unchanged against the sim.
+  Mesh and textures come from PX4's realsense_d435 model.
+-->
+<sdf version='1.9'>
+  <model name='realsense_d435_vio'>
+    <pose>0 0 0 0 0 0</pose>
+    <self_collide>false</self_collide>
+    <static>false</static>
+    <link name="camera_link">
+      <inertial>
+        <mass>0.072</mass>
+        <inertia>
+          <ixx>0.00004</ixx><ixy>0</ixy><ixz>0</ixz>
+          <iyy>0.00001</iyy><iyz>0</iyz><izz>0.00004</izz>
+        </inertia>
+      </inertial>
+      <visual name="visual">
+        <geometry>
+          <mesh>
+            <uri>model://realsense_d435/meshes/realsense.dae</uri>
+            <submesh><name>RealSense</name><center>false</center></submesh>
+          </mesh>
+        </geometry>
+        <material>
+          <diffuse>1.0 1.0 1.0</diffuse>
+          <specular>1.0 1.0 1.0</specular>
+          <pbr>
+            <metal>
+              <albedo_map>model://realsense_d435/materials/textures/RealSense_Albedo.png</albedo_map>
+              <normal_map>model://realsense_d435/materials/textures/RealSense_Normal.png</normal_map>
+              <metalness_map>model://realsense_d435/materials/textures/RealSense_Metalness.png</metalness_map>
+              <roughness_map>model://realsense_d435/materials/textures/RealSense_Roughness.png</roughness_map>
+            </metal>
+          </pbr>
+        </material>
+      </visual>
+      <collision name="collision">
+        <geometry><box><size>0.025 0.090 0.025</size></box></geometry>
+      </collision>
+
+      <!-- RGB imager (the D435i's colour camera: 69.4 x 42.5 deg), 15 mm left of infra1 - the banner camera since
+           the Arducam looks straight down (2026-10-25). 640 x 360 at 10 Hz to keep the Jetson's render load down -->
+      <sensor name="color" type="camera">
+        <gz_frame_id>camera_color_optical_frame</gz_frame_id>
+        <pose>0.0125 0.015 0 0 0 0</pose>
+        <camera>
+          <horizontal_fov>1.2112</horizontal_fov>
+          <image><width>640</width><height>360</height><format>R8G8B8</format></image>
+          <clip><near>0.1</near><far>100</far></clip>
+          <noise><type>gaussian</type><mean>0.0</mean><stddev>0.005</stddev></noise>
+        </camera>
+        <always_on>1</always_on>
+        <update_rate>10</update_rate>
+        <visualize>false</visualize>
+        <topic>/camera/color/image_raw</topic>
+      </sensor>
+
+      <!-- left IR imager: origin of the depth frame on the real camera -->
+      <sensor name="infra1" type="camera">
+        <gz_frame_id>camera_infra1_optical_frame</gz_frame_id>
+        <pose>0.0125 0 0 0 0 0</pose>
+        <camera>
+          <horizontal_fov>1.5184</horizontal_fov>
+          <image><width>640</width><height>360</height><format>L8</format></image>
+          <clip><near>0.1</near><far>100</far></clip>
+          <noise><type>gaussian</type><mean>0.0</mean><stddev>0.007</stddev></noise>
+        </camera>
+        <always_on>1</always_on>
+        <update_rate>15</update_rate>
+        <visualize>false</visualize>
+        <topic>/camera/infra1/image_rect_raw</topic>
+      </sensor>
+
+      <!-- right IR imager, 50 mm to the right (-y in camera_link) -->
+      <sensor name="infra2" type="camera">
+        <gz_frame_id>camera_infra2_optical_frame</gz_frame_id>
+        <pose>0.0125 -0.05 0 0 0 0</pose>
+        <camera>
+          <horizontal_fov>1.5184</horizontal_fov>
+          <image><width>640</width><height>360</height><format>L8</format></image>
+          <clip><near>0.1</near><far>100</far></clip>
+          <noise><type>gaussian</type><mean>0.0</mean><stddev>0.007</stddev></noise>
+        </camera>
+        <always_on>1</always_on>
+        <update_rate>15</update_rate>
+        <visualize>false</visualize>
+        <topic>/camera/infra2/image_rect_raw</topic>
+      </sensor>
+
+      <!-- depth, aligned to infra1. 30 Hz is all obstacle_scan uses. Real D435 depth
+           error grows with distance (~2 % at 2 m); gz only offers constant noise. -->
+      <sensor name="depth" type="depth_camera">
+        <gz_frame_id>camera_depth_optical_frame</gz_frame_id>
+        <pose>0.0125 0 0 0 0 0</pose>
+        <camera>
+          <horizontal_fov>1.5184</horizontal_fov>
+          <image><width>320</width><height>180</height><format>R_FLOAT32</format></image>
+          <clip><near>0.105</near><far>10.0</far></clip>
+          <noise><type>gaussian</type><mean>0.0</mean><stddev>0.01</stddev></noise>
+        </camera>
+        <always_on>1</always_on>
+        <update_rate>10</update_rate>
+        <visualize>false</visualize>
+        <topic>/camera/depth/image_rect_raw</topic>
+      </sensor>
+      <gravity>true</gravity>
+    </link>
+  </model>
+</sdf>

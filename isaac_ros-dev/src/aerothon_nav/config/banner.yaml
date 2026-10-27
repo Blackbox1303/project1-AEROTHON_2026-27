@@ -1,0 +1,28 @@
+# banner_detector (aerothon_nav/banner_detector.py). HSV in OpenCV units (H 0-180, S/V 0-255).
+# Values measured on the sim banners; RETUNE ON THE DAY with the real banner in the real light:
+#   ros2 run rqt_image_view rqt_image_view /nav/banner/debug   (magenta = colour mask, yellow = pick)
+#   ros2 param set /banner_detector green.h "[50, 85]"          (live; then copy the values here)
+banner_detector:
+  ros__parameters:
+    rate_hz: 5.0
+    # the forward D435 colour camera (the real D435i's RGB) since the Arducam looks straight down (2026-10-25): a
+    # banner 5 m ahead is 65 deg off its axis, the roof banner above it
+    image_topic: /camera/color/image_raw
+    info_topic: /camera/color/camera_info
+    downscale: 2            # 640 x 360 -> 320 x 180 (the 1640 px Arducam used 4)
+    green.h: [55, 82]
+    green.s_min: 160
+    green.v_min: 30
+    orange.h: [7, 24]
+    orange.s_min: 160
+    orange.v_min: 50
+    blue.h: [100, 125]      # v3: blue = the tunnel NOT to fly into (entry tunnel seen from the zone, exit from the start)
+    blue.s_min: 160
+    blue.v_min: 30
+    white.s_max: 100        # letters: less saturated than this ...
+    text_v_ratio: 0.85      # ... and at least this x the banner colour's brightness (grey in shade)
+    min_area: 40            # px at 1/downscale (a 3.5 m banner 15 m off: ~54 x 5 px)
+    min_solidity: 0.75
+    white_min: 0.03
+    white_max: 0.5
+    min_aspect: 1.5

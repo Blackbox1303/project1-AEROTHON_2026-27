@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tunnel SLAM</title>
+<style>
+  :root { --bg:#0f1318; --panel:#171d24; --line:#2a333d; --text:#dfe6ee; --dim:#8b98a6; --ok:#3fbf6f; --bad:#e5484d;
+          --warn:#f1a33b; --acc:#4aa3ff; --amber:#ffb347; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:13px/1.4 system-ui, sans-serif; }
+  header { display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding:8px 12px; background:var(--panel);
+           border-bottom:1px solid var(--line); position:sticky; top:0; z-index:5; }
+  header h1 { font-size:15px; margin:0 8px 0 0; font-weight:600; }
+  .pill { padding:3px 8px; border-radius:10px; background:#222b35; color:var(--dim); white-space:nowrap; font-size:12px; }
+  .pill.ok { background:#163323; color:var(--ok); }
+  .pill.bad { background:#3a1517; color:var(--bad); }
+  .pill.warn { background:#3a2a12; color:var(--warn); }
+  .bar { display:flex; flex-wrap:wrap; gap:6px; align-items:center; padding:8px 12px; border-bottom:1px solid var(--line); }
+  button { background:#26313d; color:var(--text); border:1px solid var(--line); border-radius:5px; padding:7px 14px;
+           cursor:pointer; font:inherit; font-weight:600; }
+  button:hover { border-color:var(--acc); }
+  button.go { background:#1d5c36; border-color:#2b8a50; }
+  button.stop { background:#6b1f22; border-color:#a3343a; }
+  button.on { background:#1d4f6b; border-color:var(--acc); }
+  .sep { width:1px; align-self:stretch; background:var(--line); margin:0 4px; }
+  #msg { margin-left:8px; color:var(--dim); }
+  main { display:grid; grid-template-columns: minmax(0, 1fr) 420px; gap:10px; padding:10px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px; min-width:0; }
+  .card + .card { margin-top:10px; }
+  .card h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--dim); margin:0 0 8px;
+             display:flex; justify-content:space-between; align-items:center; gap:8px; font-weight:600; }
+  canvas#map { width:100%; height:560px; background:#090d11; border-radius:6px; display:block; cursor:crosshair; }
+  .legend { display:flex; flex-wrap:wrap; gap:12px; color:var(--dim); margin-top:6px; font-size:12px; }
+  .legend i { display:inline-block; width:10px; height:10px; margin-right:4px; vertical-align:-1px; border-radius:2px; }
+  #cam { width:100%; border-radius:6px; background:#000; min-height:200px; max-height:320px; object-fit:contain; display:block; }
+  select { background:#11161c; color:var(--text); border:1px solid var(--line); border-radius:4px; padding:3px 6px;
+           font:inherit; text-transform:none; letter-spacing:0; }
+  .tiles { display:grid; grid-template-columns: repeat(3, 1fr); gap:6px; }
+  .tile { background:#11161c; border-radius:6px; padding:6px 8px; min-width:0; }
+  .tile b { display:block; font-size:14px; font-variant-numeric:tabular-nums; word-break:break-word; }
+  .tile span { color:var(--dim); font-size:11px; }
+  .checks div { display:flex; gap:8px; align-items:baseline; padding:3px 0; border-bottom:1px solid #1e2630; }
+  .checks .dot { width:8px; height:8px; border-radius:50%; flex:none; background:var(--bad); }
+  .checks .dot.ok { background:var(--ok); }
+  .checks .k { flex:1; } .checks .d { color:var(--dim); font-size:11px; text-align:right; }
+  @media (max-width: 1100px) { main { grid-template-columns: 1fr; } canvas#map { height:420px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Tunnel + SLAM</h1>
+  <span class="pill" id="p_stack">stack: -</span>
+  <span class="pill" id="p_scan">scan: -</span>
+  <span class="pill" id="p_slam">map: -</span>
+  <span class="pill" id="p_vio">VIO: -</span>
+  <span class="pill" id="p_px4">PX4: -</span>
+</header>
+
+<div class="bar">
+  <button class="go" onclick="post('stack_start')">Launch</button>
+  <button class="stop" onclick="post('stack_stop')">Stop</button>
+  <span class="sep"></span>
+  <button id="btn_rviz" onclick="post('rviz', {start: !(S && S.stack && S.stack.rviz)})">RViz</button>
+  <button id="btn_rtab" onclick="post('rtabmap', {start: !(S && S.stack && S.stack.rtabmap)})">RTAB-Map</button>
+  <span class="sep"></span>
+  <button onclick="post('save_map')" title="Costmaps (.pgm/.yaml), pose graph, 3D points, rtabmap.db -> runs/saved_tunnel_map and runs/maps/&lt;time&gt;">Save map</button>
+  <button onclick="post('sim_saved_start', {rviz: false})" title="Stops the live stack and flies a simulated drone through the saved map">Fly drone in sim</button>
+  <button onclick="post('sim_reset')">Reset sim</button>
+  <span id="msg"></span>
+</div>
+
+<main>
+  <div class="card">
+    <h2>
+      <span>Map</span>
+      <span style="font-weight:normal;text-transform:none;letter-spacing:0">scroll to zoom, drag to pan<span id="simhint"></span></span>
+    </h2>
+    <canvas id="map"></canvas>
+    <div class="legend">
+      <span><i style="background:#ffdc32"></i>walls / obstacles</span>
+      <span><i style="background:rgba(45,115,80,.7)"></i>free</span>
+      <span><i style="background:#00ff88"></i>depth scan</span>
+      <span><i style="background:#fff"></i>drone + VIO track</span>
+      <span><i style="background:var(--amber)"></i>PX4 estimate</span>
+      <span><i style="background:#3fd0d0"></i>sim planned path</span>
+    </div>
+  </div>
+
+  <div>
+    <div class="card">
+      <h2>
+        <span>Camera</span>
+        <select id="camsel" onchange="post('camera', {name: this.value})">
+          <option value="depth">Depth</option>
+          <option value="color">Colour</option>
+          <option value="infra1">IR left</option>
+        </select>
+      </h2>
+      <img id="cam" src="/camera.mjpg" alt="camera stream">
+    </div>
+
+    <div class="card">
+      <h2><span>Stats</span><span id="pts_badge" class="pill">0 3D pts</span></h2>
+      <div class="tiles" id="tiles"></div>
+    </div>
+
+    <div class="card">
+      <h2><span>PX4 position estimate</span></h2>
+      <div class="tiles" id="px4_tiles"></div>
+    </div>
+
+    <div class="card">
+      <h2><span>Checks</span></h2>
+      <div class="checks" id="checks"></div>
+    </div>
+  </div>
+</main>
+
+<script>
+const el = id => document.getElementById(id);
+let S = null, mapImg = new Image(), mapVer = -1;
+let view = {x: 0, y: 0, scale: 32, drag: false, lx: 0, ly: 0};
+
+async function post(what, body={}) {
+  el('msg').textContent = '...';
+  el('msg').style.color = 'var(--dim)';
+  try {
+    const r = await fetch('/api/' + what, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    const j = await r.json();
+    el('msg').textContent = j.message || '';
+    el('msg').style.color = j.ok ? 'var(--ok)' : 'var(--bad)';
+    return j;
+  } catch (e) {
+    el('msg').textContent = 'error: ' + e;
+    el('msg').style.color = 'var(--bad)';
+  }
+}
+
+// map: scroll to zoom, drag to pan, click = sim drone goal (sim mode)
+const cv = el('map'), ctx = cv.getContext('2d');
+cv.addEventListener('wheel', e => {
+  e.preventDefault();
+  view.scale = Math.max(6, Math.min(150, view.scale * (e.deltaY < 0 ? 1.15 : 0.87)));
+  drawMap();
+});
+cv.addEventListener('mousedown', e => { view.drag = true; view.moved = false; view.lx = e.clientX; view.ly = e.clientY; });
+window.addEventListener('mouseup', e => {
+  if (view.drag && !view.moved && e.target === cv && S && S.stack && S.stack.sim_saved) {
+    const r = cv.getBoundingClientRect();
+    const wx = view.x + (e.clientX - r.left - cv.width / 2) / view.scale;
+    const wy = view.y - (e.clientY - r.top - cv.height / 2) / view.scale;
+    post('sim_navigate', {goal_x: wx, goal_y: wy, navigate: true});
+  }
+  view.drag = false;
+});
+window.addEventListener('mousemove', e => {
+  if (!view.drag) return;
+  if (Math.hypot(e.clientX - view.lx, e.clientY - view.ly) > 4) view.moved = true;
+  view.x -= (e.clientX - view.lx) / view.scale;
+  view.y += (e.clientY - view.ly) / view.scale;
+  view.lx = e.clientX; view.ly = e.clientY;
+  drawMap();
+});
+
+function w2s(x, y) {
+  return [cv.width / 2 + (x - view.x) * view.scale, cv.height / 2 - (y - view.y) * view.scale];
+}
+
+function polyline(pts, color, dash) {
+  if (!pts || pts.length < 2) return;
+  ctx.save();
+  ctx.strokeStyle = color; ctx.lineWidth = 1.8;
+  if (dash) ctx.setLineDash(dash);
+  ctx.beginPath();
+  pts.forEach(([x, y], i) => { const [sx, sy] = w2s(x, y); if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy); });
+  ctx.stroke();
+  ctx.restore();
+}
+
+function arrow(x, y, yaw, color, filled) {
+  const [sx, sy] = w2s(x, y);
+  ctx.save();
+  ctx.translate(sx, sy); ctx.rotate(-yaw);
+  ctx.beginPath();
+  ctx.moveTo(12, 0); ctx.lineTo(-8, -7); ctx.lineTo(-4, 0); ctx.lineTo(-8, 7); ctx.closePath();
+  if (filled) { ctx.fillStyle = color; ctx.fill(); } else { ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke(); }
+  ctx.restore();
+}
+
+function drawMap() {
+  if (cv.width !== cv.clientWidth || cv.height !== cv.clientHeight) {
+    cv.width = cv.clientWidth; cv.height = cv.clientHeight;
+  }
+  ctx.fillStyle = '#090d11';
+  ctx.fillRect(0, 0, cv.width, cv.height);
+
+  // 1 m grid (5 m when zoomed out)
+  const step = view.scale >= 20 ? 1 : 5;
+  const xMin = Math.floor(view.x - cv.width / 2 / view.scale), xMax = Math.ceil(view.x + cv.width / 2 / view.scale);
+  const yMin = Math.floor(view.y - cv.height / 2 / view.scale), yMax = Math.ceil(view.y + cv.height / 2 / view.scale);
+  for (let gx = Math.floor(xMin / step) * step; gx <= xMax; gx += step) {
+    const [sx] = w2s(gx, 0);
+    ctx.strokeStyle = gx === 0 ? '#2c3b4d' : '#141c24';
+    ctx.beginPath(); ctx.moveTo(sx, 0); ctx.lineTo(sx, cv.height); ctx.stroke();
+  }
+  for (let gy = Math.floor(yMin / step) * step; gy <= yMax; gy += step) {
+    const [, sy] = w2s(0, gy);
+    ctx.strokeStyle = gy === 0 ? '#2c3b4d' : '#141c24';
+    ctx.beginPath(); ctx.moveTo(0, sy); ctx.lineTo(cv.width, sy); ctx.stroke();
+  }
+  if (!S) return;
+
+  if (S.map && mapImg.complete && mapImg.naturalWidth) {
+    const [x0, yTop] = w2s(S.map.x0, S.map.y0 + S.map.h);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(mapImg, x0, yTop, S.map.w * view.scale, S.map.h * view.scale);
+  }
+
+  const [dx, dy, , dyaw] = S.pose_map || S.pose_odom || [0, 0, 0, 0];
+  const [dsx, dsy] = w2s(dx, dy);
+  if (S.scan && S.scan.ranges) {
+    const R = S.scan.ranges, a0 = S.scan.angle_min, da = S.scan.angle_inc;
+    ctx.strokeStyle = 'rgba(0, 255, 136, 0.22)';
+    ctx.fillStyle = '#00ff88';
+    for (let i = 0; i < R.length; i++) {
+      const r = R[i];
+      if (r === null || r <= 0) continue;
+      const a = dyaw + a0 + i * da;
+      const [hx, hy] = w2s(dx + r * Math.cos(a), dy + r * Math.sin(a));
+      ctx.beginPath(); ctx.moveTo(dsx, dsy); ctx.lineTo(hx, hy); ctx.stroke();
+      ctx.fillRect(hx - 1.5, hy - 1.5, 3, 3);
+    }
+  }
+
+  polyline(S.planned_path, '#3fd0d0', [8, 4]);
+  if (S.sim_goal && S.sim_goal.length >= 2) {
+    const [gx, gy] = w2s(S.sim_goal[0], S.sim_goal[1]);
+    ctx.strokeStyle = '#3fbf6f'; ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.arc(gx, gy, 8, 0, Math.PI * 2); ctx.stroke();
+  }
+
+  polyline(S.track, '#ffffff');
+  const px = S.px4 || {};
+  polyline(px.track, '#ffb347', [5, 3]);
+  if (px.odom && px.track && px.track.length) {
+    const [lx, ly] = px.track[px.track.length - 1];
+    arrow(lx, ly, px.odom[3] + ((S.slam_corr && S.slam_corr[2]) || 0) * Math.PI / 180, '#ffb347', false);
+  }
+  arrow(dx, dy, dyaw, '#ffffff', true);
+}
+
+const f2 = v => (v === null || v === undefined) ? '-' : v.toFixed(2);
+const f3 = v => v ? `${v[0].toFixed(2)}, ${v[1].toFixed(2)}, ${v[2].toFixed(2)}` : '-';
+const tilesHtml = rows => rows.map(([k, v]) => `<div class="tile"><b>${v}</b><span>${k}</span></div>`).join('');
+const setPill = (id, text, cls) => { el(id).textContent = text; el(id).className = 'pill ' + (cls || ''); };
+
+function updateUI(d) {
+  S = d;
+  const st = d.stack || {}, sc = d.scan, px = d.px4 || {}, mv = d.mavros || {};
+  const vioOk = (d.checks || []).some(c => c.name.startsWith('cuVSLAM') && c.ok);
+
+  setPill('p_stack', 'stack: ' + (st.sim_saved ? 'sim on saved map' : st.phase || '-'),
+          st.phase === 'ready' || st.sim_saved ? 'ok' : st.running ? 'warn' : '');
+  setPill('p_scan', sc ? `scan: ahead ${sc.front_dist ?? '-'} m` : 'scan: -',
+          sc ? (sc.min_dist !== null && sc.min_dist < 0.7 ? 'bad' : 'ok') : '');
+  setPill('p_slam', d.map ? `map: ${d.map.cells}` : 'map: waiting', d.map ? 'ok' : '');
+  setPill('p_vio', 'VIO: ' + (vioOk ? 'tracking' : st.cuvslam ? 'not tracking' : 'off'), vioOk ? 'ok' : st.cuvslam ? 'warn' : '');
+  setPill('p_px4', !mv.connected ? 'PX4: no link' : px.pose ? (px.ev_hz ? 'PX4: estimate + VIO input' : 'PX4: estimate, no VIO input') : 'PX4: no position',
+          !mv.connected ? '' : px.pose && px.ev_hz ? 'ok' : 'warn');
+
+  el('btn_rviz').textContent = 'RViz: ' + (st.rviz ? 'on' : 'off');
+  el('btn_rviz').className = st.rviz ? 'on' : '';
+  el('btn_rtab').textContent = 'RTAB-Map: ' + (st.rtabmap ? 'on' : 'off');
+  el('btn_rtab').className = st.rtabmap ? 'on' : '';
+  el('pts_badge').textContent = `${st.accum_pts || 0} 3D pts` + (st.saved_map_exists ? ', map saved' : '');
+  el('pts_badge').className = 'pill ' + (st.saved_map_exists ? 'ok' : '');
+  el('simhint').textContent = st.sim_saved ? ', click to send the sim drone there' : '';
+
+  if (d.map && d.map.ver !== mapVer) {
+    mapVer = d.map.ver;
+    mapImg.onload = drawMap;
+    mapImg.src = '/map.png?v=' + mapVer;
+  }
+
+  const pm = d.pose_map || [0, 0, 0, 0];
+  el('tiles').innerHTML = tilesHtml([
+    ['position x, y (map)', `${f2(pm[0])}, ${f2(pm[1])} m`],
+    ['height z', `${f2(pm[2])} m`],
+    ['heading', `${(pm[3] * 180 / Math.PI).toFixed(1)}°`],
+    ['obstacle ahead', sc && sc.front_dist !== null ? `${f2(sc.front_dist)} m` : '-'],
+    ['closest obstacle', sc && sc.min_dist !== null ? `${f2(sc.min_dist)} m` : '-'],
+    ['depth cloud', `${d.cloud_pts || 0} pts`],
+    ['map size', d.map ? `${d.map.w.toFixed(1)} x ${d.map.h.toFixed(1)} m` : '-'],
+    ['SLAM correction', d.slam_corr ? `${d.slam_corr[0]}, ${d.slam_corr[1]} m, ${d.slam_corr[2]}°` : '-'],
+    ['VIO health', d.vio_health || '-'],
+  ]);
+
+  const pp = px.params || {};
+  const ev = pp.EKF2_EV_CTRL !== undefined && pp.EKF2_EV_CTRL !== null ? `EKF2_EV_CTRL ${pp.EKF2_EV_CTRL}`
+           : pp.VISO_TYPE !== undefined && pp.VISO_TYPE !== null ? `VISO_TYPE ${pp.VISO_TYPE}, SRC2 ${pp.EK3_SRC2_POSXY}` : '-';
+  el('px4_tiles').innerHTML = tilesHtml([
+    ['VIO -> PX4 input', px.ev_hz ? `${px.ev_hz} Hz` : 'not sending'],
+    ['sent velocity (body)', px.ev_vel ? f3(px.ev_vel) + ' m/s' : '-'],
+    ['PX4 position (ENU)', f3(px.pose)],
+    ['PX4 velocity (ENU)', px.vel ? f3(px.vel) + ' m/s' : '-'],
+    ['PX4 in VIO frame', f3(px.odom)],
+    ['PX4 - VIO gap', px.err !== null && px.err !== undefined ? `${f2(px.err)} m` : '-'],
+    ['PX4 heading', px.pose ? `${(px.pose[3] * 180 / Math.PI).toFixed(0)}°` : '-'],
+    ['mode / armed', mv.connected ? `${mv.mode || '-'} / ${mv.armed ? 'yes' : 'no'}` : '-'],
+    ['VIO fusion params', ev],
+  ]);
+
+  el('checks').innerHTML = (d.checks || []).map(c =>
+    `<div><span class="dot ${c.ok ? 'ok' : ''}"></span><span class="k">${c.name}</span><span class="d">${c.detail || ''}</span></div>`
+  ).join('');
+
+  drawMap();
+}
+
+function connectWS() {
+  const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+  ws.onmessage = e => updateUI(JSON.parse(e.data));
+  ws.onclose = () => setTimeout(connectWS, 1000);
+}
+connectWS();
+</script>
+</body>
+</html>

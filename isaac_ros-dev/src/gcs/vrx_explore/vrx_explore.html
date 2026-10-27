@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VRX Explore</title>
+<style>
+  :root { --bg:#0f1318; --panel:#171d24; --line:#2a333d; --text:#dfe6ee; --dim:#8b98a6; --ok:#3fbf6f; --bad:#e5484d;
+          --warn:#f1a33b; --acc:#4aa3ff; --amber:#ffb347; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:13px/1.4 system-ui, sans-serif; }
+  header { display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding:8px 12px; background:var(--panel);
+           border-bottom:1px solid var(--line); position:sticky; top:0; z-index:5; }
+  header h1 { font-size:15px; margin:0 8px 0 0; font-weight:600; }
+  .pill { padding:3px 8px; border-radius:10px; background:#222b35; color:var(--dim); white-space:nowrap; font-size:12px; }
+  .pill.ok { background:#163323; color:var(--ok); } .pill.bad { background:#3a1517; color:var(--bad); }
+  .pill.warn { background:#3a2a12; color:var(--warn); }
+  .bar { display:flex; flex-wrap:wrap; gap:6px; align-items:center; padding:8px 12px; border-bottom:1px solid var(--line); }
+  button { background:#26313d; color:var(--text); border:1px solid var(--line); border-radius:5px; padding:7px 14px;
+           cursor:pointer; font:inherit; font-weight:600; }
+  button:hover { border-color:var(--acc); }
+  button.go { background:#1d5c36; border-color:#2b8a50; } button.stop { background:#6b1f22; border-color:#a3343a; }
+  button.on { background:#6b1f22; border-color:var(--bad); }
+  .sep { width:1px; align-self:stretch; background:var(--line); margin:0 4px; }
+  #msg { margin-left:8px; color:var(--dim); }
+  input, select { background:#11161c; color:var(--text); border:1px solid var(--line); border-radius:4px; padding:5px 6px;
+                  font:inherit; }
+  input.n { width:58px; text-align:right; }
+  main { display:grid; grid-template-columns: minmax(0, 1fr) 440px; gap:10px; padding:10px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px; min-width:0; }
+  .card + .card { margin-top:10px; }
+  .card h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--dim); margin:0 0 8px;
+             display:flex; justify-content:space-between; align-items:center; gap:8px; font-weight:600; }
+  .card h2 span.r { font-weight:normal; text-transform:none; letter-spacing:0; }
+  canvas#map { width:100%; height:560px; background:#090d11; border-radius:6px; display:block; cursor:crosshair; }
+  .legend { display:flex; flex-wrap:wrap; gap:12px; color:var(--dim); margin-top:6px; font-size:12px; }
+  .legend i { display:inline-block; width:10px; height:10px; margin-right:4px; vertical-align:-1px; border-radius:2px; }
+  #cam { width:100%; border-radius:6px; background:#000; min-height:200px; max-height:330px; object-fit:contain; display:block; }
+  .tiles { display:grid; grid-template-columns: repeat(3, 1fr); gap:6px; }
+  .tile { background:#11161c; border-radius:6px; padding:6px 8px; min-width:0; }
+  .tile b { display:block; font-size:14px; font-variant-numeric:tabular-nums; word-break:break-word; }
+  .tile span { color:var(--dim); font-size:11px; }
+  .row { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:6px 0; }
+  .fsm { display:flex; flex-wrap:wrap; gap:4px; }
+  .fsm span { padding:3px 8px; border-radius:4px; background:#222b35; color:var(--dim); font-size:11px; }
+  .fsm span.now { background:var(--acc); color:#fff; font-weight:700; }
+  #qrs div, #log div { padding:2px 0; border-bottom:1px solid #1e2630; }
+  #log { max-height:170px; overflow:auto; font:12px ui-monospace, monospace; }
+  .ok { color:var(--ok); } .warn { color:var(--warn); } .bad { color:var(--bad); } .dim { color:var(--dim); }
+  @media (max-width: 1100px) { main { grid-template-columns: 1fr; } canvas#map { height:420px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>VRX Explore</h1>
+  <span class="pill" id="p_link">PX4: -</span>
+  <span class="pill" id="p_video">video: -</span>
+  <span class="pill" id="p_state">state: -</span>
+  <span class="pill" id="p_cov">explored: -</span>
+  <span class="pill" id="p_qr">QRs: 0</span>
+  <span class="pill bad" id="p_ro" style="display:none">READ-ONLY: no commands to the autopilot</span>
+</header>
+
+<div class="bar">
+  <button class="go" onclick="post('start')">Start explore</button>
+  <button onclick="post('home')">Return home</button>
+  <button onclick="post('abort')">Hold</button>
+  <button class="stop" onclick="post('land')">Land</button>
+  <button class="stop" onclick="if (confirm('Kill the motors?')) post('kill')">Kill</button>
+  <span class="sep"></span>
+  <button id="btn_draw" onclick="toggleDraw()">Draw red zone</button>
+  <button onclick="post('clear_red')">Clear drawn red</button>
+  <button onclick="if (confirm('Clear the map, QRs and track?')) post('reset_map')">Reset map</button>
+  <span id="msg"></span>
+</div>
+
+<main>
+  <div class="card">
+    <h2>
+      <span>Map (m from home, x east, y north)</span>
+      <span class="r" id="hint">scroll to zoom, drag to pan</span>
+    </h2>
+    <canvas id="map"></canvas>
+    <div class="legend">
+      <span><i style="background:#28303a;border:1px dashed #e8c547"></i>zone, not seen</span>
+      <span><i style="background:#286e4b"></i>explored</span>
+      <span><i style="background:#e5484d"></i>red zone</span>
+      <span><i style="background:#782d2d"></i>keep-off margin</span>
+      <span><i style="background:#4aa3ff"></i>planned path</span>
+      <span><i style="background:#3fbf6f"></i>QR read</span>
+      <span><i style="background:#f1a33b"></i>QR reading</span>
+      <span><i style="border:2px solid #f1a33b;background:none"></i>QR seen, not read</span>
+      <span><i style="background:#fff"></i>drone + track</span>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <span class="dim">Zone x</span><input class="n" id="zx0"> to <input class="n" id="zx1">
+      <span class="dim">y</span><input class="n" id="zy0"> to <input class="n" id="zy1">
+      <button onclick="setZone()">Apply zone</button>
+      <span class="sep"></span>
+      <span class="dim">Video</span>
+      <select id="videosel"></select>
+      <button onclick="post('video', {device: el('videosel').value})">Use</button>
+    </div>
+  </div>
+
+  <div>
+    <div class="card">
+      <h2><span>Camera (QR detection)</span><span class="r dim" id="vidname"></span></h2>
+      <img id="cam" alt="no video">
+    </div>
+
+    <div class="card">
+      <h2><span>Mission</span><span class="r" id="mtime"></span></h2>
+      <div class="fsm" id="fsm"></div>
+      <div class="tiles" id="tiles" style="margin-top:8px"></div>
+    </div>
+
+    <div class="card">
+      <h2><span>QR codes</span></h2>
+      <div id="qrs" class="dim">none yet</div>
+    </div>
+
+    <div class="card">
+      <h2><span>Log</span></h2>
+      <div id="log"></div>
+    </div>
+  </div>
+</main>
+
+<script>
+const el = id => document.getElementById(id);
+let S = null, mapImg = new Image(), mapVer = -1, zoneEdited = false, videoEdited = false;
+let view = {x: 4, y: 0, scale: 40, drag: false, lx: 0, ly: 0}, draw = false, rectStart = null, rectEnd = null;
+
+async function post(what, body={}) {
+  el('msg').textContent = '...'; el('msg').style.color = 'var(--dim)';
+  try {
+    const r = await fetch('/api/' + what, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    const j = await r.json();
+    el('msg').textContent = j.message || ''; el('msg').style.color = j.ok ? 'var(--ok)' : 'var(--bad)';
+    return j;
+  } catch (e) { el('msg').textContent = 'error: ' + e; el('msg').style.color = 'var(--bad)'; }
+}
+function setZone() {
+  zoneEdited = false;
+  post('zone', {zone: ['zx0', 'zx1', 'zy0', 'zy1'].map(id => parseFloat(el(id).value))});
+}
+['zx0', 'zx1', 'zy0', 'zy1'].forEach(id => el(id).addEventListener('input', () => { zoneEdited = true; }));
+el('videosel').addEventListener('change', () => { videoEdited = true; });
+function toggleDraw() {
+  draw = !draw;
+  el('btn_draw').className = draw ? 'on' : '';
+  el('btn_draw').textContent = draw ? 'Drawing: drag on the map' : 'Draw red zone';
+}
+
+// map: scroll zoom, drag pan; in draw mode drag a red rectangle
+const cv = el('map'), ctx = cv.getContext('2d');
+const s2w = (sx, sy) => [view.x + (sx - cv.width / 2) / view.scale, view.y - (sy - cv.height / 2) / view.scale];
+const w2s = (x, y) => [cv.width / 2 + (x - view.x) * view.scale, cv.height / 2 - (y - view.y) * view.scale];
+cv.addEventListener('wheel', e => {
+  e.preventDefault();
+  view.scale = Math.max(8, Math.min(200, view.scale * (e.deltaY < 0 ? 1.15 : 0.87)));
+  drawMap();
+});
+cv.addEventListener('mousedown', e => {
+  const r = cv.getBoundingClientRect();
+  if (draw) { rectStart = s2w(e.clientX - r.left, e.clientY - r.top); rectEnd = rectStart; return; }
+  view.drag = true; view.lx = e.clientX; view.ly = e.clientY;
+});
+window.addEventListener('mousemove', e => {
+  if (rectStart) {
+    const r = cv.getBoundingClientRect();
+    rectEnd = s2w(e.clientX - r.left, e.clientY - r.top); drawMap(); return;
+  }
+  if (!view.drag) return;
+  view.x -= (e.clientX - view.lx) / view.scale; view.y += (e.clientY - view.ly) / view.scale;
+  view.lx = e.clientX; view.ly = e.clientY; drawMap();
+});
+window.addEventListener('mouseup', () => {
+  if (rectStart && rectEnd && Math.hypot(rectEnd[0] - rectStart[0], rectEnd[1] - rectStart[1]) > 0.1) {
+    post('red_rect', {rect: [rectStart[0], rectStart[1], rectEnd[0], rectEnd[1]]});
+    toggleDraw();
+  }
+  rectStart = rectEnd = null; view.drag = false;
+});
+
+function line(pts, color, width, dash) {
+  if (!pts || pts.length < 2) return;
+  ctx.save(); ctx.strokeStyle = color; ctx.lineWidth = width || 1.8; if (dash) ctx.setLineDash(dash);
+  ctx.beginPath();
+  pts.forEach(([x, y], i) => { const [sx, sy] = w2s(x, y); if (i) ctx.lineTo(sx, sy); else ctx.moveTo(sx, sy); });
+  ctx.stroke(); ctx.restore();
+}
+function dot(x, y, r, fill, stroke) {
+  const [sx, sy] = w2s(x, y);
+  ctx.beginPath(); ctx.arc(sx, sy, r, 0, 2 * Math.PI);
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 2; ctx.stroke(); }
+}
+
+function drawMap() {
+  if (cv.width !== cv.clientWidth || cv.height !== cv.clientHeight) { cv.width = cv.clientWidth; cv.height = cv.clientHeight; }
+  ctx.fillStyle = '#090d11'; ctx.fillRect(0, 0, cv.width, cv.height);
+  const step = view.scale >= 25 ? 1 : 5;
+  const [ax, ay] = s2w(0, cv.height), [bx, by] = s2w(cv.width, 0);
+  for (let gx = Math.floor(ax / step) * step; gx <= bx; gx += step) {
+    const [sx] = w2s(gx, 0); ctx.strokeStyle = gx === 0 ? '#2c3b4d' : '#141c24';
+    ctx.beginPath(); ctx.moveTo(sx, 0); ctx.lineTo(sx, cv.height); ctx.stroke();
+  }
+  for (let gy = Math.floor(ay / step) * step; gy <= by; gy += step) {
+    const [, sy] = w2s(0, gy); ctx.strokeStyle = gy === 0 ? '#2c3b4d' : '#141c24';
+    ctx.beginPath(); ctx.moveTo(0, sy); ctx.lineTo(cv.width, sy); ctx.stroke();
+  }
+  if (!S) return;
+  if (S.map && mapImg.complete && mapImg.naturalWidth) {
+    const [x0, yTop] = w2s(S.map.x0, S.map.y0 + S.map.h);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(mapImg, x0, yTop, S.map.w * view.scale, S.map.h * view.scale);
+  }
+  const z = S.zone;
+  if (z) {
+    const [x0, y1] = w2s(z[0], z[3]);
+    ctx.save(); ctx.strokeStyle = '#e8c547'; ctx.setLineDash([6, 4]); ctx.lineWidth = 1.5;
+    ctx.strokeRect(x0, y1, (z[1] - z[0]) * view.scale, (z[3] - z[2]) * view.scale); ctx.restore();
+  }
+  (S.rects || []).forEach(([x0, y0, x1, y1]) => {
+    const [sx, sy] = w2s(x0, y1);
+    ctx.strokeStyle = '#ff9a9e'; ctx.lineWidth = 1; ctx.strokeRect(sx, sy, (x1 - x0) * view.scale, (y1 - y0) * view.scale);
+  });
+  if (rectStart && rectEnd) {
+    const [sx, sy] = w2s(Math.min(rectStart[0], rectEnd[0]), Math.max(rectStart[1], rectEnd[1]));
+    ctx.fillStyle = 'rgba(229,72,77,0.4)';
+    ctx.fillRect(sx, sy, Math.abs(rectEnd[0] - rectStart[0]) * view.scale, Math.abs(rectEnd[1] - rectStart[1]) * view.scale);
+  }
+  line(S.track, '#ffffff');
+  if (S.path && S.path.length && S.pose) line([[S.pose[0], S.pose[1]], ...S.path], '#4aa3ff', 2.5, [8, 4]);
+  if (S.goal) {
+    dot(S.goal.x, S.goal.y, 7, null, '#4aa3ff');
+    const [gx, gy] = w2s(S.goal.x, S.goal.y);
+    ctx.fillStyle = '#4aa3ff'; ctx.font = '11px system-ui'; ctx.fillText(S.goal.kind, gx + 10, gy + 4);
+  }
+  (S.candidates || []).forEach(c => dot(c.x, c.y, 6, null, '#f1a33b'));
+  (S.qrs || []).forEach(q => {
+    dot(q.x, q.y, 6, q.confirmed ? '#3fbf6f' : '#f1a33b');
+    const [sx, sy] = w2s(q.x, q.y);
+    ctx.fillStyle = '#dfe6ee'; ctx.font = '12px system-ui'; ctx.fillText(q.payload, sx + 9, sy + 4);
+  });
+  dot(0, 0, 4, null, '#8b98a6');
+  if (S.pose) {
+    const [px, py, , yaw] = S.pose, [sx, sy] = w2s(px, py);
+    ctx.save(); ctx.translate(sx, sy); ctx.rotate(-yaw); ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.moveTo(12, 0); ctx.lineTo(-8, -7); ctx.lineTo(-4, 0); ctx.lineTo(-8, 7); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+}
+
+const f1 = v => (v === null || v === undefined) ? '-' : (+v).toFixed(1);
+const f2 = v => (v === null || v === undefined) ? '-' : (+v).toFixed(2);
+const pill = (id, text, cls) => { el(id).textContent = text; el(id).className = 'pill ' + (cls || ''); };
+
+function render(d) {
+  S = d;
+  const t = d.tel || {}, linkOk = !d.radio_err && d.link_age !== null && d.link_age < 3;
+  const ap = d.autopilot === 'ardupilot' ? 'ArduCopter' : 'PX4';
+  pill('p_link', linkOk ? `${ap}: ${t.mode || '-'}${t.armed ? ', armed' : ''}` : `autopilot: no link (${d.radio})`, linkOk ? 'ok' : 'bad');
+  pill('p_video', d.video_err ? `video: ${d.video_err}` : `video: ${d.vrx}`, d.video_err ? 'warn' : 'ok');
+  pill('p_state', 'state: ' + d.state, d.state === 'FAILSAFE' ? 'bad' : d.mission_running ? 'ok' : '');
+  pill('p_cov', `explored: ${Math.round((d.coverage || 0) * 100)}%`, d.coverage > 0.9 ? 'ok' : '');
+  const read = (d.qrs || []).filter(q => q.confirmed).length;
+  pill('p_qr', `QRs: ${read}`, read ? 'ok' : '');
+  el('p_ro').style.display = d.read_only ? '' : 'none';
+  el('fsm').innerHTML = (d.fsm || []).map(n => `<span class="${n === d.state ? 'now' : ''}">${n}</span>`).join('');
+  el('mtime').textContent = d.mission_s ? `${Math.floor(d.mission_s / 60)}:${String(Math.floor(d.mission_s % 60)).padStart(2, '0')} / 15:00` : '';
+  el('hint').textContent = draw ? 'drag a rectangle to add a red zone' : 'scroll to zoom, drag to pan';
+
+  if (!zoneEdited && d.zone && document.activeElement.tagName !== 'INPUT')
+    ['zx0', 'zx1', 'zy0', 'zy1'].forEach((id, i) => { el(id).value = d.zone[i]; });
+  const devs = d.video_devices || [];
+  const opts = ['<option value="">off</option>'].concat(devs.map(([p, n]) => `<option value="${p}">${p}  ${n}</option>`)).join('');
+  if (!videoEdited && el('videosel').dataset.opts !== opts) {
+    el('videosel').innerHTML = opts; el('videosel').dataset.opts = opts;
+  }
+  if (!videoEdited) el('videosel').value = d.video_err ? '' : (d.vrx || '');
+  el('vidname').textContent = d.video_err ? '' : d.vrx;
+
+  const p = d.pose || [0, 0, 0, 0];
+  el('tiles').innerHTML = [
+    ['position x, y', d.pose ? `${f1(p[0])}, ${f1(p[1])} m` : '-'],
+    ['height', d.pose ? `${f2(p[2])} m (target ${d.alt})` : '-'],
+    ['heading', d.pose ? `${(90 - p[3] * 180 / Math.PI + 360) % 360 | 0}°` : '-'],
+    ['speed', `${f1(t.groundspeed)} m/s`],
+    ['goal', d.goal ? `${d.goal.kind} (${f1(d.goal.x)}, ${f1(d.goal.y)})` : '-'],
+    ['explored', `${Math.round((d.coverage || 0) * 100)}%`],
+    ['red cells', d.red_cells ?? 0],
+    ['QR seen / read', `${(d.candidates || []).length} / ${read}`],
+    ['battery', t.batt_pct !== null && t.batt_pct !== undefined ? `${t.batt_pct}%` : '-'],
+  ].map(([k, v]) => `<div class="tile"><b>${v}</b><span>${k}</span></div>`).join('');
+
+  el('qrs').innerHTML = (d.qrs || []).length ? d.qrs.map(q =>
+    `<div><span class="${q.confirmed ? 'ok' : 'warn'}">${q.confirmed ? 'read' : 'reading'}</span> <b>${q.payload}</b> ` +
+    `at (${f2(q.x)}, ${f2(q.y)}) m, ${q.n} hits</div>`).join('') +
+    (d.pairwise_distances_m || []).map(x => `<div class="dim">${x.qr_1} to ${x.qr_2}: ${x.distance_m.toFixed(2)} m</div>`).join('')
+    : 'none yet';
+  el('log').innerHTML = (d.log || []).slice().reverse().map(l => {
+    const {time: tm, state, ...rest} = l;
+    return `<div><span class="dim">${new Date(tm * 1000).toLocaleTimeString()}</span> <b>${state}</b> ${JSON.stringify(rest)}</div>`;
+  }).join('') + (d.statustext || []).slice().reverse().map(([tm, sev, txt]) =>
+    `<div class="${sev <= 3 ? 'bad' : sev <= 4 ? 'warn' : 'dim'}">FC: ${txt}</div>`).join('');
+
+  if (d.map && d.map.ver !== mapVer) { mapVer = d.map.ver; mapImg.onload = drawMap; mapImg.src = '/map.png?v=' + mapVer; }
+  drawMap();
+}
+
+setInterval(() => { if (S && !S.video_err) el('cam').src = '/camera.jpg?t=' + Date.now(); }, 200);
+function connect() {
+  const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+  ws.onmessage = e => render(JSON.parse(e.data));
+  ws.onclose = () => setTimeout(connect, 1000);
+}
+connect();
+</script>
+</body>
+</html>

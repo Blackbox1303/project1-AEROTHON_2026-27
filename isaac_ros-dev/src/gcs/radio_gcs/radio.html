@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Radio GCS</title>
+<style>
+:root { --bg:#0f1216; --card:#181d24; --line:#2a313b; --fg:#e6e9ee; --dim:#8b95a3; --ok:#2e9d5b; --warn:#c98a12;
+        --bad:#d0423b; --acc:#3c7ddc; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.4 system-ui, sans-serif; }
+header { display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding:10px 16px; border-bottom:1px solid var(--line); }
+header b { font-size:16px; margin-right:8px; }
+.pill { padding:3px 10px; border-radius:999px; background:var(--card); border:1px solid var(--line); font-size:13px; }
+.pill.ok { border-color:var(--ok); color:#8fe0b0; } .pill.warn { border-color:var(--warn); color:#f1c46a; }
+.pill.bad { border-color:var(--bad); color:#ff9a94; }
+main { display:grid; grid-template-columns: minmax(0,1.1fr) minmax(0,1fr); gap:12px; padding:12px 16px; }
+@media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+.card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; }
+.card h2 { margin:0 0 8px; font-size:13px; color:var(--dim); font-weight:600; text-transform:uppercase; letter-spacing:.04em; }
+.big { font-size:22px; font-weight:650; }
+.tiles { display:grid; grid-template-columns: repeat(auto-fill, minmax(120px,1fr)); gap:8px; }
+.tile { background:#12161c; border:1px solid var(--line); border-radius:8px; padding:8px; }
+.tile .k { color:var(--dim); font-size:12px; } .tile .v { font-size:17px; font-weight:600; font-variant-numeric:tabular-nums; }
+.btns { display:flex; flex-wrap:wrap; gap:8px; margin-top:6px; }
+button { border:0; border-radius:8px; padding:10px 14px; font-size:14px; font-weight:600; color:#fff; background:#323a46; cursor:pointer; }
+button:hover { filter:brightness(1.15); } button:disabled { opacity:.45; cursor:not-allowed; }
+button.go { background:var(--ok); } button.acc { background:var(--acc); } button.stop { background:#6b4c1f; }
+button.danger { background:var(--bad); }
+canvas { width:100%; height:320px; background:#12161c; border:1px solid var(--line); border-radius:8px; display:block; }
+#log { height:260px; overflow:auto; font:12px/1.45 ui-monospace, monospace; background:#12161c; border:1px solid var(--line);
+       border-radius:8px; padding:6px 8px; }
+#log .s3, #log .s2, #log .s1, #log .s0 { color:#ff9a94; } #log .s4 { color:#f1c46a; } #log .src { color:var(--dim); }
+.bar { height:8px; background:#12161c; border-radius:4px; overflow:hidden; border:1px solid var(--line); }
+.bar > div { height:100%; background:var(--acc); }
+#fail { color:#f1c46a; font-size:13px; }
+.modal { position:fixed; inset:0; background:rgba(0,0,0,.55); display:none; align-items:center; justify-content:center; }
+.modal .box { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px; max-width:420px; }
+label.chk { color:var(--dim); font-size:13px; display:inline-flex; gap:6px; align-items:center; }
+</style></head><body>
+<header><b>Radio GCS</b>
+  <span class="pill" id="p_radio">radio</span><span class="pill" id="p_px4">PX4</span>
+  <span class="pill" id="p_agent">Jetson</span><span class="pill" id="p_mode">mode</span>
+  <span class="pill" id="p_arm">armed</span><span class="pill" id="p_rssi">RSSI</span>
+</header>
+<main>
+<section style="display:flex;flex-direction:column;gap:12px">
+  <div class="card"><h2>Onboard mission</h2>
+    <div class="big" id="state">-</div>
+    <div style="color:var(--dim)" id="phase">stack: -</div>
+    <div class="tiles" style="margin-top:10px">
+      <div class="tile"><div class="k">mission time</div><div class="v" id="t_mis">-</div></div>
+      <div class="tile"><div class="k">QR area (9 min)</div><div class="v" id="t_zone">-</div></div>
+      <div class="tile"><div class="k">QRs read</div><div class="v" id="qrs">-</div></div>
+      <div class="tile"><div class="k">target</div><div class="v" id="tgt">-</div></div>
+      <div class="tile"><div class="k">preflight</div><div class="v" id="pf">-</div></div>
+      <div class="tile"><div class="k">alerts</div><div class="v" id="al">-</div></div>
+    </div>
+    <div style="margin-top:8px" class="bar" title="mission time of 15 min"><div id="bar" style="width:0"></div></div>
+    <div id="fail" style="margin-top:6px"></div>
+    <div class="btns">
+      <button class="acc" id="b_launch" onclick="go('launch','Launch the onboard stack (real drone)?')">Launch stack</button>
+      <button class="go" id="b_full" onclick="go('full','Start the FULL mission (tunnels + QR area + exit)?')">▶ Full mission</button>
+      <button class="go" id="b_deliv" onclick="go('delivery','Start DELIVERY only (take-off at / near the zone)?')">▶ Delivery only</button>
+      <button class="stop" onclick="go('abort','ABORT: supervisor failsafe (hold, then land)?')">■ Abort</button>
+      <button onclick="go('status')">Status now</button>
+      <button onclick="go('stop','Stop the whole onboard stack?')">Stop stack</button>
+      <label class="chk"><input type="checkbox" id="sim"> sim (test)</label>
+    </div>
+  </div>
+  <div class="card"><h2>Flight controller</h2>
+    <div class="tiles">
+      <div class="tile"><div class="k">height</div><div class="v" id="alt">-</div></div>
+      <div class="tile"><div class="k">speed</div><div class="v" id="spd">-</div></div>
+      <div class="tile"><div class="k">climb</div><div class="v" id="clb">-</div></div>
+      <div class="tile"><div class="k">heading</div><div class="v" id="hdg">-</div></div>
+      <div class="tile"><div class="k">battery</div><div class="v" id="bat">-</div></div>
+      <div class="tile"><div class="k">GPS</div><div class="v" id="gps">-</div></div>
+    </div>
+    <div class="btns">
+      <button class="danger" onclick="go('land','LAND now (PX4)?')">LAND</button>
+      <button class="danger" onclick="go('rtl','RTL now (PX4)?')">RTL</button>
+      <button class="danger" onclick="kill()">KILL</button>
+    </div>
+  </div>
+</section>
+<section style="display:flex;flex-direction:column;gap:12px">
+  <div class="card"><h2>Track (m from home, north up)</h2><canvas id="map" width="700" height="320"></canvas></div>
+  <div class="card"><h2>Events</h2><div id="log"></div></div>
+</section>
+</main>
+<div class="modal" id="modal"><div class="box"><div id="q" style="margin-bottom:14px"></div>
+  <div class="btns" style="justify-content:flex-end"><button onclick="answer(false)">Cancel</button>
+  <button class="danger" id="yes" onclick="answer(true)">Yes</button></div></div></div>
+<script>
+const $ = id => document.getElementById(id);
+let ask_cb = null, S = null;
+function ask(q) { $('q').textContent = q; $('modal').style.display = 'flex'; return new Promise(r => ask_cb = r); }
+function answer(v) { $('modal').style.display = 'none'; if (ask_cb) ask_cb(v); ask_cb = null; }
+async function go(action, q) {
+  if (q && !(await ask(q))) return;
+  const r = await fetch('/api/cmd', {method:'POST', headers:{'Content-Type':'application/json'},
+                                     body: JSON.stringify({action, sim: $('sim').checked})});
+  const j = await r.json(); if (!j.ok) await ask(j.message + ' (see the events)');
+}
+async function kill() { if (await ask('KILL: motors stop, the drone FALLS. Sure?') && await ask('Really KILL?')) go('kill'); }
+const fmt = s => s == null ? '-' : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+function pill(id, text, cls) { const e = $(id); e.textContent = text; e.className = 'pill ' + (cls || ''); }
+function draw(track) {
+  const c = $('map'), g = c.getContext('2d'); c.width = c.clientWidth; c.height = c.clientHeight;
+  g.clearRect(0, 0, c.width, c.height);
+  let ext = 10; for (const [n, e] of track) ext = Math.max(ext, Math.abs(n) * 1.15, Math.abs(e) * 1.15);
+  const k = Math.min(c.width, c.height) / 2 / ext, cx = c.width / 2, cy = c.height / 2;
+  g.strokeStyle = '#2a313b'; g.lineWidth = 1;
+  const step = ext > 60 ? 20 : ext > 25 ? 10 : 5;
+  for (let v = -Math.ceil(ext / step) * step; v <= ext; v += step) {
+    g.beginPath(); g.moveTo(cx + v * k, 0); g.lineTo(cx + v * k, c.height); g.stroke();
+    g.beginPath(); g.moveTo(0, cy - v * k); g.lineTo(c.width, cy - v * k); g.stroke(); }
+  g.fillStyle = '#8b95a3'; g.font = '11px system-ui'; g.fillText(`grid ${step} m`, 8, 14);
+  g.fillStyle = '#3c7ddc'; g.beginPath(); g.arc(cx, cy, 5, 0, 7); g.fill();
+  if (!track.length) return;
+  g.strokeStyle = '#2e9d5b'; g.lineWidth = 2; g.beginPath();
+  track.forEach(([n, e], i) => { const x = cx + e * k, y = cy - n * k; i ? g.lineTo(x, y) : g.moveTo(x, y); }); g.stroke();
+  const [n, e] = track[track.length - 1]; g.fillStyle = '#e6e9ee'; g.beginPath(); g.arc(cx + e * k, cy - n * k, 6, 0, 7); g.fill();
+}
+function render(s) {
+  const t = s.tel, ob = s.onboard || {}, d = s.detail || {};
+  pill('p_radio', s.radio_err ? `radio ${s.radio}: ${s.radio_err}` : `radio ${s.radio} · ${s.rx} msgs`,
+       s.radio_err ? 'bad' : s.px4_age != null && s.px4_age < 3 ? 'ok' : 'warn');
+  pill('p_px4', s.px4_age == null ? 'PX4: none' : `PX4 ${s.px4_age} s`, s.px4_age != null && s.px4_age < 3 ? 'ok' : 'bad');
+  pill('p_agent', s.agent_age == null ? 'Jetson: none' : `Jetson ${s.agent_age} s`,
+       s.agent_age != null && s.agent_age < 4 ? 'ok' : 'bad');
+  pill('p_mode', t.mode || 'mode -', t.mode === 'OFFBOARD' ? 'ok' : '');
+  pill('p_arm', t.armed ? 'ARMED' : 'disarmed', t.armed ? 'warn' : '');
+  pill('p_rssi', t.rssi != null ? `RSSI ${t.rssi}/${t.remrssi} noise ${t.noise}` : 'RSSI -', '');
+  const stale = s.onboard_age == null || s.onboard_age > 6;
+  $('state').textContent = stale ? 'no onboard status' : (ob.s || '-');
+  $('phase').textContent = `stack: ${ob.p || '-'} (${ob.md || '-'})` + (stale ? '' : ` · ${s.onboard_age} s ago`);
+  $('t_mis').textContent = fmt(ob.t); $('t_zone').textContent = fmt(ob.z);
+  $('t_zone').style.color = ob.z > 480 ? '#ff9a94' : ob.z > 400 ? '#f1c46a' : '';
+  $('qrs').textContent = ob.q ?? '-'; $('tgt').textContent = ob.tg ? 'FOUND' : (ob.tg === 0 ? 'searching' : '-');
+  $('pf').textContent = ob.pf == null ? '-' : ob.pf ? `${ob.pf} failing` : 'all green';
+  $('pf').style.color = ob.pf ? '#f1c46a' : ob.pf === 0 ? '#8fe0b0' : '';
+  $('al').textContent = ob.al ?? '-'; $('al').style.color = ob.al ? '#ff9a94' : '';
+  $('bar').style.width = `${Math.min(100, (ob.t || 0) / 900 * 100)}%`;
+  $('bar').style.background = ob.t > 780 ? '#d0423b' : ob.t > 600 ? '#c98a12' : '#3c7ddc';
+  $('fail').textContent = (d.f && d.f.length ? 'preflight: ' + d.f.join(' · ') : '') + (d.a ? `   alert: ${d.a}` : '');
+  const ready = (ob.p || '') === 'ready';
+  $('b_full').disabled = $('b_deliv').disabled = !ready || ob.pf > 0;
+  $('b_launch').disabled = !(ob.p || '').startsWith('stopped');
+  $('alt').textContent = t.alt_rel != null ? `${t.alt_rel.toFixed(1)} m` : '-';
+  $('spd').textContent = t.speed != null ? `${t.speed.toFixed(1)} m/s` : '-';
+  $('clb').textContent = t.climb != null ? `${t.climb.toFixed(1)} m/s` : '-';
+  $('hdg').textContent = t.heading != null ? `${t.heading}°` : '-';
+  $('bat').textContent = t.batt_pct != null ? `${t.batt_pct} % ${t.batt_v} V` : (t.batt_v ? `${t.batt_v} V` : '-');
+  $('bat').style.color = t.batt_pct != null && t.batt_pct < 30 ? '#ff9a94' : '';
+  $('gps').textContent = t.gps_fix != null ? `${t.gps_fix >= 3 ? '3D' : 'fix ' + t.gps_fix} · ${t.sats}` : '-';
+  const log = $('log'), atEnd = log.scrollTop + log.clientHeight >= log.scrollHeight - 4;
+  log.innerHTML = s.log.map(([c, src, sev, txt]) =>
+    `<div class="s${sev}"><span class="src">${c} ${src}</span> ${txt.replace(/[<&]/g, ch => ch === '<' ? '&lt;' : '&amp;')}</div>`).join('');
+  if (atEnd) log.scrollTop = log.scrollHeight;
+  draw(s.track || []);
+}
+function connect() {
+  const ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onmessage = e => { S = JSON.parse(e.data); render(S); };
+  ws.onclose = () => setTimeout(connect, 1000);
+}
+connect();
+</script></body></html>

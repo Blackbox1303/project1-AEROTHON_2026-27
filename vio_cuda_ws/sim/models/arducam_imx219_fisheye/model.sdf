@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Arducam IMX219 (8 MP, 1.12 um pixels) + M12 LS40136 fisheye, 175 deg diagonal FOV.
+  Equidistant lens (r = f * theta): f = 1.504 mm -> 139.9 deg horizontal, 105.1 deg vertical,
+  image circle cut off at 87.5 deg from the axis (the diagonal).
+  Sim default is the 2x2-binned mode 1640x1232 (same field of view; Gazebo renders f = 675.0 px,
+  0.5 % above the hfov formula's 671.6 - measured, see fisheye_camera_info.py); the real
+  drone runs 3264x2464 @ 21 fps (f = 1336.6 px). For a full-resolution test change <width>/<height>
+  below; camera_info (fisheye_camera_info) follows the image size by itself.
+  The camera looks along +x of arducam_link; the mount pitch is set where the model is included.
+
+  SIM-ONLY 'arducam_nadir_hd': Gazebo's wide-angle camera renders from a fixed-size cube map
+  (<env_texture_size> has no effect in gz-sensors 8: 256 and 2048 gave identical images), which
+  blurs a 1.5 m QR at 10 m to ~3 px/module - the real full-resolution lens gives ~6. Measured
+  (tests/fly_qr_survey.py, 2026-10-19, hovering over each board at 10 m): 21-module codes decode in
+  ~100 % of frames, 25-module codes in 4-16 %, so longer payloads will fail on the fisheye in sim.
+  This pinhole camera stands in for the real Arducam's pixels straight below the drone: same
+  position, looking straight down (along the fisheye's axis on the 90 deg mount), focal length = the real
+  3264 px fisheye's (1336.6 px), over +-20 deg, where a pinhole is at most 12 % sharper than the
+  equidistant lens. Use it only to test QR reading in sim; it does not exist on the drone.
+-->
+<sdf version='1.9'>
+  <model name='arducam_imx219_fisheye'>
+    <link name="arducam_link">
+      <inertial>
+        <mass>0.010</mass>
+        <inertia>
+          <ixx>1e-6</ixx><ixy>0</ixy><ixz>0</ixz>
+          <iyy>1e-6</iyy><iyz>0</iyz><izz>1e-6</izz>
+        </inertia>
+      </inertial>
+      <visual name="board">
+        <geometry><box><size>0.004 0.025 0.024</size></box></geometry>
+        <material><diffuse>0.1 0.4 0.1 1</diffuse></material>
+      </visual>
+      <visual name="lens">
+        <pose>0.009 0 0 0 1.5708 0</pose>
+        <geometry><cylinder><radius>0.008</radius><length>0.018</length></cylinder></geometry>
+        <material><diffuse>0.05 0.05 0.05 1</diffuse></material>
+      </visual>
+      <sensor name="arducam" type="wideanglecamera">
+        <gz_frame_id>arducam_optical_frame</gz_frame_id>
+        <pose>0.018 0 0 0 0 0</pose>
+        <camera>
+          <horizontal_fov>2.44203</horizontal_fov>
+          <image><width>1640</width><height>1232</height><format>R8G8B8</format></image>
+          <clip><near>0.02</near><far>150</far></clip>
+          <lens>
+            <type>equidistant</type>
+            <scale_to_hfov>true</scale_to_hfov>
+            <cutoff_angle>1.52716</cutoff_angle>
+            <env_texture_size>1024</env_texture_size>
+          </lens>
+          <noise><type>gaussian</type><mean>0.0</mean><stddev>0.005</stddev></noise>
+        </camera>
+        <always_on>1</always_on>
+        <update_rate>15</update_rate>
+        <visualize>false</visualize>
+        <topic>/arducam/image_raw</topic>
+      </sensor>
+      <sensor name="arducam_nadir_hd" type="camera">
+        <!-- along the link's axis: the Arducam is mounted straight down since 2026-10-25 (was +45 deg on the
+             45 deg mount: .bak_45deg) -->
+        <pose>0.018 0 0 0 0 0</pose>
+        <camera>
+          <!-- 60 deg, 960 px for the 10 m search (the 10 ft rule was a mistake, 2026-10-23): 11.5 m of ground,
+               ~83 px/m = ~5 px per module of a 1.5 m 25-module QR; a whole QR fits up to ~26 deg off nadir.
+               (80 deg / 640 px for 2.7 m: .bak_80deg; 40 deg / 640 px: .bak_10ft) -->
+          <horizontal_fov>1.0472</horizontal_fov>
+          <image><width>960</width><height>960</height><format>L8</format></image>
+          <clip><near>0.05</near><far>100</far></clip>
+          <noise><type>gaussian</type><mean>0.0</mean><stddev>0.005</stddev></noise>
+        </camera>
+        <always_on>1</always_on>
+        <update_rate>5</update_rate>
+        <visualize>false</visualize>
+        <topic>/arducam/nadir_hd/image_raw</topic>
+      </sensor>
+    </link>
+  </model>
+</sdf>

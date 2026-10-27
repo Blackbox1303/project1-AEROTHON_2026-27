@@ -1,0 +1,28 @@
+# PX4 parameters applied to the SITL instance on every start by run_sim.sh.
+# Format: NAME VALUE. Simulation only; the real Pixhawk 6C Mini: src/vio_bringup/config/px4_6c_vio_params.txt
+# (same EKF2 names - current PX4 on both).
+
+# No ground station in autonomous sim runs: don't block arming / RTL on data-link loss.
+# (Your airframe 4010 also sets 0; a saved value of 2 was overriding it.)
+NAV_DLL_ACT 0
+
+# VIO -> EKF2 (vio_to_px4): external-vision BODY-frame velocity only, next to GPS.
+# Bit 2 of EKF2_EV_CTRL = 3D velocity (0 horiz pos, 1 vert pos, 3 yaw stay off).
+EKF2_EV_CTRL 4
+# noise from EKF2_EVV_NOISE, not from the message covariance
+EKF2_EV_NOISE_MD 1
+EKF2_EVV_NOISE 0.1
+# VIO arrives restamped with wall time at send; the measurement is older by the pipeline
+# latency (render, bridge, cuVSLAM, MAVROS). Starting estimate, tune from EV innovations.
+EKF2_EV_DELAY 30
+
+# Allow failure injection (MAV_CMD_INJECT_FAILURE), e.g. GPS off to simulate the tunnel
+SYS_FAILURE_EN 1
+
+# Heading: the world's <magnetic_field> and PX4's looked-up declination (3.41 deg at this lat/lon) disagree;
+# PX4's yaw sat 5.88 deg clockwise of Gazebo's truth, constant (measured on the pad, 2026-10-20). Every depth
+# cloud / scan is placed with that heading: the corridor walls came out rotated ~6 deg, corridor_nav's goals
+# drifted 1.4 m sideways over 10 m and the drone hit the wall at the exit. Fixed declination that cancels it
+# (found empirically: PX4 heading moves only ~0.52 deg per deg of declination here; -2.47 left -2.82 deg):
+EKF2_DECL_TYPE 0
+EKF2_MAG_DECL -7.9

@@ -1,0 +1,30 @@
+# AeroTHON code snapshot repo (local, 2026-10-27): ONLY our own code is tracked - everything else is ignored.
+# Vendor packages with their own .git (isaac_ros_*, realsense-ros, drone_qr_detector), build / install / log, run data,
+# calibration frames and model weights stay out.
+/*
+!/.gitignore
+!/ip_launch/
+!/isaac_ros-dev/
+/isaac_ros-dev/*
+!/isaac_ros-dev/fastdds_udp.xml
+!/isaac_ros-dev/install_ignition_deps.sh
+!/isaac_ros-dev/sim/
+!/isaac_ros-dev/calibration/
+/isaac_ros-dev/calibration/*
+!/isaac_ros-dev/calibration/*.yaml
+!/isaac_ros-dev/src/
+/isaac_ros-dev/src/*
+!/isaac_ros-dev/src/aerothon_nav/
+!/isaac_ros-dev/src/gcs/
+!/isaac_ros-dev/src/launch_all/
+!/isaac_ros-dev/src/vio_bringup/
+!/vio_cuda_ws/
+/vio_cuda_ws/*
+!/vio_cuda_ws/sim/
+__pycache__/
+*.pyc
+*.bak*
+*.orig
+*.log
+/vio_cuda_ws/sim/backup_*/
+/vio_cuda_ws/sim/.pylib/

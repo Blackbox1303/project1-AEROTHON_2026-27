@@ -1,0 +1,29 @@
+# MAVROS plugins for the host MAVROS (launch_all/host_all.launch.py): only what aerothon_nav / vio_bringup use.
+# host_all passed default_plugins.yaml as a parameter named `pluginlists_yaml`, which mavros_node ignores, so all
+# ~60 plugins loaded and MAVROS took 65-110 % of a core on the Jetson sim (2026-10-21); with the rest of the stack
+# that starved Gazebo (real-time factor 0.015) and the delivery Nav2.
+#   sys_status        /mavros/state, /mavros/set_mode, /mavros/set_message_interval
+#   command           /mavros/cmd/arming, /mavros/cmd/command (gripper, force disarm)
+#   param             /mavros/param/set_parameters (MIS_TAKEOFF_ALT)
+#   local_position    /mavros/local_position/{pose,odom,velocity_body}
+#   global_position   /mavros/global_position/global (entrance geofence)
+#   imu               /mavros/imu/data, data_raw
+#   setpoint_raw      /mavros/setpoint_raw/local (offboard_bridge)
+#   setpoint_velocity /mavros/setpoint_velocity/cmd_vel_unstamped
+#   odometry          /mavros/odometry/out (vio_to_px4)
+#   sys_time          time sync with PX4
+/**:
+  ros__parameters:
+    plugin_denylist:
+      - '*'
+    plugin_allowlist:
+      - sys_status
+      - sys_time
+      - command
+      - param
+      - local_position
+      - global_position
+      - imu
+      - setpoint_raw
+      - setpoint_velocity
+      - odometry

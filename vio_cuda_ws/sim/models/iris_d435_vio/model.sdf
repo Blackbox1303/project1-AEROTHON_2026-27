@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- ArduCopter SITL airframe (2026-10-27): ardupilot_gazebo's Iris (local copy iris_ardupilot_dt25: rotor p_gain for the 2.5 ms step) - ArduPilotPlugin (lock-step JSON link to arducopter on
+     UDP 9002, IMU iris_with_standoffs::imu_link::imu_sensor, 4 prop joints + LiftDrag) - with the same payload as the PX4
+     x500_d435_vio: D435 12 cm forward / 15 cm up, Arducam IMX219 fisheye 13 cm forward / 3 cm below base_link looking
+     straight down (keep in step with MOUNT in src/vio_bringup/launch/sim_arducam.launch.py), ground truth under
+     /sim/ground_truth. Params: ../../ardupilot_sim_params.parm (with gazebo-iris.parm). Started by run_competition_ap.sh. -->
+<sdf version='1.9'>
+  <model name='iris_d435_vio'>
+    <include merge='true'>
+      <uri>model://iris_ardupilot_dt25</uri>
+    </include>
+    <include merge='true'>
+      <uri>model://realsense_d435_vio</uri>
+      <pose>.12 0 .15 0 0 0</pose>
+    </include>
+    <joint name="CameraJoint" type="fixed">
+      <parent>iris_with_standoffs::base_link</parent>
+      <child>camera_link</child>
+      <pose relative_to="iris_with_standoffs::base_link">.12 0 .15 0 0 0</pose>
+    </joint>
+    <include merge='true'>
+      <uri>model://arducam_imx219_fisheye</uri>
+      <pose>.13 0 -.03 0 1.570796 0</pose>
+    </include>
+    <joint name="ArducamJoint" type="fixed">
+      <parent>iris_with_standoffs::base_link</parent>
+      <child>arducam_link</child>
+      <pose relative_to="iris_with_standoffs::base_link">.13 0 -.03 0 1.570796 0</pose>
+    </joint>
+    <!-- ground truth for comparing estimates: world-frame pose + velocity, all topics under /sim/ground_truth -->
+    <plugin filename="gz-sim-odometry-publisher-system" name="gz::sim::systems::OdometryPublisher">
+      <dimensions>3</dimensions>
+      <odom_frame>map</odom_frame>
+      <robot_base_frame>ground_truth</robot_base_frame>
+      <odom_topic>/sim/ground_truth/odom</odom_topic>
+      <odom_covariance_topic>/sim/ground_truth/odom_with_covariance</odom_covariance_topic>
+      <tf_topic>/sim/ground_truth/tf</tf_topic>
+      <odom_publish_frequency>50</odom_publish_frequency>
+    </plugin>
+  </model>
+</sdf>

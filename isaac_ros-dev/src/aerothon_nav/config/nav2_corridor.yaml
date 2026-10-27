@@ -1,0 +1,347 @@
+# Nav2 for corridor navigation (aerothon_nav corridor_nav.launch.py). Everything in `odom`
+# (PX4's estimate via odom_tf): rolling-window costmaps, no map server / AMCL.
+# Planner NavFn (A*), controller MPPI (omnidirectional). Obstacles: /vio/obstacle_scan (D435 depth -> levelled LaserScan at flight height).
+# NOTE: the scan is ~3 m above odom's origin, so min/max_obstacle_height are opened up at BOTH
+# levels: the per-source ones (scan.*) and the obstacle layer's own (default max 2.0 m), which
+# silently dropped every point at flight height while empty bearings kept clearing the map
+# (2026-10-19: the return lap flew into obstacle 2 with an empty costmap).
+
+bt_navigator:
+  ros__parameters:
+    global_frame: odom
+    robot_base_frame: base_link
+    odom_topic: /nav/odom
+    bt_loop_duration: 10
+    default_server_timeout: 20000       # ms for Nav2's own servers to acknowledge a BT action: at 20, and at 1000
+    #                                    in the delivery Nav2, actions timed out on the loaded Jetson sim and
+    #                                    every goal aborted
+    # default_nav_to_pose_bt_xml: set by the launch file (behavior_trees/navigate_corridor.xml)
+    plugin_lib_names:
+      - nav2_compute_path_to_pose_action_bt_node
+      - nav2_compute_path_through_poses_action_bt_node
+      - nav2_smooth_path_action_bt_node
+      - nav2_follow_path_action_bt_node
+      - nav2_spin_action_bt_node
+      - nav2_wait_action_bt_node
+      - nav2_assisted_teleop_action_bt_node
+      - nav2_back_up_action_bt_node
+      - nav2_drive_on_heading_bt_node
+      - nav2_clear_costmap_service_bt_node
+      - nav2_is_stuck_condition_bt_node
+      - nav2_goal_reached_condition_bt_node
+      - nav2_goal_updated_condition_bt_node
+      - nav2_globally_updated_goal_condition_bt_node
+      - nav2_is_path_valid_condition_bt_node
+      - nav2_initial_pose_received_condition_bt_node
+      - nav2_reinitialize_global_localization_service_bt_node
+      - nav2_rate_controller_bt_node
+      - nav2_distance_controller_bt_node
+      - nav2_speed_controller_bt_node
+      - nav2_truncate_path_action_bt_node
+      - nav2_truncate_path_local_action_bt_node
+      - nav2_goal_updater_node_bt_node
+      - nav2_recovery_node_bt_node
+      - nav2_pipeline_sequence_bt_node
+      - nav2_round_robin_node_bt_node
+      - nav2_transform_available_condition_bt_node
+      - nav2_time_expired_condition_bt_node
+      - nav2_path_expiring_timer_condition
+      - nav2_distance_traveled_condition_bt_node
+      - nav2_single_trigger_bt_node
+      - nav2_goal_updated_controller_bt_node
+      - nav2_is_battery_low_condition_bt_node
+      - nav2_navigate_through_poses_action_bt_node
+      - nav2_navigate_to_pose_action_bt_node
+      - nav2_remove_passed_goals_action_bt_node
+      - nav2_planner_selector_bt_node
+      - nav2_controller_selector_bt_node
+      - nav2_goal_checker_selector_bt_node
+      - nav2_controller_cancel_bt_node
+      - nav2_path_longer_on_approach_bt_node
+      - nav2_wait_cancel_bt_node
+      - nav2_spin_cancel_bt_node
+      - nav2_back_up_cancel_bt_node
+      - nav2_assisted_teleop_cancel_bt_node
+      - nav2_drive_on_heading_cancel_bt_node
+      - nav2_is_battery_charging_condition_bt_node
+
+controller_server:
+  ros__parameters:
+    controller_frequency: 20.0
+    min_x_velocity_threshold: 0.001
+    min_y_velocity_threshold: 0.001
+    min_theta_velocity_threshold: 0.001
+    failure_tolerance: 0.3
+    progress_checker_plugin: "progress_checker"
+    goal_checker_plugins: ["general_goal_checker"]
+    controller_plugins: ["FollowPath"]
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"
+      required_movement_radius: 0.3
+      movement_time_allowance: 90.0               # s: the altitude planner slows Nav2 while changing height (stalled 10 s at a corridor mouth, 2026-10-20)
+    general_goal_checker:
+      plugin: "nav2_controller::SimpleGoalChecker"
+      stateful: True
+      xy_goal_tolerance: 0.3
+      yaw_goal_tolerance: 3.2          # heading at the goal doesn't matter
+    # MPPI with the omnidirectional model: the drone can slide sideways through a slalom instead of
+    # turning its nose first. Regulated Pure Pursuit (car-like) lagged ~1 m behind a plan that had to
+    # shift 1 m sideways within 1.5 m and flew into the obstacle (2026-10-19). No reversing: the
+    # D435 only looks forward; PathAngleCritic keeps the nose roughly along the path.
+    FollowPath:
+      plugin: "nav2_mppi_controller::MPPIController"
+      motion_model: "Omni"
+      time_steps: 56                   # x model_dt = 2.8 s horizon
+      model_dt: 0.05                   # = 1 / controller_frequency
+      batch_size: 2000
+      iteration_count: 1
+      vx_std: 0.2
+      vy_std: 0.2
+      wz_std: 0.4
+      # speed caps: the drone follows a command ~0.85 s late (PX4 velocity loop + tilt, measured), and
+      # MPPI (Humble) plans as if instantly - overshoot ~ speed x lag clipped slalom corners at 1.0 / 0.6 / 1.2
+      vx_max: 0.7
+      vx_min: 0.0
+      vy_max: 0.4
+      wz_max: 0.8
+      temperature: 0.3
+      gamma: 0.015
+      prune_distance: 2.0
+      transform_tolerance: 0.3
+      reset_period: 1.0
+      regenerate_noises: false
+      visualize: false
+      critics: ["ConstraintCritic", "CostCritic", "GoalCritic", "GoalAngleCritic", "PathAlignCritic",
+                "PathFollowCritic", "PathAngleCritic", "PreferForwardCritic"]
+      ConstraintCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 4.0
+      CostCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0               # 3.81 (Nav2 default) passed obstacles at 0.50-0.55 m centre clearance
+        critical_cost: 300.0
+        consider_footprint: true       # the square drone in a narrow corridor: check its outline, not a circle
+        collision_cost: 1000000.0
+        near_goal_distance: 1.0
+        trajectory_point_step: 2
+      GoalCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        threshold_to_consider: 1.4
+      GoalAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 0.0               # heading at the (rolling) goal doesn't matter
+        threshold_to_consider: 0.5
+      PathAlignCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 14.0
+        max_path_occupancy_ratio: 0.05
+        trajectory_point_step: 4
+        threshold_to_consider: 0.5
+        offset_from_furthest: 20
+        use_path_orientations: false
+      PathFollowCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        offset_from_furthest: 5
+        threshold_to_consider: 1.4
+      PathAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 2.0
+        offset_from_furthest: 4
+        threshold_to_consider: 0.5
+        max_angle_to_furthest: 1.0
+        forward_preference: true
+      PreferForwardCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        threshold_to_consider: 0.5
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      update_frequency: 10.0
+      publish_frequency: 5.0
+      global_frame: odom
+      robot_base_frame: base_link
+      rolling_window: true
+      width: 8
+      height: 8
+      resolution: 0.05
+      # course v2: 0.6 x 0.6 m prop-tip outline (user: plan the drone as 0.6 m) in 1.52-1.83 m corridors.
+      # Course v1 used robot_radius 0.35-0.5 (snapshot ~/AeroTHON/snapshots, TESTING.md margin notes)
+      footprint: "[[0.3, 0.3], [0.3, -0.3], [-0.3, -0.3], [-0.3, 0.3]]"
+      transform_tolerance: 0.3
+      plugins: ["obstacle_layer", "virtual_layer", "inflation_layer"]
+      virtual_layer:                   # corridor_nav: lines just outside the corridor walls while inside, so
+        plugin: "nav2_costmap_2d::ObstacleLayer"   # plans can't go round the walls through unmapped space.
+        enabled: True                  # Own layer: the scan's free-space rays cleared them in the shared one
+        min_obstacle_height: -100.0    # and the drone went round them (2026-10-19)
+        max_obstacle_height: 100.0
+        observation_sources: virtual
+        virtual:
+          topic: /nav/corridor/virtual_walls
+          data_type: "PointCloud2"
+          marking: True
+          clearing: False
+          obstacle_max_range: 50.0
+          min_obstacle_height: -100.0
+          max_obstacle_height: 100.0
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        min_obstacle_height: -100.0
+        max_obstacle_height: 100.0
+        observation_sources: scan
+        scan:
+          topic: /vio/obstacle_scan
+          data_type: "LaserScan"
+          marking: True
+          clearing: True
+          inf_is_valid: True           # empty bins are inf: clear along them
+          obstacle_max_range: 5.5
+          obstacle_min_range: 0.2
+          raytrace_max_range: 6.0
+          raytrace_min_range: 0.0
+          min_obstacle_height: -100.0
+          max_obstacle_height: 100.0
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 3.0       # NOT lower: at 2.0 a 1.6 m gap cost about as much as unmapped
+                                       # space (253) and plans flipped between the gap and detours
+                                       # through the unknown - the drone dithered and stalled
+        inflation_radius: 0.6          # inscribed 0.3 + 0.3 fall-off: the centre of a 1.52 m corridor stays free
+      always_send_full_costmap: True
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      update_frequency: 5.0
+      publish_frequency: 2.0
+      global_frame: odom
+      robot_base_frame: base_link
+      rolling_window: true             # no prior map: remember what the D435 has seen nearby
+      width: 40
+      height: 40
+      resolution: 0.1
+      footprint: "[[0.3, 0.3], [0.3, -0.3], [-0.3, -0.3], [-0.3, 0.3]]"   # = local costmap (see there)
+      track_unknown_space: true
+      transform_tolerance: 0.3
+      plugins: ["slam_layer", "obstacle_layer", "virtual_layer", "inflation_layer"]
+      slam_layer:                      # slam_toolbox's 2D map of the corridors (/map, map frame, transformed
+        plugin: "nav2_costmap_2d::StaticLayer"   # into odom through its map -> odom), under the live layers
+        map_topic: /map
+        map_subscribe_transient_local: True
+        subscribe_to_updates: False
+        trinary_costmap: True
+      virtual_layer:                   # corridor_nav: lines just outside the corridor walls while inside, so
+        plugin: "nav2_costmap_2d::ObstacleLayer"   # plans can't go round the walls through unmapped space.
+        enabled: True                  # Own layer: the scan's free-space rays cleared them in the shared one
+        min_obstacle_height: -100.0    # and the drone went round them (2026-10-19)
+        max_obstacle_height: 100.0
+        observation_sources: virtual
+        virtual:
+          topic: /nav/corridor/virtual_walls
+          data_type: "PointCloud2"
+          marking: True
+          clearing: False
+          obstacle_max_range: 50.0
+          min_obstacle_height: -100.0
+          max_obstacle_height: 100.0
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        min_obstacle_height: -100.0
+        max_obstacle_height: 100.0
+        observation_sources: scan
+        scan:
+          topic: /vio/obstacle_scan
+          data_type: "LaserScan"
+          marking: True
+          clearing: True
+          inf_is_valid: True
+          obstacle_max_range: 5.5
+          obstacle_min_range: 0.2
+          raytrace_max_range: 6.0
+          raytrace_min_range: 0.0
+          min_obstacle_height: -100.0
+          max_obstacle_height: 100.0
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 3.0       # NOT lower: at 2.0 a 1.6 m gap cost about as much as unmapped
+                                       # space (253) and plans flipped between the gap and detours
+                                       # through the unknown - the drone dithered and stalled
+        inflation_radius: 0.6          # inscribed 0.3 + 0.3 fall-off: the centre of a 1.52 m corridor stays free
+      always_send_full_costmap: True
+
+planner_server:
+  ros__parameters:
+    expected_planner_frequency: 2.0
+    planner_plugins: ["GridBased"]
+    GridBased:
+      plugin: "nav2_navfn_planner/NavfnPlanner"
+      tolerance: 0.5
+      use_astar: true
+      allow_unknown: true              # the corridor ahead is unknown until the D435 sees it
+
+smoother_server:
+  ros__parameters:
+    smoother_plugins: ["simple_smoother"]
+    simple_smoother:
+      plugin: "nav2_smoother::SimpleSmoother"
+      tolerance: 1.0e-10
+      max_its: 1000
+      do_refinement: True
+
+behavior_server:
+  ros__parameters:
+    costmap_topic: local_costmap/costmap_raw
+    footprint_topic: local_costmap/published_footprint
+    cycle_frequency: 10.0
+    # spin / backup are never used by navigate_corridor.xml, but Humble's bt_navigator also loads the
+    # default navigate-through-poses tree, which fails to load without them
+    behavior_plugins: ["spin", "backup", "wait"]
+    spin:
+      plugin: "nav2_behaviors/Spin"
+    backup:
+      plugin: "nav2_behaviors/BackUp"
+    wait:
+      plugin: "nav2_behaviors/Wait"
+    global_frame: odom
+    robot_base_frame: base_link
+    transform_tolerance: 0.3
+
+waypoint_follower:
+  ros__parameters:
+    loop_rate: 20
+    stop_on_failure: false
+    waypoint_task_executor_plugin: "wait_at_waypoint"
+    wait_at_waypoint:
+      plugin: "nav2_waypoint_follower::WaitAtWaypoint"
+      enabled: True
+      waypoint_pause_duration: 0
+
+velocity_smoother:
+  ros__parameters:
+    smoothing_frequency: 20.0
+    scale_velocities: False
+    feedback: "OPEN_LOOP"
+    max_velocity: [0.7, 0.4, 0.8]      # vx, vy (omni: the drone may strafe), wz - as MPPI's limits
+    min_velocity: [0.0, -0.4, -0.8]
+    # just under PX4's MPC_ACC_HOR (3 m/s^2): the drone itself limits acceleration. At 1.0 the smoother added
+    # ~1 s to a 0.6 m/s strafe reversal on top of PX4's own ~0.85 s velocity lag; MPPI (Humble: no
+    # acceleration model) assumed instant velocity, and the drone clipped slalom corners (2026-10-19)
+    max_accel: [2.5, 2.5, 2.0]
+    max_decel: [-2.5, -2.5, -2.0]
+    odom_topic: "/nav/odom"
+    odom_duration: 0.1
+    deadband_velocity: [0.0, 0.0, 0.0]
+    velocity_timeout: 1.0

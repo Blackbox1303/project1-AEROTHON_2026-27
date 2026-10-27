@@ -1,0 +1,24 @@
+# Camera rig: Pixhawk IMU (imu_link, FLU) -> D435 (camera_link, FLU, x forward).
+# Read by the launch files; rewritten by calibration/kalibr_to_rig.py.
+source: manual  # test bench: camera 6 cm in front of the Pixhawk, same plane, both facing forward
+
+# pose of camera_link expressed in imu_link
+imu_to_camera:
+  translation: [0.06, 0.0, 0.0]        # metres
+  rotation_xyzw: [0.0, 0.0, 0.0, 1.0]
+
+# added to IMU stamps by imu_relay (= -timeshift_cam_imu from Kalibr)
+time_offset: 0.0  # seconds
+
+# Continuous-time IMU noise (Kalibr / cuVSLAM convention).
+# Values below are for the bench FMUv2: MPU6000 datasheet (gyro 8.7e-5 rad/s/sqrt(Hz), accel
+# 3.9e-3 m/s^2/sqrt(Hz)) inflated ~3x for PX4 filtering and airframe vibration.
+# For the Pixhawk 6C Mini replace them: its primary IMU is an ICM-42688-P (datasheet gyro
+# ~4.9e-5, accel ~6.9e-4; inflate similarly), and recalibrate with Kalibr on the 6C (M3).
+# Allan-variance results beat datasheet values; inflate further if VIO is jittery in flight.
+imu_noise:
+  gyro_noise_density: 3.0e-4   # rad/s/sqrt(Hz)
+  gyro_random_walk: 2.0e-5     # rad/s^2/sqrt(Hz)
+  accel_noise_density: 1.2e-2  # m/s^2/sqrt(Hz)
+  accel_random_walk: 3.0e-3    # m/s^3/sqrt(Hz)
+  rate_hz: 200.0

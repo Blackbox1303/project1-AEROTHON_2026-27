@@ -1,0 +1,12 @@
+{
+    "version": 1,
+    "fileType": "MavlinkActions",
+    "actions": [
+        { "label": "Jetson: launch stack", "description": "Start the onboard mission stack (real drone)", "mavCmd": 31010, "compId": 194, "param1": 1 },
+        { "label": "Jetson: start FULL mission", "description": "Tunnels + QR area + exit (needs READY + green preflight)", "mavCmd": 31010, "compId": 194, "param1": 3 },
+        { "label": "Jetson: start DELIVERY only", "description": "Take-off at / near the zone, search, drop, home", "mavCmd": 31010, "compId": 194, "param1": 4 },
+        { "label": "Jetson: ABORT", "description": "Supervisor failsafe: hold, then land", "mavCmd": 31010, "compId": 194, "param1": 5 },
+        { "label": "Jetson: status now", "description": "Send the onboard status", "mavCmd": 31010, "compId": 194, "param1": 6 },
+        { "label": "Jetson: stop stack", "description": "Stop the onboard mission stack", "mavCmd": 31010, "compId": 194, "param1": 2 }
+    ]
+}

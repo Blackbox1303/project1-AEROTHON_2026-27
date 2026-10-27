@@ -1,0 +1,314 @@
+{
+  "frame": "world ENU, spawn at the origin facing +x",
+  "seed": 2,
+  "start_qr": {
+    "name": "qr_start",
+    "x": 1.5,
+    "y": 0.0,
+    "size": 1.5,
+    "payload": "AEROTHON26-KILO-4476",
+    "modules": 21
+  },
+  "course": "v2",
+  "corridors": [
+    {
+      "lap": "forward",
+      "centre_y": 1.56,
+      "x_from": 5.0,
+      "x_to": 15.0,
+      "width": 1.83,
+      "wall_height": 2.74,
+      "entrance_x": 5.0,
+      "banner_colour": "green",
+      "banners": [
+        {
+          "mount": "top",
+          "centre": [
+            4.95,
+            1.565,
+            2.89
+          ],
+          "normal": [
+            -1,
+            0,
+            0
+          ],
+          "width": 2.13,
+          "height": 0.3
+        },
+        {
+          "mount": "ground",
+          "centre": [
+            3.5,
+            1.565,
+            0.008
+          ],
+          "normal": [
+            0,
+            0,
+            1
+          ],
+          "width": 2.13,
+          "height": 0.6
+        }
+      ],
+      "obstacles": []
+    },
+    {
+      "lap": "return",
+      "centre_y": -1.51,
+      "x_from": 5.0,
+      "x_to": 15.0,
+      "width": 1.72,
+      "wall_height": 2.74,
+      "entrance_x": 15.0,
+      "banner_colour": "orange",
+      "banners": [
+        {
+          "mount": "top",
+          "centre": [
+            15.05,
+            -1.51,
+            2.89
+          ],
+          "normal": [
+            1,
+            0,
+            0
+          ],
+          "width": 2.02,
+          "height": 0.3
+        },
+        {
+          "mount": "ground",
+          "centre": [
+            16.5,
+            -1.51,
+            0.008
+          ],
+          "normal": [
+            0,
+            0,
+            1
+          ],
+          "width": 2.02,
+          "height": 0.6
+        }
+      ],
+      "obstacles": [
+        {
+          "kind": "window",
+          "x": 7.12,
+          "y": -1.51,
+          "z": 1.37,
+          "size_x": 0.39,
+          "size_y": 1.72,
+          "size_z": 2.74,
+          "parts": [
+            {
+              "x": 7.12,
+              "y": -2.328,
+              "z": 1.37,
+              "size_x": 0.39,
+              "size_y": 0.085,
+              "size_z": 2.74
+            },
+            {
+              "x": 7.12,
+              "y": -0.953,
+              "z": 1.37,
+              "size_x": 0.39,
+              "size_y": 0.605,
+              "size_z": 2.74
+            },
+            {
+              "x": 7.12,
+              "y": -1.77,
+              "z": 0.435,
+              "size_x": 0.39,
+              "size_y": 1.03,
+              "size_z": 0.87
+            },
+            {
+              "x": 7.12,
+              "y": -1.77,
+              "z": 2.3,
+              "size_x": 0.39,
+              "size_y": 1.03,
+              "size_z": 0.88
+            }
+          ],
+          "opening": {
+            "y": -1.77,
+            "z_bottom": 0.87,
+            "width": 1.03,
+            "height": 0.99
+          }
+        },
+        {
+          "kind": "partial",
+          "x": 9.16,
+          "y": -1.0,
+          "z": 1.37,
+          "size_x": 0.38,
+          "size_y": 0.71,
+          "size_z": 2.74,
+          "parts": [
+            {
+              "x": 9.16,
+              "y": -1.005,
+              "z": 1.37,
+              "size_x": 0.38,
+              "size_y": 0.71,
+              "size_z": 2.74
+            }
+          ]
+        },
+        {
+          "kind": "box",
+          "x": 10.89,
+          "y": -1.51,
+          "z": 0.635,
+          "size_x": 0.28,
+          "size_y": 1.72,
+          "size_z": 1.27,
+          "parts": [
+            {
+              "x": 10.89,
+              "y": -1.51,
+              "z": 0.635,
+              "size_x": 0.28,
+              "size_y": 1.72,
+              "size_z": 1.27
+            }
+          ]
+        },
+        {
+          "kind": "window",
+          "x": 13.0,
+          "y": -1.51,
+          "z": 1.37,
+          "size_x": 0.35,
+          "size_y": 1.72,
+          "size_z": 2.74,
+          "parts": [
+            {
+              "x": 13.0,
+              "y": -2.08,
+              "z": 1.37,
+              "size_x": 0.35,
+              "size_y": 0.58,
+              "size_z": 2.74
+            },
+            {
+              "x": 13.0,
+              "y": -0.67,
+              "z": 1.37,
+              "size_x": 0.35,
+              "size_y": 0.04,
+              "size_z": 2.74
+            },
+            {
+              "x": 13.0,
+              "y": -1.24,
+              "z": 0.835,
+              "size_x": 0.35,
+              "size_y": 1.1,
+              "size_z": 1.67
+            },
+            {
+              "x": 13.0,
+              "y": -1.24,
+              "z": 2.675,
+              "size_x": 0.35,
+              "size_y": 1.1,
+              "size_z": 0.13
+            }
+          ],
+          "opening": {
+            "y": -1.24,
+            "z_bottom": 1.67,
+            "width": 1.1,
+            "height": 0.94
+          }
+        }
+      ]
+    }
+  ],
+  "delivery_zone": {
+    "x_from": 15.0,
+    "x_to": 55.0,
+    "y_from": -15.0,
+    "y_to": 15.0
+  },
+  "red_zones": [
+    {
+      "x": 42.9,
+      "y": 2.0,
+      "size_x": 10.0,
+      "size_y": 6.0,
+      "x_from": 37.9,
+      "x_to": 47.9,
+      "y_from": -1.0,
+      "y_to": 5.0
+    },
+    {
+      "x": 30.0,
+      "y": 4.5,
+      "size_x": 4.0,
+      "size_y": 3.0,
+      "x_from": 28.0,
+      "x_to": 32.0,
+      "y_from": 3.0,
+      "y_to": 6.0
+    }
+  ],
+  "delivery_qrs": [
+    {
+      "name": "qr_0",
+      "x": 21.8,
+      "y": 10.9,
+      "size": 1.5,
+      "payload": "AEROTHON26-ALPHA-6048",
+      "modules": 25,
+      "target": false
+    },
+    {
+      "name": "qr_1",
+      "x": 49.4,
+      "y": 10.9,
+      "size": 1.5,
+      "payload": "AEROTHON26-BRAVO-5121",
+      "modules": 25,
+      "target": false
+    },
+    {
+      "name": "qr_2",
+      "x": 23.3,
+      "y": -3.0,
+      "size": 1.5,
+      "payload": "AEROTHON26-KILO-4476",
+      "modules": 21,
+      "target": true
+    },
+    {
+      "name": "qr_3",
+      "x": 32.9,
+      "y": -11.6,
+      "size": 1.5,
+      "payload": "AEROTHON26-CHARLIE-1585",
+      "modules": 25,
+      "target": false
+    },
+    {
+      "name": "qr_4",
+      "x": 43.4,
+      "y": -8.0,
+      "size": 1.5,
+      "payload": "AEROTHON26-HOTEL-3594",
+      "modules": 25,
+      "target": false
+    }
+  ],
+  "target": "qr_2"
+}

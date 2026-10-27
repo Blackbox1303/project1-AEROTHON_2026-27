@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- PX4 x500 + the project's D435: 12 cm forward, 15 cm up, facing forward (same mount as x500_d435)
+     + Arducam IMX219 fisheye under it, looking straight down (90 deg; 45 deg nose-down until 2026-10-25: .bak_45deg). Its position on the real drone
+     is not decided yet: 13 cm forward, 3 cm below base_link (under the body plate, which it would see from 10 cm up) is a placeholder; keep it in step with
+     MOUNT in src/vio_bringup/launch/sim_arducam.launch.py. -->
+<sdf version='1.9'>
+  <model name='x500_d435_vio'>
+    <include merge='true'>
+      <uri>x500</uri>
+    </include>
+    <include merge='true'>
+      <uri>model://realsense_d435_vio</uri>
+      <pose>.12 0 .15 0 0 0</pose>
+    </include>
+    <joint name="CameraJoint" type="fixed">
+      <parent>base_link</parent>
+      <child>camera_link</child>
+      <pose relative_to="base_link">.12 0 .15 0 0 0</pose>
+    </joint>
+    <include merge='true'>
+      <uri>model://arducam_imx219_fisheye</uri>
+      <pose>.13 0 -.03 0 1.570796 0</pose>
+    </include>
+    <joint name="ArducamJoint" type="fixed">
+      <parent>base_link</parent>
+      <child>arducam_link</child>
+      <pose relative_to="base_link">.13 0 -.03 0 1.570796 0</pose>
+    </joint>
+    <!-- ground truth for comparing VIO / PX4 estimates: world-frame pose + velocity of the model.
+         ALL its topics are moved under /sim/ground_truth: the default covariance topic
+         /model/<name>/odometry_with_covariance is what PX4's gz_bridge reads as external vision,
+         so PX4 would silently fuse perfect ground truth. -->
+    <plugin filename="gz-sim-odometry-publisher-system" name="gz::sim::systems::OdometryPublisher">
+      <dimensions>3</dimensions>
+      <odom_frame>map</odom_frame>
+      <robot_base_frame>ground_truth</robot_base_frame>
+      <odom_topic>/sim/ground_truth/odom</odom_topic>
+      <odom_covariance_topic>/sim/ground_truth/odom_with_covariance</odom_covariance_topic>
+      <tf_topic>/sim/ground_truth/tf</tf_topic>
+      <odom_publish_frequency>50</odom_publish_frequency>
+    </plugin>
+  </model>
+</sdf>

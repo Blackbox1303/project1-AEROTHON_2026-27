@@ -1,0 +1,8 @@
+# SIM ONLY (launch_all/host_all.launch.py), on top of mavros_host_plugins.yaml. ArduCopter SITL is lock-stepped to Gazebo:
+# its 1 Hz HEARTBEAT is 1 Hz in sim time, and at the Jetson's real-time-factor dips (0.015, 2026-10-27) the gaps reached
+# ~60 s of wall time. MAVROS's default 10 s timeout then dropped the connection over and over: /mavros/state flipped to
+# mode '' and offboard_bridge took that for a mode change (it stopped streaming; the drone hovered through ALIGN_GREEN).
+# The real drone keeps the default: there a 10 s gap is a real link loss.
+/**/sys:
+  ros__parameters:
+    conn_timeout: 120.0

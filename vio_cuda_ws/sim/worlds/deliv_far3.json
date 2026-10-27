@@ -1,0 +1,284 @@
+{
+  "frame": "world ENU, spawn at the origin facing +x",
+  "seed": 13,
+  "start_qr": {
+    "name": "qr_start",
+    "x": 1.5,
+    "y": 0.0,
+    "size": 1.5,
+    "payload": "AEROTHON26-FOXTROT-3133",
+    "modules": 25
+  },
+  "course": "v2",
+  "corridors": [
+    {
+      "lap": "forward",
+      "centre_y": 1.49,
+      "x_from": 5.0,
+      "x_to": 15.0,
+      "width": 1.68,
+      "wall_height": 2.74,
+      "entrance_x": 5.0,
+      "banner_colour": "green",
+      "banners": [
+        {
+          "mount": "top",
+          "centre": [
+            4.95,
+            1.49,
+            2.89
+          ],
+          "normal": [
+            -1,
+            0,
+            0
+          ],
+          "width": 1.98,
+          "height": 0.3
+        },
+        {
+          "mount": "ground",
+          "centre": [
+            3.5,
+            1.49,
+            0.008
+          ],
+          "normal": [
+            0,
+            0,
+            1
+          ],
+          "width": 1.98,
+          "height": 0.6
+        }
+      ],
+      "obstacles": []
+    },
+    {
+      "lap": "return",
+      "centre_y": -1.45,
+      "x_from": 5.0,
+      "x_to": 15.0,
+      "width": 1.59,
+      "wall_height": 2.74,
+      "entrance_x": 15.0,
+      "banner_colour": "orange",
+      "banners": [
+        {
+          "mount": "top",
+          "centre": [
+            15.05,
+            -1.445,
+            2.89
+          ],
+          "normal": [
+            1,
+            0,
+            0
+          ],
+          "width": 1.89,
+          "height": 0.3
+        },
+        {
+          "mount": "ground",
+          "centre": [
+            16.5,
+            -1.445,
+            0.008
+          ],
+          "normal": [
+            0,
+            0,
+            1
+          ],
+          "width": 1.89,
+          "height": 0.6
+        }
+      ],
+      "obstacles": [
+        {
+          "kind": "partial",
+          "x": 6.92,
+          "y": -0.92,
+          "z": 1.37,
+          "size_x": 0.27,
+          "size_y": 0.54,
+          "size_z": 2.74,
+          "parts": [
+            {
+              "x": 6.92,
+              "y": -0.92,
+              "z": 1.37,
+              "size_x": 0.27,
+              "size_y": 0.54,
+              "size_z": 2.74
+            }
+          ]
+        },
+        {
+          "kind": "box",
+          "x": 9.13,
+          "y": -1.45,
+          "z": 0.805,
+          "size_x": 0.38,
+          "size_y": 1.59,
+          "size_z": 1.61,
+          "parts": [
+            {
+              "x": 9.13,
+              "y": -1.445,
+              "z": 0.805,
+              "size_x": 0.38,
+              "size_y": 1.59,
+              "size_z": 1.61
+            }
+          ]
+        },
+        {
+          "kind": "beam",
+          "x": 11.1,
+          "y": -1.45,
+          "z": 1.41,
+          "size_x": 0.37,
+          "size_y": 1.59,
+          "size_z": 0.3,
+          "parts": [
+            {
+              "x": 11.1,
+              "y": -1.445,
+              "z": 1.41,
+              "size_x": 0.37,
+              "size_y": 1.59,
+              "size_z": 0.3
+            }
+          ]
+        },
+        {
+          "kind": "window",
+          "x": 12.89,
+          "y": -1.45,
+          "z": 1.37,
+          "size_x": 0.33,
+          "size_y": 1.59,
+          "size_z": 2.74,
+          "parts": [
+            {
+              "x": 12.89,
+              "y": -2.21,
+              "z": 1.37,
+              "size_x": 0.33,
+              "size_y": 0.06,
+              "size_z": 2.74
+            },
+            {
+              "x": 12.89,
+              "y": -0.89,
+              "z": 1.37,
+              "size_x": 0.33,
+              "size_y": 0.48,
+              "size_z": 2.74
+            },
+            {
+              "x": 12.89,
+              "y": -1.655,
+              "z": 0.75,
+              "size_x": 0.33,
+              "size_y": 1.05,
+              "size_z": 1.5
+            },
+            {
+              "x": 12.89,
+              "y": -1.655,
+              "z": 2.615,
+              "size_x": 0.33,
+              "size_y": 1.05,
+              "size_z": 0.25
+            }
+          ],
+          "opening": {
+            "y": -1.655,
+            "z_bottom": 1.5,
+            "width": 1.05,
+            "height": 0.99
+          }
+        }
+      ]
+    }
+  ],
+  "delivery_zone": {
+    "x_from": 15.0,
+    "x_to": 55.0,
+    "y_from": -15.0,
+    "y_to": 15.0
+  },
+  "red_zones": [
+    {
+      "x": 42.9,
+      "y": 2.0,
+      "size_x": 10.0,
+      "size_y": 6.0,
+      "x_from": 37.9,
+      "x_to": 47.9,
+      "y_from": -1.0,
+      "y_to": 5.0
+    },
+    {
+      "x": 30.0,
+      "y": 4.5,
+      "size_x": 4.0,
+      "size_y": 3.0,
+      "x_from": 28.0,
+      "x_to": 32.0,
+      "y_from": 3.0,
+      "y_to": 6.0
+    }
+  ],
+  "delivery_qrs": [
+    {
+      "name": "qr_0",
+      "x": 21.8,
+      "y": 10.9,
+      "size": 1.5,
+      "payload": "AEROTHON26-ECHO-3411",
+      "modules": 21,
+      "target": false
+    },
+    {
+      "name": "qr_1",
+      "x": 49.4,
+      "y": 10.9,
+      "size": 1.5,
+      "payload": "AEROTHON26-LIMA-4689",
+      "modules": 21,
+      "target": false
+    },
+    {
+      "name": "qr_2",
+      "x": 23.3,
+      "y": -3.0,
+      "size": 1.5,
+      "payload": "AEROTHON26-CHARLIE-4069",
+      "modules": 25,
+      "target": false
+    },
+    {
+      "name": "qr_3",
+      "x": 32.9,
+      "y": -11.6,
+      "size": 1.5,
+      "payload": "AEROTHON26-FOXTROT-3133",
+      "modules": 25,
+      "target": true
+    },
+    {
+      "name": "qr_4",
+      "x": 43.4,
+      "y": -8.0,
+      "size": 1.5,
+      "payload": "AEROTHON26-BRAVO-2160",
+      "modules": 25,
+      "target": false
+    }
+  ],
+  "target": "qr_3"
+}

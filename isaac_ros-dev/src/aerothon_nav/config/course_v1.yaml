@@ -1,0 +1,14 @@
+# Corridor-node settings for the FIRST course (v1: 3.5 m corridors, 5 m walls, constant 10 ft altitude).
+# corridor_nav.launch.py course:=v1 loads this on top of the nodes' defaults (which are for course v2).
+entry_align:
+  ros__parameters:
+    corridor_width: 3.5
+    width_tol: 0.5
+    wall_band: [0.8, 3.0]
+    corridor_altitude: 3.05
+    max_banner_lateral: 4.0
+corridor_nav:
+  ros__parameters:
+    altitude: 3.05
+    half_width: 1.75
+    altitude_mode: fixed
