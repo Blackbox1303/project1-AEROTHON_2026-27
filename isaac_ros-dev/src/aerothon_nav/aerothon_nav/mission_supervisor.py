@@ -111,6 +111,8 @@ def pval(v):
         return ParameterValue(type=ParameterType.PARAMETER_BOOL, bool_value=v)
     if isinstance(v, (int, float)):
         return ParameterValue(type=ParameterType.PARAMETER_DOUBLE, double_value=float(v))
+    if isinstance(v, (list, tuple)):
+        return ParameterValue(type=ParameterType.PARAMETER_DOUBLE_ARRAY, double_array_value=[float(x) for x in v])
     return ParameterValue(type=ParameterType.PARAMETER_STRING, string_value=str(v))
 
 
@@ -156,6 +158,7 @@ class MissionSupervisor(Node):
         p('autopilot', os.environ.get('AEROTHON_AUTOPILOT', 'ardupilot'))   # px4 | ardupilot (offboard_bridge too)
         p('start_from', 'takeoff')    # takeoff (full mission) | delivery (delivery only) | tunnel (tunnels + banners
         #                               only: entry corridor, straight to the exit corridor, home) | search | exit (tests)
+        p('qr_count', 5)              # boards in the QR area: once that many are read the search ends, target or not
         p('drop', True)               # False: the QR area without the drop - explore + read everything, then out
         p('zone_time_limit', 540.0)   # s in the QR area at most (entry -> the start of the exit align / the way home)
         p('zone_exit_reserve', 150.0) # s of it kept for TO_EXIT + ALIGN_EXIT (full mission)
@@ -239,6 +242,8 @@ class MissionSupervisor(Node):
         self.create_subscription(String, '/nav/corridor/state', self.on_corridor_state, 10)
         self.create_subscription(String, '/delivery/explore/state', lambda m: setattr(self, 'explore_state', m.data), 10)
         self.create_subscription(PoseStamped, '/delivery/target', self.on_target, LATCHED)
+        self.qr_read = set()         # payloads qr_locator has read in this search (the qr_count end)
+        self.create_subscription(String, '/delivery/qrs', self.on_qrs, 10)
         self.target_fine = None
         self.create_subscription(String, '/delivery/target_fine',
                                  lambda m: setattr(self, 'target_fine', json.loads(m.data)), LATCHED)
@@ -310,9 +315,9 @@ class MissionSupervisor(Node):
         if self.abort_reason:
             raise Abort(self.abort_reason)
         if not self.g('no_timeout'):
-            if time.monotonic() - self.t_start > self.g('mission_time_limit'):
+            if self.clock_s() - self.t_start > self.g('mission_time_limit'):
                 raise Abort(f'mission time limit {self.g("mission_time_limit"):.0f} s')
-            if time.monotonic() > deadline:
+            if self.clock_s() > deadline:
                 raise Abort(f'{self.state} took longer than its limit')
 
     def wait(self, cond, deadline, period=0.2):
@@ -354,6 +359,14 @@ class MissionSupervisor(Node):
         return False
 
     def trigger(self, name, timeout=10.0, required=True):
+        if not required:
+            # housekeeping (search / explore stop): an answer that doesn't come must not abort the flight - a timed-out
+            # /delivery/search/stop after the target was read landed the drone in the zone (2026-10-27 sim)
+            try:
+                return self.call(self.srv[name], Trigger.Request(), timeout)
+            except Abort as e:
+                self.get_logger().warn(f'{name}: {e} - carrying on')
+                return Trigger.Response(success=False, message=str(e))
         r = self.call(self.srv[name], Trigger.Request(), timeout)
         if required and not r.success:
             raise Abort(f'{name}: {r.message}')
@@ -538,6 +551,13 @@ class MissionSupervisor(Node):
         res.success, res.message = True, 'aborting'
         return res
 
+    def on_qrs(self, m):
+        try:
+            qrs = json.loads(m.data).get('qrs') or []
+        except ValueError:
+            return
+        self.qr_read |= {q['payload'] for q in qrs if q.get('payload') and q.get('in_zone', True)}  # not the pad's start QR
+
     def on_operator(self, req, res):
         self.operator = True
         if self.running:
@@ -545,8 +565,14 @@ class MissionSupervisor(Node):
         res.success, res.message = True, 'mission handed to the operator' if self.running else 'no mission running'
         return res
 
+    def clock_s(self):
+        """The node clock in s: SIM time in the sim (use_sim_time), real time on the drone. Step limits and the
+        mission timer run on it - on the wall clock a sim at 0.3x real time "took too long" landing a drone that was
+        1.7 m up and descending normally (2026-10-27)."""
+        return self.get_clock().now().nanoseconds * 1e-9
+
     def limit(self, name):
-        return time.monotonic() + self.g(f'limit_{name}')
+        return self.clock_s() + self.g(f'limit_{name}')
 
     def set_params(self, client, **kv):
         self.call(client, SetParameters.Request(parameters=[Parameter(name=k, value=pval(v)) for k, v in kv.items()]))
@@ -705,6 +731,10 @@ class MissionSupervisor(Node):
                               round(gf['entrance'][1] + length * math.sin(yaw), 3)]
         gf['gps_end'] = self.gps_fix()
         self.save_geofence()
+        try:                                         # the explorer makes no candidate detours next to it
+            self.set_params(self.explorer_params, tunnel_end=[float(gf['corridor_end'][0]), float(gf['corridor_end'][1])])
+        except Abort as e:
+            self.get_logger().warn(f'explorer tunnel_end not set ({e})')
 
     def into_zone(self):
         """Fly straight along the entry corridor's heading until 2 m past its end, at the tunnel height (v3: the roof
@@ -843,7 +873,7 @@ class MissionSupervisor(Node):
         return found
 
     def run(self):
-        self.t_start = time.monotonic()
+        self.t_start = self.clock_s()
         self.t0_clock = self.get_clock().now()
         home = None
         try:
@@ -880,7 +910,7 @@ class MissionSupervisor(Node):
                 self.fly(x, y, max(z, self.g('home_altitude')), deadline)
                 self.fly(home[0], home[1], max(z, self.g('home_altitude')), deadline)
                 self.land()
-                self.set_state('DONE', time_s=round(time.monotonic() - self.t_start, 1))
+                self.set_state('DONE', time_s=round(self.clock_s() - self.t_start, 1))
                 return
             if self.g('read_start_qr'):
                 self.set_state('READ_START_QR')
@@ -949,10 +979,7 @@ class MissionSupervisor(Node):
                     except Abort as e:
                         self.get_logger().warn(f'explorer route end not set ({e})')
                 drop = self.g('drop')
-                try:
-                    self.set_params(self.explorer_params, stop_on_target=drop)
-                except Abort as e:
-                    self.get_logger().warn(f'explorer stop_on_target not set ({e})')
+                self.qr_read = set()
                 self.trigger('/delivery/map/reset')
                 self.trigger('/delivery/search/start')
                 self.trigger('/delivery/explore/start')
@@ -962,8 +989,10 @@ class MissionSupervisor(Node):
                     self.g('zone_home_reserve' if mode == 'delivery' else 'zone_exit_reserve')
                 in_zone = lambda: (self.get_clock().now() - zone_t0).nanoseconds * 1e-9  # noqa: E731
                 out_of_time = lambda: self.mission_elapsed() > search_end or in_zone() > zone_search  # noqa: E731
-                # no drop: the target doesn't end the search - explore it all (or until the time is up)
-                self.wait(lambda: (drop and self.target is not None) or self.explore_state.startswith('DONE')
+                # the target read ends the search (QR area only: then home and land; whole mission: the drop, then the
+                # exit corridor), and so do all qr_count boards read - the target among them was missed then
+                all_read = lambda: len(self.qr_read) >= self.g('qr_count')  # noqa: E731
+                self.wait(lambda: self.target is not None or all_read() or self.explore_state.startswith('DONE')
                           or out_of_time(), deadline, 0.5)
                 self.trigger('/delivery/explore/stop', required=False)
                 delivered = False
@@ -972,7 +1001,8 @@ class MissionSupervisor(Node):
                 elif self.target is None:
                     # out of time or nothing left to explore: no drop, but still finish the course within the budget
                     self.set_state('SEARCH_DELIVERY', skipped=('QR-area time' if in_zone() > zone_search else 'time budget')
-                                   if out_of_time() else f'target not found ({self.explore_state})')
+                                   if out_of_time() else f'all {len(self.qr_read)} QRs read, none matched the start QR'
+                                   if all_read() else f'target not found ({self.explore_state})')
                 else:
                     self.set_state('SEARCH_DELIVERY', target=[round(v, 2) for v in self.target])
                     delivered = True
@@ -1025,7 +1055,7 @@ class MissionSupervisor(Node):
                     if not self.g('return_corridor') and mode != 'delivery':
                         self.get_logger().info('Target reached and aligned. Landing on target...')
                         self.land()
-                        self.set_state('DONE', time_s=round(time.monotonic() - self.t_start, 1))
+                        self.set_state('DONE', time_s=round(self.clock_s() - self.t_start, 1))
                         return
 
                     if mode != 'delivery':
@@ -1033,7 +1063,7 @@ class MissionSupervisor(Node):
                 if mode == 'delivery':
                     self.zone_home(home, in_zone())
                     self.land()
-                    self.set_state('DONE', time_s=round(time.monotonic() - self.t_start, 1))
+                    self.set_state('DONE', time_s=round(self.clock_s() - self.t_start, 1))
                     return
             self.to_exit()
             self.nav2_use('corridor')
@@ -1047,7 +1077,7 @@ class MissionSupervisor(Node):
             self.fly(x, y, max(z, self.g('home_altitude')), deadline)
             self.fly(home[0], home[1], max(z, self.g('home_altitude')), deadline)
             self.land()
-            self.set_state('DONE', time_s=round(time.monotonic() - self.t_start, 1))
+            self.set_state('DONE', time_s=round(self.clock_s() - self.t_start, 1))
         except Abort as e:
             self.failsafe(str(e), home)
         except Exception as e:                       # any bug: still bring the drone home
@@ -1202,7 +1232,7 @@ class MissionSupervisor(Node):
         while self.mav.armed:
             if self.operator:                        # the operator's RTL / LAND / KILL: no LAND re-requests
                 raise Abort(self.abort_reason or 'operator took over')
-            if time.monotonic() > deadline:
+            if self.clock_s() > deadline:
                 raise Abort('landing took too long')
             if self.mav.mode != land and time.monotonic() - sent > 10.0:   # the request may have been lost
                 self.mav_call(self.set_mode, SetMode.Request(custom_mode=land))
@@ -1231,8 +1261,8 @@ class MissionSupervisor(Node):
             if self.odom is not None and self.airborne():
                 if self.mav.mode != self.modes['offboard']:
                     self.call(self.offboard, SetBool.Request(data=True))
-                self.t_start = time.monotonic()      # the failsafe has its own clock
-                deadline = time.monotonic() + self.g('limit_home') + 60
+                self.t_start = self.clock_s()        # the failsafe has its own clock
+                deadline = self.clock_s() + self.g('limit_home') + 60
                 x, y, z, _ = self.pose()
                 self.flight.hold(self.g('failsafe_hold'), z)
                 if in_corridor and self.window_seen:

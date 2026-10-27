@@ -89,6 +89,16 @@ class FrontierExplorer(Node):
         #                              then frontiers | frontier: frontiers only
         p('cand_hover', 1.5)         # s over a candidate for qr_locator to decode it (3 Hz: ~4 tries)
         p('cand_reach', 1.2)         # m: a candidate this close counts as reached
+        p('cand_verify_max', 12.0)   # s (sim / ROS time) from arriving over a candidate: hover + look-round, then it
+        #                              is dropped - one false board (tunnel banner) cost 65 s of a 330 s search (2026-10-27)
+        # negative evidence / decay (planner side - qr_locator only reports sightings): a candidate whose spot the
+        # readable footprint (gain_radius) passed over cand_miss_passes times without a new sighting, or that has had
+        # no sighting for cand_stale_s (sim / ROS time), is ignored - a one-off blob on grainy video stays a detour
+        # target forever otherwise
+        p('cand_miss_passes', 2)
+        p('cand_stale_s', 60.0)
+        p('lane_row_frac', 0.25)     # share of the lane strip's width unexplored that makes a lane row worth flying
+        #                              (2 cells kept slivers alive: the drone flew 25 m back for 4 m of lane 1, 2026-10-27)
         p('route_end_x', float('nan'))   # odom: where the drone heads after the search (set by the supervisor)
         p('route_end_y', float('nan'))
         p('commit_frac', 0.5)        # a leg this far done is finished before switching to a new plan
@@ -101,7 +111,6 @@ class FrontierExplorer(Node):
         p('escape_speed', 0.5)       # m/s
         p('lane_margin', 2.0)        # m inside the zone edge for the lane ends (1.5: corner ends aborted in 4 s)
         p('sweep_after', True)       # mode candidates: coverage lanes once no candidate is left, then frontiers
-        p('stop_on_target', True)    # False (the QR-area-only mission, no drop): keep exploring past the target
         p('use_nav2', False)         # False: A* on /delivery/map + straight flight (grid_path), True: delivery Nav2
         p('speed', 1.5)              # m/s along the A* route (rules: <= 10 km/h; 2.5 flew past boards, user 2026-10-25)
         p('look_radius', 1.5)        # m: an undecoded candidate gets a square of this half-size flown round it, the
@@ -110,11 +119,22 @@ class FrontierExplorer(Node):
         p('path_clearance', 0.6)     # m from red-margin / boundary cells for the route (the map's red margin is
         #                              already 1.5 m)
         p('snap_radius', 3.0)        # m: a candidate goal in a no-fly cell is read from the nearest free cell this near
+        # no candidate detours near the tunnels' zone-side ends: the banner / roof edge projects onto the ground just
+        # inside the zone and drew the search there twice per run, ~110 s (2026-10-27 sim). Sim: the ends from
+        # world_json; real flight: tunnel_end [x, y] set by the supervisor once the entry corridor is measured
+        p('tunnel_clear', 3.5)       # m round each tunnel end
+        p('tunnel_end', [0.0])       # [x, y, ...] extra tunnel ends (odom); [0] = none
         self.g = lambda n: self.get_parameter(n).value  # noqa: E731
+        self.tunnel_ends = []
         if self.g('world_json'):
-            z = json.load(open(self.g('world_json')))['delivery_zone']
+            w = json.load(open(self.g('world_json')))
+            z = w['delivery_zone']
             self.set_parameters([rclpy.parameter.Parameter('zone', value=[float(z['x_from']), float(z['x_to']),
                                                                            float(z['y_from']), float(z['y_to'])])])
+            zc = ((z['x_from'] + z['x_to']) / 2, (z['y_from'] + z['y_to']) / 2)
+            for c in w.get('corridors') or []:
+                ends = [(c['x_from'], c['centre_y']), (c['x_to'], c['centre_y'])]
+                self.tunnel_ends.append(min(ends, key=lambda e: math.dist(e, zc)))
         self.map = self.odom = None
         self.state = 'IDLE'
         self.goal = None             # (x, y, sent time)
@@ -128,6 +148,8 @@ class FrontierExplorer(Node):
         self.qrs, self.start_qr = [], ''
         self.cands, self.cand_done, self.cand_goal, self.cand_t, self.cand_leg = [], [], None, None, None
         self.cand_look = None        # look-around points left round the current candidate, None = not looking
+        self.cand_arrive = None      # ROS time (s) the drone arrived over the current candidate
+        self.cand_ev = []            # per candidate spot: {x, y, n, t_hit, inside, n_enter, misses, dead}
         self.visits = {}             # unconfirmed QR key -> arrivals over it
         self.confirming = None       # key of the QR the current goal confirms
         self.sweep, self.sweep_i, self.sweep_goal = [], 0, None   # lane-end waypoints, next one, the one sent
@@ -138,6 +160,8 @@ class FrontierExplorer(Node):
         self.state_pub = self.create_publisher(String, '/delivery/explore/state', 10)
         self.goal_pub = self.create_publisher(PoseStamped, '/delivery/explore/goal', 10)
         self.create_subscription(OccupancyGrid, '/delivery/map', lambda m: setattr(self, 'map', m), LATCHED)
+        self.red = None              # /delivery/red: 100 = inside a red zone (no margin)
+        self.create_subscription(OccupancyGrid, '/delivery/red', lambda m: setattr(self, 'red', m), LATCHED)
         self.create_subscription(Odometry, '/nav/odom', lambda m: setattr(self, 'odom', m), 10)
         self.create_subscription(PoseStamped, '/delivery/target', self.on_target, LATCHED)
         self.create_subscription(String, '/delivery/qrs', self.on_qrs, 10)
@@ -157,6 +181,7 @@ class FrontierExplorer(Node):
 
     def on_start(self, req, res):
         self.cand_done, self.cand_goal, self.cand_t, self.cand_look = [], None, None, None
+        self.cand_ev = []
         self.blacklist, self.failures, self.retried = [], [], False
         self.visits, self.confirming = {}, None
         self.sweep, self.sweep_i, self.sweep_goal = self.make_lanes(), 0, None
@@ -178,11 +203,58 @@ class FrontierExplorer(Node):
             return
         self.qrs, self.start_qr = d.get('qrs', []), d.get('start_qr') or ''
         self.cands = d.get('candidates', [])
+        now = self.now_s()
+        for c in self.cands:                          # new sightings: qr_locator's running count n went up
+            ev = next((e for e in self.cand_ev if math.dist((e['x'], e['y']), (c['x'], c['y'])) < 1.5), None)
+            if ev is None:
+                self.cand_ev.append({'x': c['x'], 'y': c['y'], 'n': c['n'], 't_hit': now, 'inside': False,
+                                     'n_enter': c['n'], 'misses': 0, 'dead': False})
+            elif c['n'] > ev['n']:
+                ev.update(x=c['x'], y=c['y'], n=c['n'], t_hit=now)
+
+    def cand_evidence(self):
+        """Each tick: count footprint passes over every candidate spot without a new sighting; mark the dead ones."""
+        p = self.odom.pose.pose.position
+        now = self.now_s()
+        for e in self.cand_ev:
+            if e['dead']:
+                continue
+            inside = math.hypot(e['x'] - p.x, e['y'] - p.y) < self.g('gain_radius')
+            if inside and not e['inside']:
+                e['n_enter'] = e['n']
+            elif e['inside'] and not inside and e['n'] == e['n_enter']:
+                e['misses'] += 1
+            e['inside'] = inside
+            why = (f'passed over {e["misses"]} times without a sighting' if e['misses'] >= self.g('cand_miss_passes')
+                   else f'no sighting for {now - e["t_hit"]:.0f} s' if now - e['t_hit'] > self.g('cand_stale_s') else '')
+            if why:
+                e['dead'] = True
+                self.get_logger().info(f'candidate at ({e["x"]:.1f}, {e["y"]:.1f}) ignored: {why}')
+
+    def near_tunnel(self, x, y):
+        t = list(self.g('tunnel_end'))
+        ends = self.tunnel_ends + [(t[k], t[k + 1]) for k in range(0, len(t) - 1, 2)]
+        return any(math.dist(e, (x, y)) < self.g('tunnel_clear') for e in ends)
+
+    def in_red(self, x, y):
+        """Inside a red zone: never a QR there (the course rules) - a red-zone "board" drew the drone 22 m off its
+        lane and round the no-fly margin for 100 s (2026-10-27 sim)."""
+        m = self.red
+        if m is None:
+            return False
+        i = int((x - m.info.origin.position.x) / m.info.resolution)
+        j = int((y - m.info.origin.position.y) / m.info.resolution)
+        return 0 <= i < m.info.width and 0 <= j < m.info.height and m.data[j * m.info.width + i] >= 100
+
+    def cand_dead(self, x, y):
+        return any(e['dead'] and math.dist((e['x'], e['y']), (x, y)) < 1.5 for e in self.cand_ev)
 
     def route(self):
         """Unvisited candidates in visiting order: the shortest open route drone -> all -> route_end."""
         p = self.odom.pose.pose.position
-        pts = [(c['x'], c['y']) for c in self.cands if all(math.dist((c['x'], c['y']), d) > 1.5 for d in self.cand_done)]
+        pts = [(c['x'], c['y']) for c in self.cands if all(math.dist((c['x'], c['y']), d) > 1.5 for d in self.cand_done)
+               and not self.cand_dead(c['x'], c['y']) and not self.in_red(c['x'], c['y'])
+               and not self.near_tunnel(c['x'], c['y'])]
         if len(pts) <= 1:
             return pts
         start = (p.x, p.y)
@@ -249,7 +321,20 @@ class FrontierExplorer(Node):
                 self.get_logger().info(f'candidate at ({gx:.1f}, {gy:.1f}) ' +
                                        ('read' if read else 'dropped by qr_locator (no decode) - the lanes cover it'))
                 self.cand_done.append((gx, gy))
-                self.cand_goal, self.cand_t, self.cand_look = None, None, None
+                self.cand_goal, self.cand_t, self.cand_look, self.cand_arrive = None, None, None, None
+            elif self.cand_arrive is None and self.cand_look is None and self.cand_dead(gx, gy):
+                self.get_logger().info(f'candidate at ({gx:.1f}, {gy:.1f}): no longer seen - not going')
+                self.cancel()
+                self.cand_done.append((gx, gy))
+                self.cand_goal, self.cand_t, self.cand_look, self.cand_arrive = None, None, None, None
+                return True
+            elif self.cand_arrive is not None and self.now_s() - self.cand_arrive > self.g('cand_verify_max'):
+                self.get_logger().info(f'candidate at ({gx:.1f}, {gy:.1f}): no decode in '
+                                       f'{self.g("cand_verify_max"):.0f} s - next')
+                self.cancel()
+                self.cand_done.append((gx, gy))
+                self.cand_goal, self.cand_t, self.cand_look, self.cand_arrive = None, None, None, None
+                return True
             elif self.cand_look is not None:
                 # looking around: next corner of the square once the last one is reached (or failed)
                 if self.goal_done:
@@ -258,30 +343,34 @@ class FrontierExplorer(Node):
                     else:
                         self.get_logger().info(f'candidate at ({gx:.1f}, {gy:.1f}): no decode after looking round - next')
                         self.cand_done.append((gx, gy))
-                        self.cand_goal, self.cand_t, self.cand_look = None, None, None
+                        self.cand_goal, self.cand_t, self.cand_look, self.cand_arrive = None, None, None, None
                 return True
             elif math.hypot(gx - p.x, gy - p.y) < self.g('cand_reach') or (self.goal_done and self.last_status == 4):
                 self.cand_t = self.cand_t or time.monotonic()
+                self.cand_arrive = self.cand_arrive or self.now_s()
                 if time.monotonic() - self.cand_t > self.g('cand_hover'):
                     r = self.g('look_radius')
                     if r > 0:
                         # a square round the fix, starting from the drone's side: each leg turns the heading 90 deg
                         # (PathFlight faces the leg), so the camera sees the spot from four sides
                         a0 = math.atan2(p.y - gy, p.x - gx)
-                        self.cand_look = [(gx + r * math.sqrt(2) * math.cos(a0 + math.pi / 4 + k * math.pi / 2),
-                                           gy + r * math.sqrt(2) * math.sin(a0 + math.pi / 4 + k * math.pi / 2))
-                                          for k in range(4)]
+                        look = [(gx + r * math.sqrt(2) * math.cos(a0 + math.pi / 4 + k * math.pi / 2),
+                                 gy + r * math.sqrt(2) * math.sin(a0 + math.pi / 4 + k * math.pi / 2))
+                                for k in range(4)]
+                        # only corners the drone can fly to: one outside the zone ("no A* route to (11.2, -1.6)")
+                        # was waited out as a failed frontier goal (2026-10-27 sim)
+                        self.cand_look = [q for q in look if self.reachable(*q)]
                         self.get_logger().info(f'candidate at ({gx:.1f}, {gy:.1f}): no decode - looking round it')
                         self.goal_done = True
                     else:
                         self.get_logger().info(f'candidate at ({gx:.1f}, {gy:.1f}): no decode after the hover - next')
                         self.cand_done.append((gx, gy))
-                        self.cand_goal, self.cand_t = None, None
+                        self.cand_goal, self.cand_t, self.cand_arrive = None, None, None
                 return True
             elif self.goal_done and self.last_status not in (4, None):
                 self.get_logger().warn(f'candidate at ({gx:.1f}, {gy:.1f}) unreachable (status {self.last_status})')
                 self.cand_done.append((gx, gy))
-                self.cand_goal, self.cand_t = None, None
+                self.cand_goal, self.cand_t, self.cand_arrive = None, None, None
             else:
                 # on the way: switch only if the plan changed AND this leg is less than commit_frac done
                 nxt = self.next_candidate()
@@ -290,7 +379,7 @@ class FrontierExplorer(Node):
                     if done < self.g('commit_frac'):
                         self.get_logger().info(f'route changed ({len(self.cands)} candidates): ({nxt[0]:.1f}, '
                                                f'{nxt[1]:.1f}) first ({done:.0%} of this leg done)')
-                        self.cand_goal, self.cand_t = nxt, None
+                        self.cand_goal, self.cand_t, self.cand_arrive = nxt, None, None
                         self.cand_leg = math.hypot(nxt[0] - p.x, nxt[1] - p.y)
                         self.last_status = None
                         self.send(*nxt, snap=self.g('snap_radius'))
@@ -298,7 +387,7 @@ class FrontierExplorer(Node):
         nxt = self.next_candidate()
         if nxt is None:
             return False
-        self.cand_goal, self.cand_t = nxt, None
+        self.cand_goal, self.cand_t, self.cand_arrive = nxt, None, None
         self.cand_leg = math.hypot(nxt[0] - p.x, nxt[1] - p.y)
         self.get_logger().info(f'candidate QR at ({nxt[0]:.1f}, {nxt[1]:.1f}): going ({len(self.cands)} seen)')
         self.last_status = None
@@ -378,6 +467,72 @@ class FrontierExplorer(Node):
         j1 = min(m.info.height, int((max(ya, yb) - m.info.origin.position.y) / r) + 1)
         return int(unknown[j0:j1, i0:i1].sum())
 
+    def lane_extent(self, x, ya, yb):
+        """(y_first, y_last) of the lane's rows still unexplored, ordered from ya towards yb; None if none."""
+        m = self.map
+        r = m.info.resolution
+        a = np.array(m.data, np.int8).reshape(m.info.height, m.info.width)
+        dist = cv2.distanceTransform((a < 100).astype(np.uint8), cv2.DIST_L2, 3) * r
+        unknown = (a < 0) & (dist > self.g('edge_ignore'))
+        h = self.g('lane_spacing') / 2
+        i0 = max(0, int((x - h - m.info.origin.position.x) / r))
+        i1 = min(m.info.width, int((x + h - m.info.origin.position.x) / r) + 1)
+        j0 = max(0, int((min(ya, yb) - m.info.origin.position.y) / r))
+        j1 = min(m.info.height, int((max(ya, yb) - m.info.origin.position.y) / r) + 1)
+        rows = np.nonzero(unknown[j0:j1, i0:i1].sum(axis=1) >= self.g('lane_row_frac') * max(i1 - i0, 1))[0]
+        if not len(rows):
+            return None
+        ys = [m.info.origin.position.y + (j0 + k + 0.5) * r for k in (rows[0], rows[-1])]
+        ys = [min(max(v, min(ya, yb)), max(ya, yb)) for v in ys]
+        return (ys[0], ys[1]) if yb >= ya else (ys[1], ys[0])
+
+    def lane_target(self, i):
+        """The point to fly for lane leg i, the lane cut to its unexplored stretch (2026-10-27: after each candidate
+        detour the drone went back to the lane's far start and re-flew seen ground). The drone joins the stretch at
+        its nearer end; the next leg flies to the other. None: the lane is done."""
+        i0 = i - i % 2
+        x, ya = self.sweep[i0]
+        yb = self.sweep[i0 + 1][1]
+        ext = self.lane_extent(x, ya, yb)
+        if ext is None:
+            return None
+        p = self.odom.pose.pose.position
+        on_lane = abs(p.x - x) < 1.5
+        if not (i % 2 == 1 and on_lane):
+            # joining a lane (or back from a detour): the nearest unfinished stretch of ANY lane left, not this one
+            # in order - from the target at (26, -9) the drone flew 25 m back to finish lane 1 (2026-10-27 sim)
+            best = None
+            for k in range(i0, len(self.sweep) - 1, 2):
+                kx, ka = self.sweep[k]
+                kb = self.sweep[k + 1][1]
+                e = self.lane_extent(kx, ka, kb)
+                if e is None or self.lane_unknown(kx, *e) < self.g('min_gain'):
+                    continue
+                d = min(math.hypot(p.x - kx, p.y - e[0]), math.hypot(p.x - kx, p.y - e[1]))
+                if best is None or d < best[0]:
+                    best = (d, k, e)
+            if best is None:
+                self.sweep_i = len(self.sweep)
+                return None
+            _, k, ext = best
+            if k != i0:                               # bring that lane forward; the skipped ones come after it
+                pair = self.sweep[k:k + 2]
+                del self.sweep[k:k + 2]
+                self.sweep[i0:i0] = pair
+            x, ya, yb = self.sweep[i0][0], self.sweep[i0][1], self.sweep[i0 + 1][1]
+        elif self.lane_unknown(x, *ext) < self.g('min_gain'):
+            return None                               # only slivers left on this lane
+        if i % 2 == 1 and on_lane:
+            # flying the lane: on to the far end of what is unexplored, if it is still ahead
+            ahead = (ext[1] - p.y) * (1 if yb >= ya else -1)
+            return (x, ext[1]) if ahead > 0.5 else None
+        # joining (or re-joining after a detour): the nearer end of the stretch; the lane then runs to the other
+        if abs(p.y - ext[1]) < abs(p.y - ext[0]):
+            self.sweep[i0], self.sweep[i0 + 1] = (x, yb), (x, ya)
+            ext = (ext[1], ext[0])
+        self.sweep_i = i0
+        return (x, ext[0])
+
     def sweep_step(self):
         """Drive the sweep; False once it is finished (the frontier logic takes over)."""
         while self.sweep_i < len(self.sweep):
@@ -407,6 +562,18 @@ class FrontierExplorer(Node):
                 self.get_logger().info(f'sweep lane x={x:.1f}: already seen, skipped')
                 self.sweep_i += 2
                 continue
+            tgt = self.lane_target(i)
+            if tgt is None:
+                if i % 2 == 1:
+                    self.sweep_i += 1                 # the rest of this lane is seen: next lane
+                else:
+                    self.get_logger().info(f'sweep lane x={x:.1f}: already seen, skipped')
+                    self.sweep_i += 2
+                self.sweep_tries = 0
+                continue
+            i = self.sweep_i                          # lane_target may restart the lane at its nearer end
+            x, y = tgt
+            other = self.sweep[i + 1][1] if i % 2 == 0 else self.sweep[i - 1][1]
             pt = self.free_on_lane(x, y, other)
             if pt is None:
                 self.sweep_i += 1
@@ -421,7 +588,7 @@ class FrontierExplorer(Node):
         return False
 
     def on_target(self, m):
-        if self.state == 'EXPLORING' and self.g('stop_on_target'):
+        if self.state == 'EXPLORING':
             self.cancel()
             self.set_state(f'TARGET_FOUND at ({m.pose.position.x:.2f}, {m.pose.position.y:.2f})')
 
@@ -468,6 +635,17 @@ class FrontierExplorer(Node):
                 best = (score, float(wx[i]), float(wy[i]), float(gi[i]))
         return best
 
+    def now_s(self):
+        return self.get_clock().now().nanoseconds * 1e-9   # sim time in the sim (use_sim_time)
+
+    def reachable(self, x, y):
+        """Inside the zone and an A* route there from the drone."""
+        x0, x1, y0, y1 = self.g('zone')
+        if not (x0 + 0.5 <= x <= x1 - 0.5 and y0 + 0.5 <= y <= y1 - 0.5):
+            return False
+        p = self.odom.pose.pose.position
+        return plan(self.map, (p.x, p.y), (x, y), self.g('path_clearance'), 0.5, self.g('snap_radius')) is not None
+
     def cell_at(self, x, y):
         """/delivery/map value at (x, y): -1 unexplored, 0 free, > 0 rejected QR / red / boundary; 0 off the map."""
         m = self.map
@@ -498,7 +676,7 @@ class FrontierExplorer(Node):
                 self.get_logger().warn(f'no A* route to ({x:.1f}, {y:.1f})')
                 self.path.stop()
                 self.last_status, self.goal_done = 6, True        # as a Nav2 abort
-                if self.state == 'EXPLORING' and self.sweep_goal is None:
+                if self.state == 'EXPLORING' and self.sweep_goal is None and self.cand_goal is None:
                     self.failed((x, y), 6)
                 return
             self.last_status, self.goal_done = None, False
@@ -641,6 +819,7 @@ class FrontierExplorer(Node):
                 self.send(x, y, snap=self.g('snap_radius'))
             return
         self.confirming = None
+        self.cand_evidence()
         if self.candidate_step():
             return
         if self.sweep_step():

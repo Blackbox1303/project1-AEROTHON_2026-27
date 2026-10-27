@@ -127,6 +127,7 @@ class State:
         self.tel_pose = None         # (x, y, z, yaw) ENU odom from MAVLink LOCAL_POSITION_NED + ATTITUDE
         self.tel_track = []
         self.mission_type = 'full'
+        self.red_check = None        # why the red map is not the one 10 ft red zone (red_sanity), None = fine
         self.mission_t0 = None
         self.zone_t0 = None
 
@@ -484,6 +485,7 @@ class Ros(threading.Thread):
     def on_red(self, m):
         """The red zones themselves (no margin): drawn solid over the no-fly margin of /delivery/map."""
         self.red_arr = np.array(m.data, np.int16).reshape(m.info.height, m.info.width) >= 100
+        S.red_check = red_sanity(self.red_arr, m.info.resolution)
         if self.last_map is not None:
             self.on_map(self.last_map)
 
@@ -709,7 +711,10 @@ class Stack:
             threading.Thread(target=self.launch_and_go, args=(self.run, dict(self.go)), daemon=True).start()
         with S.lock:
             S.mission_t0 = S.zone_t0 = None
-            S.ros.update(track=[], log=[], target=None, qrs=[])
+            S.ros.update(track=[], log=[], target=None, qrs=[], state='')
+            # the map starts clean: the last run's flight path (MAVLink track) and costmap stayed drawn (2026-10-27)
+            S.tel_track = []
+            S.costmap_png, S.costmap_meta = None, None
         return True, f'{mode} stack starting (run {self.run})'
 
     def launch_and_go(self, run, go):
@@ -956,8 +961,38 @@ def preflight(mode):
     return [{'name': n, 'ok': bool(ok), 'detail': d, 'critical': c} for n, ok, d, c in checks]
 
 
+# the course has ONE red zone, 10 ft x 10 ft. Red mapped beyond one such square (a second zone, or one far too big)
+# means the red detection is wrong - the user's rule: then that code can't be trusted (2026-10-27)
+RED_ZONE_M = 3.048
+RED_FIT_M = RED_ZONE_M + 1.25                         # + mapping blur / margin: pieces of one zone still fit
+
+
+def red_sanity(red, res):
+    """-> None, or why the red map can't be the course's single 10 ft red zone."""
+    if red is None or not red.any():
+        return None
+    n, _, stats, _ = cv2.connectedComponentsWithStats(red.astype(np.uint8), connectivity=8)
+    blobs = [st for st in stats[1:] if st[4] * res * res >= 0.25]          # specks below 0.25 m2 ignored
+    if not blobs:
+        return None
+    x0 = min(b[0] for b in blobs) * res
+    y0 = min(b[1] for b in blobs) * res
+    x1 = max(b[0] + b[2] for b in blobs) * res
+    y1 = max(b[1] + b[3] for b in blobs) * res
+    w, h = x1 - x0, y1 - y0
+    area = sum(b[4] for b in blobs) * res * res
+    if w > RED_FIT_M or h > RED_FIT_M:
+        return (f'red seen over {w:.1f} x {h:.1f} m in {len(blobs)} patch(es) - ONE {RED_ZONE_M:.2f} m zone '
+                f'expected: red detection unreliable')
+    if area > 1.6 * RED_ZONE_M ** 2:
+        return f'red area {area:.1f} m2 (one zone is {RED_ZONE_M ** 2:.1f} m2): red detection unreliable'
+    return None
+
+
 def alerts():
     out = []
+    if S.red_check:
+        out.append(('critical', 'RED ZONE CHECK: ' + S.red_check))
     tel = S.tel
     armed = tel.get('armed')
     if armed and not fresh('HEARTBEAT', 3, S.tel_time):
@@ -1317,6 +1352,7 @@ def start_mission(kind, payload='', read_qr=True, override=False):
         if success:
             with S.lock:
                 S.mission_type, S.mission_t0, S.zone_t0 = kind, None, None
+                S.tel_track = []
         return success, msg
     failing = [c['name'] for c in preflight(STACK.mode or 'sim') if c['critical'] and not c['ok']
                and c['name'] not in ('Mission supervisor up',)]
@@ -1339,6 +1375,7 @@ def start_mission(kind, payload='', read_qr=True, override=False):
         with S.lock:
             S.mission_type, S.mission_t0, S.zone_t0 = kind, None, None
             S.ros.update(track=[], log=[])
+            S.tel_track = []                          # the map shows this mission's flight path only
     return success, f'{kind}: {msg}'
 
 
