@@ -137,6 +137,7 @@ class State:
         self.red_check = None        # why the red map is not the one 10 ft red zone (red_sanity), None = fine
         self.mission_t0 = None
         self.zone_t0 = None
+        self.alt_offset = 0.0        # the operator's search-height trim (m), as last set on the explorer
         self.sim_clock = None        # (sim s, monotonic when received) from /clock: the sim's mission clock
 
 
@@ -514,6 +515,7 @@ class Ros(threading.Thread):
         self.cli_abort = n.create_client(Trigger, '/mission/abort')
         self.cli_operator = n.create_client(Trigger, '/mission/operator')
         self.cli_params = n.create_client(SetParameters, '/mission_supervisor/set_parameters')
+        self.cli_explore_params = n.create_client(SetParameters, '/frontier_explorer/set_parameters')
         self.pub_qr = n.create_publisher(String, '/mission/start_qr', latched)
         self.set_camera('qr_hud')
         ex = MultiThreadedExecutor()
@@ -652,6 +654,43 @@ class Ros(threading.Thread):
             return ParameterValue(type=ParameterType.PARAMETER_STRING, string_value=str(v))
         req = self.SetParameters.Request(parameters=[Parameter(name=k, value=pv(v)) for k, v in kv.items()])
         return self.call(self.cli_params, req)
+
+
+    def set_alt_offset(self, offset):
+        """The explorer's search-height trim (alt_offset, m) -> (ok, message)."""
+        from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
+        req = self.SetParameters.Request(parameters=[Parameter(name='alt_offset', value=ParameterValue(
+            type=ParameterType.PARAMETER_DOUBLE, double_value=float(offset)))])
+        cli = self.cli_explore_params
+        if not cli.wait_for_service(timeout_sec=3.0):
+            return False, 'the explorer is not running (mission stack up?)'
+        fut = cli.call_async(req)
+        end = time.monotonic() + 5.0
+        while not fut.done() and time.monotonic() < end:
+            time.sleep(0.05)
+        if not fut.done():
+            return False, 'the explorer did not answer'
+        r = fut.result().results[0]
+        return r.successful, r.reason or 'ok'
+
+
+ALT_TRIM_STEP, ALT_TRIM_MIN, ALT_TRIM_MAX = 0.5, -9.0, 3.0   # m; the explorer also keeps it above its alt_min
+
+
+def alt_trim(delta):
+    """The search height up / down by delta (the +-0.5 m buttons) -> (ok, message). Offboard: the VRX explorer."""
+    try:
+        delta = float(delta)
+    except (TypeError, ValueError):
+        return False, 'delta: metres, e.g. -0.5'
+    if STACK.mode == 'offboard':
+        return vrx_post('alt', {'delta': delta})
+    new = round(min(ALT_TRIM_MAX, max(ALT_TRIM_MIN, S.alt_offset + delta)), 2)
+    success, msg = ROS.set_alt_offset(new)
+    if not success:
+        return False, f'height trim: {msg}'
+    S.alt_offset = new
+    return True, f'search height trim {new:+.1f} m'
 
 
 # ---------------------------------------------------------------- the stack (sim / real)
@@ -1192,6 +1231,7 @@ def snapshot():
                       'up_s': round(time.time() - STACK.started) if STACK.started and STACK.running() else None},
             'camera': ROS.camera_topic, 'preflight': preflight(mode), 'alerts': alerts(),
             'statustext': S.statustext[-15:],
+            'alt_offset': S.alt_offset,
             'vio_pose': {'xyz': S.ros.get('vio_pose'), 'health': S.ros['states'].get('vio', ''),
                          'age': round(time.monotonic() - S.ros_time['vio_pose'], 1) if 'vio_pose' in S.ros_time else None},
             'ages': {k: round(time.monotonic() - t, 1) for k, t in S.ros_time.items()},
@@ -1204,6 +1244,7 @@ def snapshot():
             out['ros']['state'] = a.get('s') if a.get('s') not in (None, '-') else ''
             out['ros']['pose'] = S.tel_pose
             out['mission_s'], out['zone_s'] = a.get('t'), a.get('z')
+            out['alt_offset'] = a.get('ao')
             seg = {v: k for k, v in SEG_CODE.items()}.get(a.get('sg'), 'full')
             out['fsm'], out['mission_type'] = FSM[seg], seg
             # the boards and the VIO position the agent sends over the radio (32803 / 32802)
@@ -1347,7 +1388,10 @@ async def api(request):
         return ok(True, stack_phase(), mode=STACK.mode, run=STACK.run, state=S.ros.get('state'))
     if what == 'stack_stop':
         return ok(*(await loop.run_in_executor(None, STACK.stop)))
+    if what == 'alt_trim':                            # the search height +-0.5 m in flight (also from the radio)
+        return ok(*(await loop.run_in_executor(None, alt_trim, body.get('delta'))))
     if what == 'mission_start':                       # full | qr | qr_drop | tunnel
+        S.alt_offset = 0.0                            # the explorer drops its trim at the search start too
         return ok(*(await loop.run_in_executor(None, lambda: start_mission(
             body.get('type', 'full'), body.get('payload') or '', body.get('read_qr', True), body.get('override')))))
     if what == 'mission_abort':
@@ -1400,9 +1444,18 @@ def radio_api(what, body):
         return MAV.command_ack(AGENT_CMD, 5, comp=AGENT, timeout=10.0, final_within=15.0)
     if what == 'apply':
         return radio_apply_gf()
+    if what == 'alt_trim':                            # in flight too: agent action 10, param2 = the step (m)
+        try:
+            delta = float(body.get('delta'))
+        except (TypeError, ValueError):
+            return False, 'delta: metres, e.g. -0.5'
+        press = next(TRIM_PRESS) % 1000000 + 1         # a new number per press: the agent runs each press once
+        #                                               (from the clock, 2 presses in one 0.1 s were one, 2026-10-28)
+        return MAV.command_ack(AGENT_CMD, 10, delta, press, comp=AGENT, timeout=8.0, final_within=10.0)
     return False, f'{what}: not over the radio'
 
 
+TRIM_PRESS = __import__('itertools').count(__import__('random').randint(1, 500000))   # height-trim press numbers
 T_GEOFENCE = 32810           # TUNNEL ground -> agent: [tid lo, tid hi, chunk, chunks] + up to 124 B of the JSON
 
 

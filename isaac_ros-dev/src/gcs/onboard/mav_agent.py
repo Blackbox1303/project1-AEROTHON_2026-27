@@ -11,6 +11,8 @@ MAVROS is 191) on mavlink-router's agent endpoint (UDP 14660: router/sim.conf, o
               9 geofence (param2 chunks, param3 CRC-32 & 0xFFFFFF, param4 transfer id): the corners captured on the
                 radio page came up as TUNNEL 32810 [tid lo, tid hi, chunk, chunks] + JSON {f: field, d: delivery};
                 saved + applied on the onboard dashboard (no cable / Wi-Fi to the Jetson, user 2026-10-28)
+              10 search height trim (param2: the step in m, e.g. -0.5): in flight too - the explorer flies its search
+                 height + the trim at once, never below its alt_min (user, 2026-10-28)
             -> the onboard dashboard's REST API (http://127.0.0.1:8080/api/...: its preflight gate, geofence check and
             stack logic apply unchanged) -> COMMAND_ACK (ACCEPTED / FAILED) + STATUSTEXT 'AGT: <its message>'
   status    TUNNEL (payload_type 32800, 128 B JSON) every status_period s: {p: stack phase, md: sim|real, s: FSM state,
@@ -43,7 +45,7 @@ from pymavlink import mavutil  # noqa: E402
 COMP = 194                       # MAV_COMP_ID_ONBOARD_COMPUTER2
 CMD = 31010                      # MAV_CMD_USER_1
 ACTIONS = {1: 'launch', 2: 'stop', 3: 'full', 4: 'delivery', 5: 'abort', 6: 'status', 7: 'segment', 8: 'operator',
-           9: 'geofence'}
+           9: 'geofence', 10: 'alt_trim'}
 SEGMENTS = {1: 'full', 2: 'qr', 3: 'tunnel', 4: 'qr_drop'}   # action 7, param2 (the 8080 page in --radio mode)
 T_STATUS, T_DETAIL, T_VIO, T_BOARD = 32800, 32801, 32802, 32803
 T_GEOFENCE = 32810               # in: the radio page's geofence corners (action 9)
@@ -192,6 +194,8 @@ class Agent:
             return True, 'status sent'
         if action == 'geofence':
             return await self.apply_geofence(int(p2), int(p3), int(p4))
+        if action == 'alt_trim':
+            return await self.api('alt_trim', {'delta': round(float(p2), 2)})
         return False, 'unknown action'
 
     # ---- status
@@ -208,6 +212,7 @@ class Agent:
              't': int(d['mission_s']) if d.get('mission_s') else None,
              'z': int(d['zone_s']) if d.get('zone_s') else None,
              'q': len(qrs), 'tg': int(bool(ros.get('target'))), 'pf': len(fail), 'al': len(al),
+             'ao': d.get('alt_offset') or 0,
              'sg': {v: k for k, v in SEGMENTS.items()}.get(d.get('mission_type'), 4 if d.get('mission_type') == 'delivery' else 0)}
         # (TUNNEL carries 128 B: the segment as its code)
         a0 = al[0] if al else None                    # the dashboard's alerts: {level, text}
@@ -261,7 +266,9 @@ class Agent:
                 continue
             action = ACTIONS.get(int(m.param1))
             # (a geofence keyed by its transfer id: a new Save + Apply after a lost chunk must run)
-            key = (m.get_srcSystem(), m.get_srcComponent(), action, int(m.param4) if action == 'geofence' else 0)
+            # (a height trim keyed by its press number: two quick presses are two steps, a resent one is one)
+            key = (m.get_srcSystem(), m.get_srcComponent(), action,
+                   int(m.param4) if action == 'geofence' else int(m.param3) if action == 'alt_trim' else 0)
             if action is None:
                 self.mav.mav.command_ack_send(CMD, mavutil.mavlink.MAV_RESULT_UNSUPPORTED, 0, 0,
                                               m.get_srcSystem(), m.get_srcComponent())

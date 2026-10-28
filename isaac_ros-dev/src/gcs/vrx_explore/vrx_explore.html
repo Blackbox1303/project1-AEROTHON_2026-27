@@ -68,6 +68,9 @@
   <button class="stop" onclick="post('land')">Land</button>
   <button class="stop" onclick="if (confirm('Kill the motors?')) post('kill')">Kill</button>
   <span class="sep"></span>
+  <button onclick="post('alt', {delta: -0.5})" title="search height down 0.5 m, in flight too">▼ 0.5 m</button>
+  <button onclick="post('alt', {delta: 0.5})" title="search height up 0.5 m">▲ 0.5 m</button>
+  <span class="sep"></span>
   <button id="btn_draw" onclick="toggleDraw()">Draw red zone</button>
   <button onclick="post('clear_red')">Clear drawn red</button>
   <button onclick="if (confirm('Clear the map, QRs and track?')) post('reset_map')">Reset map</button>

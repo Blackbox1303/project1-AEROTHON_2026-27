@@ -47,7 +47,9 @@ Adapted from the aeolus frontier_explorer (which needs an external /map + AMCL):
   order     candidates first (seen boards, cheapest route), then coverage lanes over what is still unread
             (sweep_after: a board the candidate pass missed or projected wrong is still read - the target 1.5 m from
             the red zone was never read, 2026-10-25 sim), then frontiers for the gaps
-Holds `altitude` on /nav/altitude while exploring. Services /delivery/explore/start, /delivery/explore/stop;
+Holds `altitude` + `alt_offset` on /nav/altitude while exploring: the operator's in-flight height trim (dashboard
++-0.5 m steps, e.g. down when the boards don't read from up there - user, 2026-10-28), applied at once, also to the
+route being flown; never below `alt_min`; back to 0 at the next search start. Services /delivery/explore/start, /delivery/explore/stop;
 state on /delivery/explore/state (String).
 """
 import json
@@ -79,6 +81,8 @@ class FrontierExplorer(Node):
         super().__init__('frontier_explorer')
         p = self.declare_parameter
         p('altitude', 10.0)          # m: = the supervisor's search_altitude
+        p('alt_offset', 0.0)         # m: the operator's in-flight trim (dashboard / radio), + up / - down
+        p('alt_min', 1.5)            # m: the trimmed search height never goes below this
         p('clearance', 1.0)          # m from red / boundary cells (the map already has a 1.5 m red margin)
         p('edge_ignore', 1.0)        # m: unexplored cells this close to a red / boundary cell don't count - the drone
         #                              can't get there, so they never get explored and the frontiers beside them never
@@ -200,6 +204,7 @@ class FrontierExplorer(Node):
         self.escape_to = None
         self.create_timer(0.1, self.escape_step)
         self.path = PathFlight(self.flight, self.pose_tuple)
+        self.add_on_set_parameters_callback(self.on_params)
 
     # ---- control
     def set_state(self, s):
@@ -208,6 +213,8 @@ class FrontierExplorer(Node):
         self.state = s
 
     def on_start(self, req, res):
+        if self.g('alt_offset'):
+            self.set_parameters([rclpy.parameter.Parameter('alt_offset', value=0.0)])   # a new search: no trim
         self.cand_done, self.cand_goal, self.cand_t, self.cand_look = [], None, None, None
         self.cand_ev, self.open_batch, self.batch_t = [], 0, None
         self.spin, self.spins = None, []
@@ -363,7 +370,7 @@ class FrontierExplorer(Node):
             self.get_logger().info(f'yaw scan done: {new} candidate(s) for the next batch')
             self.spin = None
             return
-        self.flight.step(s['x'], s['y'], float(self.g('altitude')), s['yaws'][0], vmax=0.5)
+        self.flight.step(s['x'], s['y'], self.search_alt(), s['yaws'][0], vmax=0.5)
 
     def scout_step(self):
         """Search start with no board in view: the line scout_offset in from the nearer long wall, to its far end.
@@ -745,6 +752,21 @@ class FrontierExplorer(Node):
                 best = (score, float(wx[i]), float(wy[i]), float(gi[i]))
         return best
 
+    def search_alt(self):
+        """The search height: `altitude` + the operator's `alt_offset`, not below `alt_min`."""
+        return max(float(self.g('alt_min')), float(self.g('altitude')) + float(self.g('alt_offset')))
+
+    def on_params(self, params):
+        """An alt_offset change applies at once: the route being flown takes the new height too."""
+        from rcl_interfaces.msg import SetParametersResult
+        for prm in params:
+            if prm.name == 'alt_offset':
+                alt = max(float(self.g('alt_min')), float(self.g('altitude')) + float(prm.value))
+                if self.path.active:
+                    self.path.alt = alt
+                self.get_logger().info(f'search height trim {float(prm.value):+.1f} m: flying at {alt:.1f} m')
+        return SetParametersResult(successful=True)
+
     def now_s(self):
         return self.get_clock().now().nanoseconds * 1e-9   # sim time in the sim (use_sim_time)
 
@@ -810,7 +832,7 @@ class FrontierExplorer(Node):
                     self.failed((x, y), 6)
                 return
             self.last_status, self.goal_done = None, False
-            self.path.start(wps, float(self.g('altitude')), vmax=self.g('speed'))
+            self.path.start(wps, self.search_alt(), vmax=self.g('speed'))
             pose = PoseStamped()
             pose.header.frame_id = 'odom'
             pose.header.stamp = self.get_clock().now().to_msg()
@@ -912,13 +934,13 @@ class FrontierExplorer(Node):
             self.get_logger().info(f'escaped the no-fly cells at ({px:.1f}, {py:.1f})')
             self.escape_to = None
             return
-        self.flight.step(x, y, float(self.g('altitude')), yaw, vmax=self.g('escape_speed'))
+        self.flight.step(x, y, self.search_alt(), yaw, vmax=self.g('escape_speed'))
 
     def tick(self):
         self.state_pub.publish(String(data=self.state))
         if self.state != 'EXPLORING':
             return
-        self.alt_pub.publish(Float32(data=float(self.g('altitude'))))
+        self.alt_pub.publish(Float32(data=self.search_alt()))
         if self.map is None or self.odom is None:
             return
         if self.escape_to is not None or self.spin is not None:

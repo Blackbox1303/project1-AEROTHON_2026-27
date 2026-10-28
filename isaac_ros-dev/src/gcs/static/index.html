@@ -124,6 +124,12 @@
         <button class="go big mbtn" id="startbtn" onclick="startMission(val('segment'))" title="start the segment chosen at the top (the sim starts it by itself after Launch)">▶ Start</button>
         <button class="stop big noradio" onclick="ask('Abort the mission? (failsafe: hold, then land in place)').then(y => y && post('mission_abort'))">■ Abort</button>
       </div>
+      <div class="row" title="search height trim, in flight: the explorer flies its search height + the trim at once (never below its minimum); back to 0 at the next search start. Over the radio in the final mission.">
+        <b>Search height</b>
+        <button onclick="post('alt_trim', {delta: -0.5})">▼ 0.5 m</button>
+        <span id="trimv" class="pill">trim +0.0 m</span>
+        <button onclick="post('alt_trim', {delta: 0.5})">▲ 0.5 m</button>
+      </div>
       <div class="row" title="straight to the autopilot; the mission stops and hands the drone to you (no failsafe flight)">
         <button class="stop" onclick="ask('LAND now, where it is (autopilot LAND)?').then(y => y && post('land'))">LAND</button>
         <button class="stop" onclick="ask('RTH now? SmartRTL: the drone flies its own path back home (through the tunnels it came by) and lands.').then(y => y && post('rth'))">RTH (retrace)</button>
@@ -331,6 +337,8 @@ function render(s) {
   $('tmission').className = 'pill ' + (s.mission_s > 840 ? 'bad' : s.mission_s > 720 ? 'warn' : '');
   $('tzone').textContent = 'QR area ' + mmss(s.zone_s) + ' / 9:00';
   $('tzone').className = 'pill ' + (s.zone_s > 540 ? 'bad' : s.zone_s > 450 ? 'warn' : '');
+  const ao = s.alt_offset ?? 0;
+  $('trimv').textContent = `trim ${ao >= 0 ? '+' : ''}${Number(ao).toFixed(1)} m · now ${fmt(t.alt_rel, 1)} m`;
   $('alerts').innerHTML = s.alerts.map(a => `<div class="${a.level}">⚠ ${esc(a.text)}</div>`).join('');
   const tiles = [
     ['Mode', t.mode], ['Armed', t.armed === undefined ? '–' : (t.armed ? 'ARMED' : 'disarmed')], ['Alt (rel)', fmt(t.alt_rel, 2) + ' m'],

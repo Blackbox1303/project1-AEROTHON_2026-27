@@ -626,7 +626,7 @@ class VrxExplore(base.VrxDeliverySystem):
         for k in (1, 2, 3):
             yaw = math.atan2(math.sin(yaw0 + k * math.pi / 2), math.cos(yaw0 + k * math.pi / 2))
             with self.lock:
-                self.setpoint = (sx, sy, sz, yaw)
+                self.setpoint = (sx, sy, self.alt, yaw)    # self.alt: an operator height trim holds here too
             t_end = time.monotonic() + 5.0
             while time.monotonic() < t_end:
                 if self.abort_reason:
@@ -940,6 +940,20 @@ def make_app(sc):
             if what == 'land':
                 return ok(sc.set_px4_mode('AUTO.LAND'), 'LAND sent')
             return ok(sc.mav_cmd(400, 0, 21196), 'KILL sent')
+        if what == 'alt':
+            # the operator's search height trim, in flight too (user, 2026-10-28): follow() flies self.alt at once
+            try:
+                delta = float(body.get('delta'))
+            except (TypeError, ValueError):
+                return ok(False, 'delta: metres, e.g. -0.5')
+            new = round(min(sc.a.alt + 3.0, max(sc.a.alt_min, sc.alt + delta)), 2)
+            with sc.lock:
+                sc.alt = new
+                if sc.mission_running and sc.offboard_active and sc.setpoint:
+                    x, y, _, yaw = sc.setpoint
+                    sc.setpoint = (x, y, new, yaw)        # hovering / scanning too, not only the next leg
+            sc.log_mission('EXPLORE', event=f'search height {new:.1f} m (trim {new - sc.a.alt:+.1f} m)')
+            return ok(True, f'search height {new:.1f} m (trim {new - sc.a.alt:+.1f} m, min {sc.a.alt_min:.1f} m)')
         if what == 'zone':
             z = [float(v) for v in body.get('zone', [])]
             if len(z) != 4 or z[0] >= z[1] or z[2] >= z[3]:
@@ -996,6 +1010,7 @@ def main():
                     help='PX4 MAVLink: the SITL via the onboard router (default), or the radio /dev/ttyUSB0:57600')
     ap.add_argument('--alt', type=float, default=1.0, help='flight height, m')
     ap.add_argument('--speed', type=float, default=0.5, help='cruise speed, m/s')
+    ap.add_argument('--alt-min', type=float, default=0.8, help='m: the operator\'s height trim never goes below this')
     ap.add_argument('--zone', type=float, nargs=4, default=[1.0, 9.0, -4.0, 4.0], metavar=('X0', 'X1', 'Y0', 'Y1'),
                     help='search zone in m from home (ENU: x east, y north)')
     ap.add_argument('--max-over', type=float, default=1.0, help='m above --alt that aborts and lands (fly-away guard)')
