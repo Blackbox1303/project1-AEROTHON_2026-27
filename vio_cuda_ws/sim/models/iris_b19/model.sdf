@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The 8084 ArUco delivery sim (2026-10-28): the offboard setup - an analog B19 FPV camera looking straight down,
+     its video over VTX -> VRX to the Jetson on the ground (vrx_explore reads this sensor's gz topic instead).
+     ArduCopter SITL airframe as iris_d435_vio (iris_ardupilot_dt25, ArduPilotPlugin on UDP 9002), no D435 / Arducam
+     (lighter on the Jetson). B19: 2.1 mm, rated ~130 deg diagonal (retailer spec) -> equidistant lens, 640 x 480
+     (analog PAL/NTSC after the VRX), f = 400 px / 65 deg = 352.6 px, horizontal FOV 2 * 320 / 352.6 = 1.815 rad
+     (104 deg); keep in step with LENS_DFOV in gcs/vrx_explore/vrx_explore.py. Analog grain as Gaussian noise. -->
+<sdf version='1.9'>
+  <model name='iris_b19'>
+    <include merge='true'>
+      <uri>model://iris_ardupilot_dt25</uri>
+    </include>
+    <link name="b19_link">
+      <pose relative_to="iris_with_standoffs::base_link">.10 0 -.04 0 1.570796 0</pose>
+      <inertial>
+        <mass>0.008</mass>
+        <inertia><ixx>1e-6</ixx><ixy>0</ixy><ixz>0</ixz><iyy>1e-6</iyy><iyz>0</iyz><izz>1e-6</izz></inertia>
+      </inertial>
+      <visual name="body">
+        <geometry><box><size>0.019 0.019 0.019</size></box></geometry>
+        <material><diffuse>0.1 0.1 0.1 1</diffuse></material>
+      </visual>
+      <sensor name="b19" type="wideanglecamera">
+        <pose>0.012 0 0 0 0 0</pose>
+        <camera>
+          <horizontal_fov>1.815</horizontal_fov>
+          <image><width>640</width><height>480</height><format>R8G8B8</format></image>
+          <clip><near>0.02</near><far>80</far></clip>
+          <lens>
+            <type>equidistant</type>
+            <scale_to_hfov>true</scale_to_hfov>
+            <cutoff_angle>1.25</cutoff_angle>
+            <env_texture_size>512</env_texture_size>
+          </lens>
+          <noise><type>gaussian</type><mean>0.0</mean><stddev>0.02</stddev></noise>
+        </camera>
+        <always_on>1</always_on>
+        <update_rate>25</update_rate>
+        <visualize>false</visualize>
+        <topic>/b19/image_raw</topic>
+      </sensor>
+    </link>
+    <joint name="B19Joint" type="fixed">
+      <parent>iris_with_standoffs::base_link</parent>
+      <child>b19_link</child>
+    </joint>
+    <plugin filename="gz-sim-odometry-publisher-system" name="gz::sim::systems::OdometryPublisher">
+      <dimensions>3</dimensions>
+      <odom_frame>map</odom_frame>
+      <robot_base_frame>ground_truth</robot_base_frame>
+      <odom_topic>/sim/ground_truth/odom</odom_topic>
+      <odom_publish_frequency>20</odom_publish_frequency>
+    </plugin>
+  </model>
+</sdf>

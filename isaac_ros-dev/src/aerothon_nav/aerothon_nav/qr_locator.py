@@ -13,6 +13,10 @@ Upgraded with the complete `drone_qr_detector` pipeline:
   5. Strict start-QR payload matching: `/delivery/target` (which triggers the `DELIVER` -> `DROP` winch mechanism
      in `mission_supervisor`) is published ONLY when a confirmed QR inside the delivery zone (and outside red zones)
      has `payload == start_qr`.
+  ArUco mission (parameter `marker` 'aruco', default the AEROTHON_MARKER environment variable): the boards carry
+     ArUco markers 3x3 .. 6x6 instead; they're found on undistorted gnomonic views of the fisheye
+     (aruco_tools.detect_fisheye, straight on the sim's pinhole nadir camera) and the payload is e.g. '4X4#23' -
+     everything after the read (ground position, averaging, zone / red checks, the start match) is the same.
   6. Live HTTP QR HUD on port `8091` (`/`, `/annotated.jpg`, `/frame.jpg`, `/status.json`), integrated into the
      main mission dashboard at port `8080`.
 """
@@ -159,6 +163,7 @@ class QrLocator(Node):
         p('avg_window_s', 4.0)       # short time window (s) for stabilizing QR positions & inter-QR distances
         p('avg_window_samples', 15)  # max samples in the short sliding window
         p('hud_port', 8091)          # live HTTP QR HUD port (integrated with :8080 dashboard)
+        p('marker', os.environ.get('AEROTHON_MARKER', 'qr'))   # qr | aruco (the ArUco delivery mission, 8084)
 
         g = lambda n: self.get_parameter(n).value  # noqa: E731
         self.g = g
@@ -167,20 +172,15 @@ class QrLocator(Node):
             self.zone = (z['x_from'], z['x_to'], z['y_from'], z['y_to'])
         else:
             self.zone = tuple(g('zone'))
-        if g('pylib'):
-            sys.path.insert(0, g('pylib'))
-        try:
-            from pyzbar.pyzbar import ZBarSymbol, decode
-            self.zbar = lambda img: decode(img, symbols=[ZBarSymbol.QRCODE])
-        except ImportError:
-            self.zbar = None
-            self.get_logger().warn('pyzbar not available: WeChat QR detector only')
-        self.wc = qr_tools.make_wechat(g('wechat_dir'))
-        self.qnet = qr_tools.QrNet(g('wechat_dir')) if g('net') else None
-        if self.qnet is not None and self.qnet.net is None:
-            self.qnet = None
-        self.get_logger().info(f'decoders: {"WeChat + " if self.wc else ""}{"zbar" if self.zbar else "none"}; '
-                               f'QR detection network {"on" if self.qnet else "off"}')
+        self.aruco = None
+        if g('marker') == 'aruco':
+            from aerothon_nav import aruco_tools
+            self.aruco_tools = aruco_tools
+            self.aruco = aruco_tools.Detector(raw=False)   # a 4x4-6x6 grid off the dictionaries is a misread
+            self.zbar = self.wc = self.qnet = None
+            self.get_logger().info('ArUco delivery: markers 3x3 .. 6x6 on the undistorted image')
+        else:
+            self.init_qr()
         self.blob_px = (0.0, [], (1, 1))
         self.net_full_t = 0.0
         self.chase = {}              # box key -> [crops]: boxed QRs not read yet (aligned & averaged)
@@ -288,6 +288,23 @@ class QrLocator(Node):
                 locator.get_logger().warn(f'Port {port} already in use ({e}); HUD server skipped in qr_locator')
 
         threading.Thread(target=serve, daemon=True).start()
+
+    def init_qr(self):
+        g = self.g
+        if g('pylib'):
+            sys.path.insert(0, g('pylib'))
+        try:
+            from pyzbar.pyzbar import ZBarSymbol, decode
+            self.zbar = lambda img: decode(img, symbols=[ZBarSymbol.QRCODE])
+        except ImportError:
+            self.zbar = None
+            self.get_logger().warn('pyzbar not available: WeChat QR detector only')
+        self.wc = qr_tools.make_wechat(g('wechat_dir'))
+        self.qnet = qr_tools.QrNet(g('wechat_dir')) if g('net') else None
+        if self.qnet is not None and self.qnet.net is None:
+            self.qnet = None
+        self.get_logger().info(f'decoders: {"WeChat + " if self.wc else ""}{"zbar" if self.zbar else "none"}; '
+                               f'QR detection network {"on" if self.qnet else "off"}')
 
     def cameras(self, on):
         """Subscribe to the cameras."""
@@ -496,7 +513,9 @@ class QrLocator(Node):
                 return
             self.last[source] = now
             gray = to_gray(m)
-            if self.qnet is not None and (source in ('fisheye_hd', 'nadir_hd') or not self.g('hd_topic')):
+            if self.aruco is not None:
+                found = self.read_aruco(gray, source)
+            elif self.qnet is not None and (source in ('fisheye_hd', 'nadir_hd') or not self.g('hd_topic')):
                 found = self.on_hd(gray, m, source, now)
             else:
                 found = self.decode(gray)
@@ -504,6 +523,14 @@ class QrLocator(Node):
             self._update_hud_image(gray, found)
         finally:
             self.proc_lock.release()
+
+    def read_aruco(self, gray, source):
+        """{payload: corners in this image's pixels}: undistorted views on the fisheye, straight on the nadir."""
+        if source in ('fisheye', 'fisheye_hd'):
+            if self.cam is None:
+                return {}
+            return self.aruco_tools.detect_fisheye(self.aruco, gray, self.cam)
+        return dict(self.aruco.detect(gray))
 
     def on_hd(self, gray, m, source, now):
         """Multi-scale QrNet bounding-box search + virtual camera adjustment (`rectify_patch`) + phase-correlated

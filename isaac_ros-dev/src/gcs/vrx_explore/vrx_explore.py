@@ -8,12 +8,28 @@ Built on laptop_vrx_mission.VrxDeliverySystem (decoder, VRX capture, ground proj
             pose, so coverage also works without a camera); red = HSV red pixels voting for their ground cell (two hue
             bands; red after min_red_votes with red share >= red_share) and red rectangles drawn on the page; the
             planner keeps red_margin off both
-  goals     unread QR candidates (boards seen but not decoded) first, nearest by path; then frontiers: per cluster of
-            unexplored zone cells next to explored ones, score = cluster area / (path length + 1 m)
+  goals     unread QR candidates (boards seen but not decoded) first, in BATCHES (user, 2026-10-28, as the
+            sim's frontier_explorer): the boards first seen together are one batch, boards seen later (on the way, or
+            from a reject's yaw scan) go into the next; a batch is finished before the next is started, inside it
+            the cheapest A* route first, re-costed from where the drone is at each pick. A frontier / scout leg is
+            broken off as soon as a candidate is pending. Then frontiers: per cluster of unexplored zone cells next
+            to explored ones, score = cluster area / (path length + 1 m)
+  yaw scan  a board read as a REJECT (at a candidate, or in passing within --spin-near): turn in place to 3 more
+            headings 90 deg apart for boards out of view; not again within --spin-skip of an earlier scan
+  scout     no board in view --scout-wait s into the search: out to the line --scout-offset (at most a quarter of
+            the short side) in from the nearer long wall and along it to the far end; dropped once a board is seen
+  retrace   while a frontier is left every explorer route costs --retrace-cost extra per cell already flown over
+            (--trail-radius round the track); the way home / to the target is the plain shortest A*
   A*        8-connected on the grid, red cells grown by red_margin blocked, string-pulled to line-of-sight waypoints;
             re-planned when a red zone appears on the remaining path, the goal stops being worth it (frontier seen on
             the way), or the goal is unreachable (then blacklisted)
   mission   IDLE -> TAKEOFF (1 m) -> EXPLORE -> RETURN_HOME (A*) -> LAND -> DONE; return at time_budget (15 min rule)
+Lens (--lens): the analog camera is a B19 (2.1 mm, rated ~130 deg diagonal - retailer spec, not measured): an
+equidistant (fisheye) model fitted to that rating projects pixels to the ground (marker positions, red votes,
+coverage) and ArUco markers are found on undistorted gnomonic views of the frame. --lens pinhole = the old
+--fov-deg pinhole projection. A checkerboard calibration of the real unit should replace the rated FOV.
+ArUco delivery (--marker aruco, default the AEROTHON_MARKER environment variable): the boards carry ArUco markers
+3x3 .. 6x6 (aerothon_nav.aruco_tools, payload e.g. '4X4#23') instead of QR codes; everything after the read is the same.
 Usage:  vrx_explore.py --video /dev/video2 --link udpout:127.0.0.1:14551 [--alt 1.0] [--port 8094]
         (scripts/vrx_explore.sh starts it with the PX4 SIH SITL)
 """
@@ -35,11 +51,52 @@ from aiohttp import web
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / 'laptop_vrx'))
 import laptop_vrx_mission as base  # noqa: E402
+sys.path.insert(0, str(HERE.parents[1] / 'aerothon_nav'))
+from aerothon_nav import aruco_tools  # noqa: E402
+from aerothon_nav.fisheye import Fisheye  # noqa: E402
+LENS_DFOV = {'b19': 130.0}   # rated diagonal FOV, deg
 
 FSM = ['IDLE', 'TAKEOFF', 'EXPLORE', 'RETURN_HOME', 'LAND', 'DONE']
 # the QR area with the payload drop (8080 offboard segment qr_drop): the start QR first, the drop on the match
 FSM_DROP = ['IDLE', 'TAKEOFF', 'READ_START_QR', 'EXPLORE', 'DELIVER', 'DROP', 'RETURN_HOME', 'LAND', 'DONE']
 SKIP_VIDEO = ('realsense', 'vi-output', 'tegra')   # D435 nodes and the CSI camera: never opened here
+
+
+class GzCapture:
+    """A Gazebo camera topic as a cv2.VideoCapture (read / release / isOpened): the 8084 sim's B19 camera
+    (`--video gz:/b19/image_raw`). gz-transport Python bindings (Harmonic); GZ_IP / GZ_PARTITION from the environment."""
+
+    def __init__(self, topic):
+        from gz.msgs10.image_pb2 import Image
+        from gz.transport13 import Node
+        self.cond, self.frame, self.n = threading.Condition(), None, 0
+        self.node = Node()
+        self.ok = self.node.subscribe(Image, topic, self.on_image)
+
+    def on_image(self, m):
+        a = np.frombuffer(m.data, np.uint8)
+        if a.size == m.width * m.height * 3:
+            f = cv2.cvtColor(a.reshape(m.height, m.width, 3), cv2.COLOR_RGB2BGR)
+        elif a.size == m.width * m.height:
+            f = a.reshape(m.height, m.width)
+        else:
+            return
+        with self.cond:
+            self.frame, self.n = f, self.n + 1
+            self.cond.notify_all()
+
+    def isOpened(self):
+        return self.ok
+
+    def read(self):
+        with self.cond:
+            n = self.n
+            if not self.cond.wait_for(lambda: self.n != n, timeout=3.0):
+                return False, None
+            return True, self.frame
+
+    def release(self):
+        self.node = None
 
 
 def video_devices():
@@ -76,6 +133,7 @@ class ExploreMap:
         self.drawn = np.zeros((self.h, self.w), bool)
         self.rects = []
         self.in_zone = np.zeros((self.h, self.w), bool)
+        self.trail = np.zeros((self.h, self.w), bool)           # cells flown over (the retrace cost)
         (i0, j0), (i1, j1) = self.cell(x0, y0), self.cell(x1, y1)
         self.in_zone[max(j0, 0):min(j1, self.h - 1) + 1, max(i0, 0):min(i1, self.w - 1) + 1] = True
         self.ver = 0
@@ -95,6 +153,10 @@ class ExploreMap:
         cv2.fillPoly(m, [pts], 1)
         self.explored |= m.astype(bool)
         self.ver += 1
+
+    def mark_trail(self, x, y, radius):
+        i, j = self.cell(x, y)
+        cv2.circle(self.trail.view(np.uint8), (i, j), max(1, int(radius / self.res)), 1, -1)
 
     def add_red_samples(self, xy, is_red):
         ij = np.floor((xy - [self.ox, self.oy]) / self.res).astype(int)
@@ -146,9 +208,9 @@ class ExploreMap:
             out.append((*self.xy(i, j), float(win.sum()) * self.res ** 2))
         return out
 
-    def astar(self, start, goal, blocked):
+    def astar(self, start, goal, blocked, avoid=None, avoid_cost=0.0):
         """Waypoints [(x, y)] from start to goal round blocked cells, or None. A blocked start may leave its margin;
-        a blocked goal moves to the nearest free cell within 1 m."""
+        a blocked goal moves to the nearest free cell within 1 m. avoid: cells costing avoid_cost extra per step."""
         si, sj = self.cell(*start)
         gi, gj = self.cell(*goal)
         if not (self.inside(si, sj) and self.inside(gi, gj)):
@@ -178,7 +240,7 @@ class ExploreMap:
                 if not self.inside(ni, nj) or not (free[nj, ni] or blocked[sj, si] and blocked[nj, ni] and
                                                    g[(i, j)] < 1.0 / self.res):      # leave a start margin
                     continue
-                ng = g[(i, j)] + c
+                ng = g[(i, j)] + c * (1.0 + avoid_cost if avoid is not None and avoid[nj, ni] else 1.0)
                 if ng < g.get((ni, nj), 1e18):
                     g[(ni, nj)], prev[(ni, nj)] = ng, (i, j)
                     heapq.heappush(heap, (ng + math.hypot(gi - ni, gj - nj), ni, nj))
@@ -188,11 +250,18 @@ class ExploreMap:
         while cells[-1] != (si, sj):
             cells.append(prev[cells[-1]])
         cells.reverse()
-        # string-pull: keep the furthest cell in line of sight
+        # string-pull: keep the furthest cell in line of sight - with avoid, a shortcut may only cross flown-over
+        # cells the A* path itself crossed (else it pulls the route straight back over the trail)
+        pull = free
+        if avoid is not None and avoid_cost > 0:
+            on = np.zeros_like(free)
+            on[tuple(np.array(cells).T[::-1])] = True
+            on = cv2.dilate(on.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
+            pull = free & (~avoid | on)
         out, k = [cells[0]], 0
         while k < len(cells) - 1:
             n = len(cells) - 1
-            while n > k + 1 and not self.line_free(cells[k], cells[n], free):
+            while n > k + 1 and not self.line_free(cells[k], cells[n], pull):
                 n -= 1
             out.append(cells[n])
             k = n
@@ -246,10 +315,117 @@ class VrxExplore(base.VrxDeliverySystem):
         self.drop = a.drop
         self.deliver_alt = min(a.drop_alt, a.alt)
         self.start_qr = a.start_qr or None
+        self.open_batch, self.batch_t = 0, None   # batch new candidates join; when the last one was started
+        self.rejects, self.spins, self.spin_due = set(), [], None   # reject payloads; scan spots; a scan to do
+        self.scout = None                         # scout waypoints left, None = no scout
+        self.aruco, self.cam = None, None
+        if a.marker == 'aruco':
+            self.aruco = aruco_tools.Detector(raw=False)   # a 4x4-6x6 grid off the dictionaries is a misread
+            print('ArUco delivery: markers 3x3 .. 6x6', flush=True)
+
+    # ---- the lens: equidistant model of the analog camera at the frame's size
+    def lens(self, w, h):
+        if self.a.lens == 'pinhole':
+            return None
+        if self.cam is None or self.cam.size != (w, h):
+            dfov = self.a.lens_dfov or LENS_DFOV[self.a.lens]
+            f = math.hypot(w, h) / 2 / math.radians(dfov / 2)        # equidistant: r = f * theta
+            info = argparse.Namespace(distortion_model='equidistant', k=[f, 0, (w - 1) / 2, 0, f, (h - 1) / 2, 0, 0, 1],
+                                      d=[0.0, 0.0, 0.0, 0.0], width=w, height=h,
+                                      header=argparse.Namespace(frame_id='vrx'))
+            self.cam = Fisheye(info)
+        return self.cam
+
+    def pixel_to_ground_enu(self, px_pts, frame_w, frame_h, pose_enu, rpy_ned):
+        """The base projection with the lens model's rays instead of the pinhole (same frames and conventions)."""
+        cam = self.lens(frame_w, frame_h)
+        if cam is None:
+            return super().pixel_to_ground_enu(px_pts, frame_w, frame_h, pose_enu, rpy_ned)
+        if pose_enu is None:
+            return None, 1.0
+        xe, yn, zu, _ = pose_enu
+        if zu < 0.4:
+            zu = float(self.search_alt)  # bench test fallback when drone is on the ground
+        r = cam.rays(np.asarray(px_pts, dtype=np.float64).reshape(-1, 2))      # optical: x right, y down, z out
+        rays_flu = np.column_stack([-r[:, 1], -r[:, 0], -r[:, 2]])             # mounted straight down
+        rays_enu = rays_flu @ base.rpy_to_rot_enu(*rpy_ned).T
+        if (rays_enu[:, 2] > -0.08).any():
+            return None, 0.1
+        cos_nadir = float(np.clip(-rays_enu[0, 2], 0.15, 1.0))
+        k = zu / (-rays_enu[:, 2])
+        return np.array([xe, yn]) + rays_enu[:, :2] * k[:, None], cos_nadir ** 4
+
+    # ---- ArUco boards: the start scan and the full-frame pass use _decode_patch; frames go straight to the detector
+    def aruco_read(self, img):
+        """{payload: corners in frame pixels}: on undistorted views through the lens model, else the raw frame."""
+        cam = self.lens(img.shape[1], img.shape[0])
+        if cam is None:
+            return dict(self.aruco.detect(img))
+        return aruco_tools.detect_fisheye(self.aruco, img, cam, max_size=720)
+
+    def _decode_patch(self, img):
+        if self.aruco is None:
+            return super()._decode_patch(img)
+        return self.aruco_read(img)
+
+    def process_vrx_frame(self, gray, pose_now, rpy_now, now):
+        if self.aruco is None:
+            return super().process_vrx_frame(gray, pose_now, rpy_now, now)
+        h, w = gray.shape[:2]
+        found = self.aruco_read(gray)
+        for payload, poly in found.items():
+            g_pts, weight = self.pixel_to_ground_enu(np.vstack([poly.mean(axis=0), poly]), w, h, pose_now, rpy_now)
+            if g_pts is not None:
+                corners = g_pts[1:]
+                self.add_qr_detection(payload, (float(g_pts[0, 0]), float(g_pts[0, 1])),
+                                      [*corners.min(axis=0), *corners.max(axis=0)], weight, now, pose_now)
+        # boards seen but not read (far / blurred / at the frame edge): the detector's own square candidates that are
+        # board-like (contrasty, not inside a read marker) - the batches go by these, as the QR candidates
+        boxes = [(1.0, poly, payload) for payload, poly in found.items()]
+        for q in self.aruco._candidates(gray):
+            q = q.reshape(4, 2).astype(np.float64)
+            c = q.mean(axis=0)
+            side = float(np.mean(np.linalg.norm(q - np.roll(q, 1, axis=0), axis=1)))
+            if side < 8 or any(cv2.pointPolygonTest(p.astype(np.float32), (float(c[0]), float(c[1])), True) > -side
+                               for p in found.values()):
+                continue
+            x0, y0 = np.maximum(q.min(axis=0).astype(int), 0)
+            x1, y1 = q.max(axis=0).astype(int) + 1
+            patch = gray[y0:y1, x0:x1]
+            if patch.size < 16 or float(patch.std()) < self.a.cand_std:
+                continue
+            g_pts, _ = self.pixel_to_ground_enu(np.vstack([c, q]), w, h, pose_now, rpy_now)
+            if g_pts is not None:
+                self.add_candidate(float(g_pts[0, 0]), float(g_pts[0, 1]), conf=0.5, now=now)
+                boxes.append((0.5, q, 'board, not read'))
+        return found, boxes, []
+
+    def add_candidate(self, cx, cy, conf, now):
+        """The base's averaged candidate, plus its batch on the first sighting."""
+        super().add_candidate(cx, cy, conf, now)
+        new = []
+        with self.lock:
+            t = time.time()
+            for c in self.cands:
+                if 'batch' not in c:
+                    gather = self.batch_t is not None and t - self.batch_t < self.a.batch_gather
+                    c['batch'] = self.open_batch - 1 if gather else self.open_batch
+                    new.append(c)
+        for c in new if self.mission_running else []:   # log_mission takes self.lock
+            self.log_mission('EXPLORE', event=f'candidate at ({c["x"]:.1f}, {c["y"]:.1f}): batch {c["batch"]}')
 
     # ---- video: only the chosen device; colour frames also feed the red-zone votes
     def open_vrx(self):
         d = self.vrx_device
+        if d and d.startswith('gz:'):                              # the 8084 sim's B19 camera
+            cap = GzCapture(d[3:])
+            ok, frame = cap.read() if cap.isOpened() else (False, None)
+            if ok:
+                self.video_err = None
+                print(f'[VIDEO] {d} {frame.shape[1]}x{frame.shape[0]}', flush=True)
+                return cap
+            self.video_err = f'{d}: no frames (is the sim running? GZ_IP / GZ_PARTITION)'
+            return None
         if not d or not Path(d).exists():
             self.video_err = f'{d or "no device"}: not found'
             return None
@@ -350,36 +526,120 @@ class VrxExplore(base.VrxDeliverySystem):
             if g is not None:
                 with self.lock:
                     self.map.mark_explored(g)
+                    if self.mission_running:
+                        self.map.mark_trail(pose[0], pose[1], self.a.trail_radius)
 
     def _update_qr_status(self, q):
+        """(under self.lock) also: a reject read for the first time near the drone in the search -> a yaw scan."""
         super()._update_qr_status(q)
         q['status'] = 'found' if q['confirmed'] else 'reading'
+        if (self.start_qr and q['payload'] != self.start_qr and q['payload'] not in self.rejects
+                and q.get('in_zone') and self.mission_running and self.in_flight):
+            self.rejects.add(q['payload'])
+            if self.pose and math.dist(self.pose[:2], (q['x'], q['y'])) < self.a.spin_near:
+                self.spin_due = (q['x'], q['y'])
 
     # ---- planning
+    def pending(self):
+        """(under self.lock) candidates still to visit: seen twice, in the zone, not visited / given up / in red."""
+        red = self.map.red()
+        out = []
+        for c in self.cands:
+            i, j = self.map.cell(c['x'], c['y'])
+            if (c['n'] >= 2 and self.in_zone(c['x'], c['y']) and not red[j, i]
+                    and not any(math.dist((c['x'], c['y']), v) < 1.0 for v in self.visited + self.blacklist)):
+                out.append(dict(c))
+        return out
+
+    def route(self, pos, goal, blocked, fresh):
+        """Explorer A*: flown-over cells cost --retrace-cost extra while a frontier is left (fresh)."""
+        if fresh and self.a.retrace_cost > 0:
+            return self.map.astar(pos, goal, blocked, avoid=self.map.trail, avoid_cost=self.a.retrace_cost)
+        return self.map.astar(pos, goal, blocked)
+
     def pick_goal(self, pos, blocked):
+        fronts = self.map.frontiers(blocked)
         with self.lock:
-            cands = [dict(c) for c in self.cands if c['n'] >= 2 and self.in_zone(c['x'], c['y'])
-                     and not any(math.dist((c['x'], c['y']), v) < 1.0 for v in self.visited + self.blacklist)]
-        best = None
-        for c in cands:
-            path = self.map.astar(pos, (c['x'], c['y']), blocked)
+            cands = self.pending()
+        if cands:
+            # the earliest batch with any left, its cheapest route (re-costed from here) first
+            b = min(c.get('batch', 0) for c in cands)
+            best = None
+            for c in (c for c in cands if c.get('batch', 0) == b):
+                path = self.route(pos, (c['x'], c['y']), blocked, bool(fronts))
+                if path:
+                    d = self.path_len(pos, path)
+                    if best is None or d < best[0]:
+                        best = (d, {'x': c['x'], 'y': c['y'], 'kind': 'QR candidate', 'batch': b}, path)
+                else:
+                    self.blacklist.append((c['x'], c['y']))           # unreachable: dropped
+            if best:
+                with self.lock:
+                    started = b >= self.open_batch
+                    if started:
+                        self.open_batch, self.batch_t = b + 1, time.time()
+                if started:
+                    self.log_mission('EXPLORE', event=f'batch {b}: {sum(c.get("batch", 0) == b for c in cands)} '
+                                     'candidate(s), cheapest route first')
+                return best[1], best[2]
+            return self.pick_goal(pos, blocked)                      # that batch was unreachable: the next one
+        if self.scout:
+            tx, ty = self.scout[0]
+            path = self.route(pos, (tx, ty), blocked, bool(fronts))
             if path:
-                d = self.path_len(pos, path)
-                if best is None or d < best[0]:
-                    best = (d, {'x': c['x'], 'y': c['y'], 'kind': 'QR candidate'}, path)
-        if best:
-            return best[1], best[2]
+                return {'x': tx, 'y': ty, 'kind': 'scout'}, path
+            self.scout.pop(0)
         scored = []
-        for x, y, gain in self.map.frontiers(blocked):
+        for x, y, gain in fronts:
             if any(math.dist((x, y), b) < 0.8 for b in self.blacklist):
                 continue
             scored.append((gain / (math.dist(pos, (x, y)) + 1.0), x, y, gain))
         for _, x, y, gain in sorted(scored, reverse=True)[:6]:      # best few by straight distance; A* checks
-            path = self.map.astar(pos, (x, y), blocked)
+            path = self.route(pos, (x, y), blocked, True)
             if path:
                 return {'x': x, 'y': y, 'kind': 'frontier', 'gain_m2': round(gain, 2)}, path
             self.blacklist.append((x, y))
         return None, None
+
+    def make_scout(self, pos):
+        """Waypoints out to the line scout_offset in from the nearer long wall (45 deg), then along it to the far end."""
+        x0, x1, y0, y1 = self.zone_enu
+        mg = min(1.0, (min(x1 - x0, y1 - y0)) / 4)
+        along_x = (x1 - x0) >= (y1 - y0)                  # the long walls are the y edges
+        a0, a1, b0, b1 = (x0, x1, y0, y1) if along_x else (y0, y1, x0, x1)
+        pa, pb = (pos[0], pos[1]) if along_x else (pos[1], pos[0])
+        off = min(self.a.scout_offset, (b1 - b0) / 4)
+        line = min((b0 + off, b1 - off), key=lambda v: abs(v - pb))
+        far = a1 - mg if abs(a1 - pa) > abs(pa - a0) else a0 + mg
+        step = math.copysign(min(abs(far - pa), abs(line - pb)), far - pa)
+        pts = [(pa + step, line), (far, line)]
+        return [p if along_x else (p[1], p[0]) for p in pts], f'{"y" if along_x else "x"}={line:.1f} ({off:.1f} m in)'
+
+    def yaw_scan(self, x, y):
+        """Turn in place to 3 more headings 90 deg apart, dwelling at each (boards out of view join the next batch)."""
+        if any(math.dist(s, (x, y)) < self.a.spin_skip for s in self.spins):
+            return
+        self.spins.append((x, y))
+        with self.lock:
+            sx, sy, sz, yaw0 = self.setpoint
+        self.log_mission('EXPLORE', event=f'reject at ({x:.1f}, {y:.1f}): yaw scan for more boards')
+        for k in (1, 2, 3):
+            yaw = math.atan2(math.sin(yaw0 + k * math.pi / 2), math.cos(yaw0 + k * math.pi / 2))
+            with self.lock:
+                self.setpoint = (sx, sy, sz, yaw)
+            t_end = time.monotonic() + 5.0
+            while time.monotonic() < t_end:
+                if self.abort_reason:
+                    raise RuntimeError(self.abort_reason)
+                with self.lock:
+                    cur = self.pose[3] if self.pose else yaw
+                if abs(math.atan2(math.sin(cur - yaw), math.cos(cur - yaw))) < 0.15:
+                    break
+                time.sleep(0.1)
+            time.sleep(self.a.spin_dwell)
+        with self.lock:
+            new = sum(1 for c in self.pending() if c.get('batch', 0) >= self.open_batch)
+        self.log_mission('EXPLORE', event=f'yaw scan done: {new} candidate(s) for the next batch')
 
     def in_zone(self, x, y):
         i, j = self.map.cell(x, y)
@@ -412,6 +672,10 @@ class VrxExplore(base.VrxDeliverySystem):
                         seen = False
                 if self.go_home and goal['kind'] != 'home':
                     return 'replan'
+                if goal['kind'] in ('frontier', 'scout'):
+                    with self.lock:
+                        if self.spin_due is not None or self.pending():
+                            return 'replan'                           # a reject to scan / a board to go to first
                 rest = [(cx, cy)] + path[k:]
                 near = np.zeros_like(blocked, np.uint8)
                 ci, cj = self.map.cell(cx, cy)
@@ -439,6 +703,11 @@ class VrxExplore(base.VrxDeliverySystem):
         self.abort_reason = None
         self.mission_t0 = time.time()
         self.blacklist, self.visited = [], []
+        self.open_batch, self.batch_t, self.rejects, self.spins, self.spin_due = 0, None, set(), [], None
+        self.scout = None
+        with self.lock:
+            for c in self.cands:
+                c['batch'] = 0                            # seen before the start: the first batch
         self.go_home = False
         self.fsm = FSM_DROP if self.drop else FSM
         delivered = False
@@ -462,6 +731,14 @@ class VrxExplore(base.VrxDeliverySystem):
 
             self.zone_t0 = time.time()
             self.log_mission('EXPLORE', zone=self.zone_enu)
+            if self.a.scout_offset > 0:
+                time.sleep(self.a.scout_wait)             # the first view
+                with self.lock:
+                    seen = bool(self.pending()) or any(q.get('in_zone') for q in self.qrs)
+                    pos = (self.pose[0], self.pose[1])
+                if not seen:
+                    self.scout, line = self.make_scout(pos)
+                    self.log_mission('EXPLORE', event=f'no board in view: scout line {line} from the long wall')
             while time.time() - self.mission_t0 < self.a.time_budget and not self.go_home:
                 if self.abort_reason:
                     raise RuntimeError(self.abort_reason)
@@ -473,6 +750,14 @@ class VrxExplore(base.VrxDeliverySystem):
                     pos = (self.pose[0], self.pose[1])
                     blocked = self.map.blocked()
                     cov, _ = self.map.coverage()
+                    due, self.spin_due = self.spin_due, None
+                    seen = bool(self.pending()) or any(q.get('in_zone') for q in self.qrs)
+                if self.scout and seen:
+                    self.log_mission('EXPLORE', event='board seen: scout line dropped')
+                    self.scout = None
+                if due is not None and self.a.spin_reject:
+                    self.yaw_scan(*due)
+                    continue
                 if cov >= self.a.done_coverage:
                     self.log_mission('EXPLORE', event=f'zone {cov:.0%} explored')
                     break
@@ -483,9 +768,21 @@ class VrxExplore(base.VrxDeliverySystem):
                 with self.lock:
                     self.goal, self.path = goal, path
                 self.log_mission('EXPLORE', goal=goal, waypoints=len(path))
-                if self.follow(path, goal) == 'arrived' and goal['kind'] == 'QR candidate':
+                res = self.follow(path, goal)
+                if res == 'arrived' and goal['kind'] == 'scout' and self.scout:
+                    self.scout.pop(0)
+                    if not self.scout:
+                        self.log_mission('EXPLORE', event='scout line done')
+                if res == 'arrived' and goal['kind'] == 'QR candidate':
                     time.sleep(self.a.cand_hover)                    # hover for the decode
                     self.visited.append((goal['x'], goal['y']))
+                    with self.lock:
+                        q = min(self.qrs, key=lambda q: math.dist((q['x'], q['y']), (goal['x'], goal['y'])), default=None)
+                        reject = (q is not None and self.start_qr and q['payload'] != self.start_qr
+                                  and math.dist((q['x'], q['y']), (goal['x'], goal['y'])) < 1.5)
+                        self.spin_due = None                          # this scan covers a passing read here too
+                    if reject and self.a.spin_reject:
+                        self.yaw_scan(q['x'], q['y'])
             else:
                 self.log_mission('EXPLORE', event='operator: return home' if self.go_home else
                                  f'time budget {self.a.time_budget:.0f} s used: returning')
@@ -707,6 +1004,18 @@ def main():
     ap.add_argument('--fov-deg', type=float, default=120.0, help='camera horizontal FOV (analog FPV ~120-150)')
     ap.add_argument('--read-frac', type=float, default=0.6, help='share of the image (centre) where a QR reads')
     ap.add_argument('--cand-hover', type=float, default=3.0, help='s hovering over a QR candidate')
+    ap.add_argument('--cand-std', type=float, default=25.0, help='ArUco: grey std a not-read square needs to be a candidate')
+    ap.add_argument('--batch-gather', type=float, default=2.0, help='s: candidates first seen this soon after a batch '
+                    'was started join it')
+    ap.add_argument('--no-spin', dest='spin_reject', action='store_false', help='no yaw scan at a reject')
+    ap.add_argument('--spin-dwell', type=float, default=1.0, help='s at each heading of the yaw scan')
+    ap.add_argument('--spin-skip', type=float, default=2.0, help='m: no second yaw scan this near an earlier one')
+    ap.add_argument('--spin-near', type=float, default=2.5, help='m: a reject read in passing this near gets a scan')
+    ap.add_argument('--scout-offset', type=float, default=7.5, help='m in from the long wall for the start line '
+                    '(at most a quarter of the short side; 0 = no scout)')
+    ap.add_argument('--scout-wait', type=float, default=2.0, help='s at the search start for a board to show up')
+    ap.add_argument('--retrace-cost', type=float, default=3.0, help='extra A* cost per cell already flown over (0 = off)')
+    ap.add_argument('--trail-radius', type=float, default=0.5, help='m round the track counted as flown over')
     ap.add_argument('--done-coverage', type=float, default=0.95, help='explored share that ends the search')
     ap.add_argument('--time-budget', type=float, default=720.0, help='s before returning (15 min mission rule)')
     ap.add_argument('--qgc', default='127.0.0.1:14550')
@@ -715,6 +1024,11 @@ def main():
     ap.add_argument('--drop', action='store_true', help='QR area + payload drop on the QR matching the start QR')
     ap.add_argument('--drop-alt', type=float, default=5.0, help='drop height, m (course rules: 5 m)')
     ap.add_argument('--start-qr', default='', help='the target payload (else read at the pad when --drop)')
+    ap.add_argument('--lens', default='pinhole', choices=('pinhole', 'b19'),
+                    help='analog camera lens: pinhole = --fov-deg (as 8080); b19 = equidistant at its rated diagonal FOV')
+    ap.add_argument('--lens-dfov', type=float, default=0.0, help='diagonal FOV of the lens model, deg (0 = rated)')
+    ap.add_argument('--marker', default=os.environ.get('AEROTHON_MARKER', 'qr'), choices=('qr', 'aruco'),
+                    help='what the boards carry: QR codes, or ArUco markers 3x3 .. 6x6 (the 8084 mission)')
     ap.add_argument('--read-only', action='store_true',
                     help='link check on a real drone: listen only - no mode / arm / setpoint commands (Kill stays)')
     a = ap.parse_args()

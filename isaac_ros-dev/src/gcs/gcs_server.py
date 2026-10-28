@@ -3,6 +3,11 @@
 
 Runs on the Jetson (host, not the container); open http://10.42.0.247:8080 on the Lenovo.
     ~/workspaces/isaac_ros-dev/src/gcs/run_gcs.sh            (or: python3 gcs_server.py [--port 8080])
+ArUco delivery mission: the same dashboard with --marker aruco (http://10.42.0.247:8084, MAVLink udpin :14651:
+scripts/gcs_aruco.sh). The boards carry ArUco markers 3x3 .. 6x6 instead of QR codes: every stack it launches gets
+AEROTHON_MARKER=aruco (qr_reader, qr_locator, vrx_explore read it); --radio sends it to the onboard agent (launch
+param3 = 1). Everything else is the 8080 mission - every segment (whole mission, QR area, tunnels + banners, QR area
++ drop; the offboard Jetson: the two QR-area ones, at 1 m), and a sim world <w> flies as its ArUco twin <w>_aruco (vio_cuda_ws/sim/make_aruco_world.py, made if missing).
 
 Data in:
   MAVLink   udpin :14650 - a sink of mavlink-router (router/sim.conf, router/real.conf), which also feeds MAVROS and
@@ -40,6 +45,8 @@ try:                                                  # not needed in --radio mo
 except ImportError:
     cv2 = np = None
 
+OFFBOARD_ALT = 10.0          # --offboard-alt: the VRX explorer's search height, m (ArUco 8084: 1 m)
+MARKER = 'qr'                # --marker: what the boards carry, qr | aruco (the 8084 ArUco delivery dashboard)
 RADIO = None                 # --radio: this dashboard runs ON THE LENOVO on the telemetry radio (the final flight)
 AGENT = 194                  # the onboard Jetson's mav_agent (MAV_COMP_ID_ONBOARD_COMPUTER2)
 AGENT_CMD = 31010            # its MAV_CMD_USER_1; param1: 1 launch 2 stop 5 abort 6 status 7 start segment 8 operator
@@ -130,6 +137,16 @@ class State:
         self.red_check = None        # why the red map is not the one 10 ft red zone (red_sanity), None = fine
         self.mission_t0 = None
         self.zone_t0 = None
+        self.sim_clock = None        # (sim s, monotonic when received) from /clock: the sim's mission clock
+
+
+def clock_s():
+    """The mission clock: SIM time in the sim (the flight's own time - at RTF 0.2 the wall clock showed 12 min for a
+    2.8 min flight, 2026-10-28), the wall clock on the real drone / offboard."""
+    c = S.sim_clock
+    if STACK.mode == 'sim' and c is not None and time.monotonic() - c[1] < 5.0:
+        return c[0]
+    return time.time()
 
 
 S = State()
@@ -144,6 +161,7 @@ class Mavlink(threading.Thread):
         self.mavutil = mavutil
         self.radio, self.radio_err = radio, None
         self.agent, self.agent_detail, self.chunks = {}, {}, {}
+        self.vio, self.boards = {}, {}   # the agent's VIO position (32802) and boards (32803, by payload)
         if radio:
             # the final flight: this PC owns the SiK radio and relays every packet both ways to QGroundControl
             # (its UDP auto-connect) - a mavlink-router in-process: QGC and this dashboard both see the drone
@@ -210,7 +228,7 @@ class Mavlink(threading.Thread):
             return
         if t == 'HEARTBEAT':
             S.tel_time['agent'] = now
-        elif t == 'TUNNEL' and msg.payload_type in (32800, 32801):
+        elif t == 'TUNNEL' and msg.payload_type in (32800, 32801, 32802, 32803):
             try:
                 d = json.loads(bytes(msg.payload[:msg.payload_length]).decode())
             except ValueError:
@@ -218,8 +236,13 @@ class Mavlink(threading.Thread):
             if msg.payload_type == 32800:
                 self.agent = d
                 S.tel_time['agent_status'] = now
-            else:
+            elif msg.payload_type == 32801:
                 self.agent_detail = d
+            elif msg.payload_type == 32802:               # VIO position (mav_agent --vio-period)
+                self.vio = d
+                S.tel_time['agent_vio'] = now
+            elif d.get('p'):                              # a board (mav_agent --board-period): latest per payload
+                self.boards[d['p']] = d
         elif t == 'STATUSTEXT':                       # chunked (MAVLink 2): join the chunks of one id
             txt = msg.text.rstrip('\0')
             if msg.id:
@@ -314,6 +337,11 @@ class Mavlink(threading.Thread):
             return
         self.conn.mav.command_long_send(self.target[0], comp or self.target[1], cmd, 0, *p)
 
+    def tunnel_to_agent(self, ptype, data):
+        """A TUNNEL (<= 128 B) to the onboard agent: the geofence corners go up this way (radio_apply_gf)."""
+        if self.conn is not None:
+            self.conn.mav.tunnel_send(self.target[0], AGENT, ptype, len(data), list(data.ljust(128, b'\0')))
+
     RESULTS = {0: 'accepted', 1: 'temporarily rejected', 2: 'DENIED', 3: 'unsupported', 4: 'FAILED', 5: 'in progress'}
 
     def command_ack(self, cmd, *p, timeout=3.0, comp=None, final_within=0.0):
@@ -358,8 +386,9 @@ class Ros(threading.Thread):
         from sensor_msgs.msg import Image
         from std_msgs.msg import String
         from std_srvs.srv import Trigger
+        from rosgraph_msgs.msg import Clock
         rclpy.init()
-        n = self.node = Node('gcs_dashboard')
+        n = self.node = Node('gcs_dashboard' if MARKER == 'qr' else 'gcs_dashboard_aruco')
         latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.Image, self.Trigger, self.SetParameters, self.String = Image, Trigger, SetParameters, String
         self.qos_img = qos_profile_sensor_data
@@ -372,9 +401,9 @@ class Ros(threading.Thread):
                 stamp('state')
                 S.ros['state'] = m.data
                 if m.data == 'TAKEOFF' and S.mission_t0 is None:
-                    S.mission_t0 = time.time()
+                    S.mission_t0 = clock_s()
                 if m.data.startswith('SEARCH_DELIVERY') and S.zone_t0 is None:
-                    S.zone_t0 = time.time()
+                    S.zone_t0 = clock_s()
 
         def on_log(m):
             with S.lock:
@@ -453,6 +482,8 @@ class Ros(threading.Thread):
                 S.ros['mavros_connected'] = m.connected
 
         n.create_subscription(String, '/mission/state', on_state, 10)
+        n.create_subscription(Clock, '/clock', lambda m: setattr(
+            S, 'sim_clock', (m.clock.sec + m.clock.nanosec * 1e-9, time.monotonic())), qos_profile_sensor_data)
         n.create_subscription(String, '/mission/log', on_log, 50)
         n.create_subscription(String, '/delivery/qrs', on_qrs, 10)
         n.create_subscription(String, '/mission/start_qr', on_start_qr, latched)
@@ -465,10 +496,19 @@ class Ros(threading.Thread):
         n.create_subscription(String, '/delivery/coverage', on_cov, 10)
         n.create_subscription(MavState, '/mavros/state', on_mavros, 10)
         for key, topic in (('explore', '/delivery/explore/state'), ('corridor', '/nav/corridor/state'),
-                           ('entry', '/nav/entry/state')):
+                           ('entry', '/nav/entry/state'),
+                           # corridor:=aerothon: its vio_to_px4 (cuVSLAM health gate) and EKF3 source set
+                           ('vio', '/vio/health'), ('ekf_source', '/vio/ekf_source_state')):
             n.create_subscription(String, topic, on_node_state(key), 10)
         from sensor_msgs.msg import LaserScan
         n.create_subscription(LaserScan, '/vio/obstacle_scan', lambda m: stamp('scan'), qos_profile_sensor_data)
+
+        def on_vio_pose(m):                           # cuVSLAM (corridor:=aerothon): its own frame, where it started
+            p = m.pose.pose.position
+            with S.lock:
+                stamp('vio_pose')
+                S.ros['vio_pose'] = (p.x, p.y, p.z)
+        n.create_subscription(Odometry, '/visual_slam/tracking/odometry', on_vio_pose, qos_profile_sensor_data)
         self.img_sub = None
         self.cli_start = n.create_client(Trigger, '/mission/start')
         self.cli_abort = n.create_client(Trigger, '/mission/abort')
@@ -627,8 +667,12 @@ class Stack:
         self.go = None               # sim: {'segment', ...} - the mission starts by itself once the stack is READY
         self.go_msg = ''
         self.video = ''              # offboard: the VRX's USB video device
+        self.code = ''               # mission code version: '' = the working tree, else a commit (code_version.py)
+        self.corridor = 'current'    # corridor navigation: current (ours) | aerothon (~/AeroTHON_2026, its container)
+        self.vio_fc = False          # corridor aerothon: its VIO -> ArduPilot EKF3 (source set 2 in the tunnels)
         self.world = 'competition'
         self.offboard_seg = 'qr'
+        self.marker = MARKER         # qr | aruco: the stack's boards (AEROTHON_MARKER in its environment)
 
     def running(self):
         if self.proc is not None and self.proc.poll() is None:
@@ -640,6 +684,10 @@ class Stack:
                 self.mode = 'real' if ('real_mission' in cmd or 'real_link' in cmd) else \
                     'offboard' if 'offboard_vrx' in cmd else 'sim'
                 self.run = next((a.split(':=', 1)[1] for a in cmd.split() if a.startswith('run:=')), self.run)
+                self.corridor = 'aerothon' if 'corridor:=aerothon' in cmd else 'current'
+                self.vio_fc = 'vio_fc:=1' in cmd
+                env = Path(f'/proc/{pids[0]}/environ').read_bytes().split(b'\0')
+                self.marker = 'aruco' if b'AEROTHON_MARKER=aruco' in env else 'qr'
             except OSError:
                 pass
         return bool(pids)
@@ -682,7 +730,11 @@ class Stack:
             onboard = subprocess.run(['systemctl', '--user', 'is-active', '--quiet', 'aerothon-router']).returncode == 0
             if not onboard and not link.startswith('udp:') and not Path(dev).exists():
                 return False, f'telemetry link {link!r}: {dev} does not exist (USB /dev/ttyACM0, TELEM2 /dev/ttyTHS1)'
-        env = dict(os.environ, FASTRTPS_DEFAULT_PROFILES_FILE=str(WS / 'fastdds_udp.xml'))
+        if mode == 'sim' and self.marker == 'aruco':
+            world, err = aruco_world(world)
+            if err:
+                return False, err
+        env = dict(os.environ, FASTRTPS_DEFAULT_PROFILES_FILE=str(WS / 'fastdds_udp.xml'), AEROTHON_MARKER=self.marker)
         self.run = f'{mode}_{world if mode == "sim" else "drone"}_{time.strftime("%Y-%m-%d_%H-%M-%S")}'
         self.world = world
         self.offboard_seg = (self.go or {}).get('segment') or 'qr'
@@ -691,17 +743,18 @@ class Stack:
             # the Jetson on the ground: VRX video + the radio (or the bench SITL), the 8094 explorer flies the QR area
             seg = (self.go or {}).get('segment') or 'qr'
             cmd = ['ros2', 'launch', str(LAUNCH_ALL / 'offboard_vrx.launch.py'), f'run:={self.run}',
-                   f'link:={link}', f'segment:={seg}'] + ([f'video:={self.video}'] if self.video else [])
+                   f'link:={link}', f'segment:={seg}', f'alt:={OFFBOARD_ALT:g}'] + \
+                ([f'video:={self.video}'] if self.video else [])
             if geofence_json:
                 cmd.append(f'world_json:={geofence_json}')
         elif mode == 'sim':
             cmd = ['ros2', 'launch', str(LAUNCH_ALL / 'sim_mission.launch.py'), f'world:={world}', f'run:={self.run}',
-                   'autostart:=0']
+                   'autostart:=0'] + ([f'code:={self.code}'] if self.code else []) + self.corridor_args()
             if geofence_json:
                 cmd.append(f'world_json:={geofence_json}')
         else:
             cmd = ['ros2', 'launch', str(LAUNCH_ALL / 'real_mission.launch.py'), f'run:={self.run}', f'link:={link}',
-                   f'world_json:={geofence_json}']
+                   f'world_json:={geofence_json}'] + ([f'code:={self.code}'] if self.code else []) + self.corridor_args()
             if gcs_ip:
                 cmd.append(f'gcs_ip:={gcs_ip}')
         self.proc = subprocess.Popen(['bash', '-c', 'source /opt/ros/humble/setup.bash && exec "$@"', '_', *cmd],
@@ -715,7 +768,10 @@ class Stack:
             # the map starts clean: the last run's flight path (MAVLink track) and costmap stayed drawn (2026-10-27)
             S.tel_track = []
             S.costmap_png, S.costmap_meta = None, None
-        return True, f'{mode} stack starting (run {self.run})'
+        return True, f'{mode} stack starting (run {self.run}{", ArUco boards" if self.marker == "aruco" else ""})'
+
+    def corridor_args(self):
+        return [f'corridor:={self.corridor}', f'vio_fc:={int(self.corridor == "aerothon" and self.vio_fc)}']
 
     def launch_and_go(self, run, go):
         """Sim: one Launch press = the stack + the chosen segment. Waits for READY and a green preflight (the GPS
@@ -807,6 +863,17 @@ def gf_local(gf):
     return {k: [gps_to_local(p[0], p[1], lat0, lon0) for p in gf.get(k, [])] for k in ('field', 'delivery')}
 
 
+def aruco_world(world):
+    """The ArUco twin of a sim world (<world>_aruco: same course, ArUco boards) -> (name, error or '')."""
+    name = world if world.endswith('_aruco') else f'{world}_aruco'
+    if not (WORLDS / f'{name}.sdf').exists():
+        r = subprocess.run(['python3', str(WORLDS.parent / 'make_aruco_world.py'), world], capture_output=True,
+                           text=True, timeout=60)
+        if r.returncode:
+            return name, f'could not make the ArUco world {name}: {(r.stderr or r.stdout).strip()[-300:]}'
+    return name, ''
+
+
 def gf_from_world(world):
     """Sim: the field outline (start area + corridors + zone, 8 corners) and the zone, in GPS around the origin."""
     w = json.load(open(WORLDS / f'{world}.json'))
@@ -845,7 +912,7 @@ def apply_gf(gf, mode):
         try:
             w = json.load(open(WORLDS / f'{gf.get("world", "competition")}.json'))
             out['corridors'] = w['corridors']
-            out['start_qr'], out['delivery_qrs'], out['target'] = w.get('start_qr'), w.get('delivery_qrs'), w.get('target')
+            # never the boards / target / red zones: they move on the day and the mission must find them itself
         except (OSError, ValueError, KeyError):
             pass
     path = DATA / 'mission_geofence.json'
@@ -952,10 +1019,18 @@ def preflight(mode):
         ('Corridor navigation up', fresh('corridor', 5), S.ros['states'].get('corridor', ''), True),
         ('Delivery costmap', fresh('map', 5), 'delivery_mapper /delivery/map', True),
         ('Forward depth (D435 scan)', fresh('scan', 3), '/vio/obstacle_scan', True),
+        *([('AeroTHON VIO up (cuVSLAM stereo + IMU)', fresh('vio', 3), S.ros['states'].get('vio', '') +
+            ' - "OK" only with enough features in view: on the pad a REJECT is normal, it is reset at the tunnel', True),
+           ('VIO -> EKF3', fresh('ekf_source', 3) and (STACK.vio_fc or S.ros['states'].get('ekf_source') == 'gps'),
+            f'EKF source {S.ros["states"].get("ekf_source", "?")}; ' +
+            ('sent, set 2 in the tunnels (FC needs EK3_SRC2_VELXY 6, VISO_TYPE 1)' if STACK.vio_fc else
+             'off: checks only, the FC flies on GPS'), False)]
+          if STACK.corridor == 'aerothon' else []),
         ('Camera', fresh('camera', 6), f'feed {ROS.camera_topic}', mode == 'real'),
         ('Arducam calibrated', mode != 'real' or (WS / 'calibration/arducam_fisheye_1640x1232.yaml').exists(),
          'calibration/arducam_fisheye_1640x1232.yaml (else the nominal lens: QR / red-zone positions off)', False),
-        ('Jetson RAM free >= 1 GB', mem is not None and mem >= 1024, f'{mem} MB', True),
+        # a warning, not a gate: low RAM must not keep the drone from arming (user, 2026-10-28)
+        ('Jetson RAM free >= 1 GB', mem is not None and mem >= 1024, f'{mem} MB', False),
         ('Jetson temperature < 85 C', temp is None or temp < 85, f'{temp} C', False),
     ]
     return [{'name': n, 'ok': bool(ok), 'detail': d, 'critical': c} for n, ok, d, c in checks]
@@ -1013,9 +1088,9 @@ def alerts():
         out.append(('critical', f'MISSION {st}'))
     if armed and not fresh('state', 5):
         out.append(('warning', 'mission supervisor silent'))
-    if S.zone_t0 and st not in ('DONE', 'LAND') and time.time() - S.zone_t0 > 480 and \
+    if S.zone_t0 and st not in ('DONE', 'LAND') and clock_s() - S.zone_t0 > 480 and \
             st.startswith(('SEARCH', 'DELIVER', 'DROP')):
-        out.append(('warning', f'QR area {(time.time() - S.zone_t0) / 60:.1f} min (limit 9)'))
+        out.append(('warning', f'QR area {(clock_s() - S.zone_t0) / 60:.1f} min (limit 9)'))
     mem = mem_available_mb()
     if mem is not None and mem < 500:
         out.append(('warning', f'Jetson RAM {mem} MB free'))
@@ -1106,15 +1181,19 @@ def snapshot():
                     'target': S.ros['target'], 'states': S.ros['states'], 'coverage': S.ros['coverage'],
                     'track': track[-1500:], 'pose': p, 'pose_src': pose_src},
             'fsm': FSM[S.mission_type], 'mission_type': S.mission_type, 'vrx': v,
-            'mission_s': (time.time() - S.mission_t0) if S.mission_t0 else None,
-            'zone_s': (time.time() - S.zone_t0) if S.zone_t0 else None,
+            'mission_s': (clock_s() - S.mission_t0) if S.mission_t0 else None,
+            'zone_s': (clock_s() - S.zone_t0) if S.zone_t0 else None,
+            'clock': 'sim' if STACK.mode == 'sim' and S.mission_t0 is not None and S.mission_t0 < 1e9 else 'wall',
             'costmap': {'ver': S.costmap_ver, **(S.costmap_meta or {})} if S.costmap_meta else None,
             'geofence': gf, 'geofence_local': loc,
             'stack': {'running': STACK.running(), 'mode': STACK.mode, 'run': STACK.run, 'phase': stack_phase(),
-                      'go': STACK.go_msg,
+                      'go': STACK.go_msg, 'code': STACK.code, 'corridor': STACK.corridor,
+                      'vio_fc': STACK.corridor == 'aerothon' and STACK.vio_fc,
                       'up_s': round(time.time() - STACK.started) if STACK.started and STACK.running() else None},
             'camera': ROS.camera_topic, 'preflight': preflight(mode), 'alerts': alerts(),
             'statustext': S.statustext[-15:],
+            'vio_pose': {'xyz': S.ros.get('vio_pose'), 'health': S.ros['states'].get('vio', ''),
+                         'age': round(time.monotonic() - S.ros_time['vio_pose'], 1) if 'vio_pose' in S.ros_time else None},
             'ages': {k: round(time.monotonic() - t, 1) for k, t in S.ros_time.items()},
         }
         if RADIO:                                     # the onboard mission, from the agent's status
@@ -1127,6 +1206,14 @@ def snapshot():
             out['mission_s'], out['zone_s'] = a.get('t'), a.get('z')
             seg = {v: k for k, v in SEG_CODE.items()}.get(a.get('sg'), 'full')
             out['fsm'], out['mission_type'] = FSM[seg], seg
+            # the boards and the VIO position the agent sends over the radio (32803 / 32802)
+            out['ros']['qrs'] = [{'payload': b['p'], 'x': b.get('x', 0.0), 'y': b.get('y', 0.0), 'n': 0,
+                                  'status': b.get('st') or 'pending'} for b in MAV.boards.values() if b['p'] != '*target']
+            tb = MAV.boards.get('*target')
+            out['ros']['target'] = (tb['x'], tb['y']) if tb else None
+            vv, va = MAV.vio, S.tel_time.get('agent_vio')
+            out['vio_pose'] = {'xyz': vv.get('v'), 'health': vv.get('h', ''),
+                               'age': round(time.monotonic() - va + (vv.get('a') or 0), 1) if va else None}
         if v:                                         # offboard: the explorer is the mission
             out['ros'].update(state=v.get('state') or '', log=v.get('log') or [], qrs=[
                 {**q, 'x': q.get('x') or 0.0, 'y': q.get('y') or 0.0, 'n': q.get('n') or 0, 'status': q.get('status') or 'pending'}
@@ -1188,7 +1275,7 @@ async def api(request):
     body = await request.json() if request.can_read_body else {}
     print(f'[api] {time.strftime("%H:%M:%S")} {request.remote} {what} {json.dumps(body)[:200]}', flush=True)
     loop = asyncio.get_running_loop()
-    if RADIO:
+    if RADIO and what not in ('geofence', 'capture'):   # those two stay here: the corners are kept on this PC
         return ok(*(await loop.run_in_executor(None, radio_api, what, body)))
     if what == 'operator':                            # mav_agent action 8: the ground took over over the radio
         return ok(*(await loop.run_in_executor(None, lambda: ROS.call(ROS.cli_operator, ROS.Trigger.Request(), 3.0))))
@@ -1229,16 +1316,33 @@ async def api(request):
         seg = SEGMENT_ALIAS.get(body.get('segment') or '', body.get('segment') or '')
         if seg and seg not in SEGMENTS:
             return ok(False, 'segment: ' + ' | '.join(SEGMENTS))
-        if mode == 'offboard' and seg not in ('qr', 'qr_drop'):
+        # only the offboard Jetson is limited to the QR area (no tunnel sensors on that drone); 8084 (ArUco) flies every
+        # segment in sim / real / radio like 8080 (user, 2026-10-28)
+        if mode == 'offboard' and seg not in ('', 'qr', 'qr_drop'):
             return ok(False, 'the offboard Jetson flies the QR area only: QR area only | QR area + drop')
         STACK.go = {'segment': seg, 'payload': body.get('payload') or '', 'read_qr': body.get('read_qr', True),
                     'override': body.get('override')} if seg else None
         STACK.video = (body.get('video') or '').strip()
+        STACK.code = (body.get('code') or '').strip()       # which mission code flies (sim / real; offboard: current)
+        STACK.corridor = body.get('corridor') or 'current'  # corridor navigation: current | aerothon (sim / real)
+        if STACK.corridor not in ('current', 'aerothon'):
+            return ok(False, 'corridor: current | aerothon')
+        STACK.vio_fc = bool(body.get('vio_fc'))
+        STACK.marker = body.get('marker') or MARKER         # the onboard agent passes the radio page's marker
+        if STACK.marker not in ('qr', 'aruco'):
+            return ok(False, 'marker: qr | aruco')
         if mode == 'offboard' and body.get('link', '').startswith('/dev/ttyACM'):
             body['link'] = 'sitl'
         STACK.go_msg = ''
         return ok(*STACK.start(mode, world, str(gj) if body.get('use_geofence') and gj.exists() else '',
                                body.get('link', '/dev/ttyACM0:921600'), gcs_ip(request)))
+    if what == 'code_versions':                       # the Launch row's "mission code" choice
+        r = await loop.run_in_executor(None, lambda: subprocess.run(
+            [str(LAUNCH_ALL / 'scripts/code_version.py'), 'list'], capture_output=True, text=True, timeout=20))
+        try:
+            return ok(True, 'versions', versions=json.loads(r.stdout))
+        except ValueError:
+            return ok(False, f'git log: {r.stderr.strip()[:200]}', versions=[])
     if what == 'status':                              # lenovo/aerothon.sh status
         return ok(True, stack_phase(), mode=STACK.mode, run=STACK.run, state=S.ros.get('state'))
     if what == 'stack_stop':
@@ -1283,8 +1387,8 @@ def radio_api(what, body):
         return success, f'{what.upper()}: autopilot {ack}; onboard: {sup}'
     if S.tel.get('armed') and what in ('stack_start', 'stack_stop', 'mission_start'):
         return False, 'the drone is armed: in flight only LAND / RTH / RTL / KILL'
-    if what == 'stack_start':
-        return MAV.command_ack(AGENT_CMD, 1, 0, comp=AGENT, timeout=10.0, final_within=240.0)
+    if what == 'stack_start':                         # param3: the boards, 0 QR / 1 ArUco (this page's --marker)
+        return MAV.command_ack(AGENT_CMD, 1, 0, int(MARKER == 'aruco'), comp=AGENT, timeout=10.0, final_within=240.0)
     if what == 'stack_stop':
         return MAV.command_ack(AGENT_CMD, 2, comp=AGENT, timeout=10.0, final_within=120.0)
     if what == 'mission_start':
@@ -1294,7 +1398,42 @@ def radio_api(what, body):
         return MAV.command_ack(AGENT_CMD, 7, SEG_CODE[seg], comp=AGENT, timeout=10.0, final_within=30.0)
     if what == 'mission_abort':
         return MAV.command_ack(AGENT_CMD, 5, comp=AGENT, timeout=10.0, final_within=15.0)
-    return False, f'{what}: not over the radio (the onboard dashboard, by cable)'
+    if what == 'apply':
+        return radio_apply_gf()
+    return False, f'{what}: not over the radio'
+
+
+T_GEOFENCE = 32810           # TUNNEL ground -> agent: [tid lo, tid hi, chunk, chunks] + up to 124 B of the JSON
+
+
+def radio_apply_gf():
+    """--radio: the geofence corners captured HERE (the drone's GPS over the radio) up to the onboard agent, which
+    saves + applies them on the drone's dashboard (its GPS origin) - no cable or Wi-Fi to the Jetson exists
+    (user, 2026-10-28). Chunks sent twice (the radio drops packets), then agent action 9 with the count + CRC."""
+    import random
+    import zlib
+    gf = load_gf()
+    f, d = gf.get('field', []), gf.get('delivery', [])
+    if not 3 <= len(f) <= 8:
+        return False, f'field boundary needs 3-8 corners (has {len(f)})'
+    if len(d) != 4:
+        return False, f'delivery region needs 4 corners (has {len(d)})'
+    raw = json.dumps({'f': f, 'd': d}, separators=(',', ':')).encode()
+    chunks = [raw[k:k + 124] for k in range(0, len(raw), 124)]
+    tid, crc = random.randint(1, 65535), zlib.crc32(raw) & 0xFFFFFF     # 24 bits: exact in a float32 param
+    for _ in range(2):
+        for k, c in enumerate(chunks):
+            MAV.tunnel_to_agent(T_GEOFENCE, bytes([tid & 255, tid >> 8, k, len(chunks)]) + c)
+            time.sleep(0.08)
+    t0 = time.time()
+    success, res = MAV.command_ack(AGENT_CMD, 9, len(chunks), crc, tid, comp=AGENT, timeout=10.0, final_within=30.0)
+    end = time.time() + 3.0                           # the agent's own words: its STATUSTEXT 'AGT geofence: ...'
+    while time.time() < end:
+        for t, _, text in reversed(S.statustext):
+            if t >= t0 and 'AGT geofence' in text:
+                return success, text.replace('JETSON ', '')
+        time.sleep(0.2)
+    return success, f'geofence over the radio: {res}'
 
 
 def sim_place_at_zone(world):
@@ -1396,7 +1535,19 @@ def emergency(what):
 
 
 async def index(request):
-    return web.FileResponse(HERE / 'static/index.html')
+    if MARKER == 'qr':
+        return web.FileResponse(HERE / 'static/index.html')
+    # the ArUco delivery dashboard: its own title, a banner, the ArUco twins of the sim worlds
+    html = (HERE / 'static/index.html').read_text()
+    html = html.replace('<title>AeroTHON Ground Station</title>', '<title>AeroTHON ArUco Delivery</title>')
+    html = html.replace('<option>competition</option><option>comp_far1</option>',
+                        '<option>competition_aruco</option><option>comp_far1_aruco</option>')
+    html = html.replace('<option value="full" class="seg-full">Whole mission</option>', '')     # QR area only
+    html = html.replace('<option value="tunnel" class="seg-full">Tunnels + banners only</option>', '')
+    html = html.replace('<body>', '<body><div style="background:#1d4ed8;color:#fff;font:600 13px system-ui;'
+                        'padding:4px 10px">ArUco delivery (:8084) - the 8080 QR-area mission with ArUco markers 3x3 .. 6x6 '
+                        'instead of QR codes</div>', 1)
+    return web.Response(text=html, content_type='text/html')
 
 
 def main():
@@ -1407,8 +1558,14 @@ def main():
     ap.add_argument('--radio', default='', help='the final flight, ON THE LENOVO: the SiK radio (/dev/ttyUSB0:57600); '
                     'telemetry + RTH / RTL / LAND / KILL + segment start via the onboard mav_agent; QGC gets a relay')
     ap.add_argument('--qgc', default='127.0.0.1:14550', help="--radio: QGroundControl's UDP port (its auto-connect)")
+    ap.add_argument('--marker', default='qr', choices=('qr', 'aruco'),
+                    help='what the boards carry: qr (8080) | aruco (the ArUco delivery mission, 8084)')
+    ap.add_argument('--offboard-alt', type=float, default=10.0,
+                    help='offboard (VRX): search height, m - the drop is at min(5 m, this)')
     args = ap.parse_args()
-    global RADIO
+    global RADIO, MARKER, OFFBOARD_ALT
+    MARKER, OFFBOARD_ALT = args.marker, args.offboard_alt
+    STACK.marker = MARKER
     RADIO = args.radio or None
     DATA.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault('FASTRTPS_DEFAULT_PROFILES_FILE', str(WS / 'fastdds_udp.xml'))

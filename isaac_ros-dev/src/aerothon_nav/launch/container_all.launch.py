@@ -40,19 +40,23 @@ def generate_launch_description():
     # vslam:=false (reduced stack for the Jetson): no cuVSLAM, and PX4's IMU streams at 50 Hz instead of 250
     # (only cuVSLAM needs the rate; obstacle_scan uses the attitude)
     vslam = LaunchConfiguration('vslam')
+    # corridor_impl:=aerothon: the AeroTHON folder's corridor nodes + cuVSLAM (stereo + IMU) + obstacle_scan run in its
+    # own container (launch_all/aerothon_corridor_stack.py); here the IMU at 250 Hz for its cuVSLAM, no scan of ours
+    aerothon = PythonExpression(["'", LaunchConfiguration('corridor_impl'), "' == 'aerothon'"])
     sim_view = include('vio_bringup', 'sim_view.launch.py',
                        mavros='false', mavros_tf='false', rviz='false', use_sim_time='true',
                        # slam_toolbox (corridor_nav.launch.py) owns map -> odom: a second, static identity one made
                        # the SLAM correction corridor_nav reads flip between the two
                        map_tf='false',
-                       imu_rate=PythonExpression(["'250.0' if '", vslam, "'.lower() == 'true' else '50.0'"]))
+                       imu_rate=PythonExpression(["'250.0' if '", vslam, "'.lower() == 'true' or '",
+                                                  LaunchConfiguration('corridor_impl'), "' == 'aerothon' else '50.0'"]))
 
     # cuVSLAM + /vio/obstacle_scan (the corridor and delivery costmaps; entry_align's walls). PX4's estimate
     # owns base_link (odom_tf), so no VIO TF
     vio = include('vio_bringup', 'sim_vio.launch.py',
                   # scan_band 0.15: Nav2's 2D scan band must fit inside the gap the altitude planner flies a window
                   # opening through (0.6 m as mapped, drone 0.3 m: at 0.3 MPPI saw the window's solid part, 2026-10-21)
-                  depth='true', vio_tf='false', scan_band='0.15', vslam=vslam)
+                  depth=PythonExpression(['not ', aerothon]), vio_tf='false', scan_band='0.15', vslam=vslam)
 
     # Arducam camera_info + TF (the image itself comes over the host bridge)
     arducam = include('vio_bringup', 'sim_arducam.launch.py',
@@ -63,6 +67,7 @@ def generate_launch_description():
     corridor = include('aerothon_nav', 'corridor_nav.launch.py',
                        sim='true', course=LaunchConfiguration('course'), qr_fallback='/arducam/nadir_hd/image_raw',
                        nav2=LaunchConfiguration('corridor_nav2'),
+                       corridor_impl=LaunchConfiguration('corridor_impl'),
                        world_json=world_json_path,   # geofence (offboard_bridge)
                        use_sim_time='true')
 
@@ -98,6 +103,8 @@ def generate_launch_description():
                               description='true: cuVSLAM + vio_to_px4 (heavy on the 8 GB Jetson)'),
         DeclareLaunchArgument('corridor_nav2', default_value='false',
                               description='true: launch the corridor Nav2 (only for corridor_nav nav_mode nav2)'),
+        DeclareLaunchArgument('corridor_impl', default_value='current',
+                              description='current | aerothon (corridor nav + VIO from ~/AeroTHON_2026, its container)'),
         set_fastdds,
         sim_view,
         vio,

@@ -1,0 +1,23 @@
+# VIO -> EKF3 for the sim, loaded after ardupilot_sim_params.parm only with AP_VIO=1 (8080 "Corridor nav: AeroTHON" +
+# "VIO -> EKF3"; sim_mission.launch.py corridor:=aerothon vio_fc:=1). From ~/AeroTHON_2026/vio_cuda_ws/sim/
+# ardupilot_sim_params.parm: vio_to_px4 sends ODOMETRY with the body-frame cuVSLAM velocity (its quaternion = ArduPilot's
+# own attitude). Source set 1 (outside the tunnels): GPS. Source set 2 (switched by their corridor_nav at the entrance,
+# /vio/ekf_source -> MAV_CMD_SET_EKF_SOURCE_SET, and back at the exit): VIO velocity, no horizontal position, baro height.
+VISO_TYPE 1
+VISO_DELAY_MS 50
+VISO_VEL_M_NSE 0.1
+VISO_QUAL_MIN 0
+EK3_SRC1_POSXY 3
+EK3_SRC1_VELXY 3
+EK3_SRC1_POSZ 1
+EK3_SRC1_VELZ 3
+EK3_SRC1_YAW 1
+EK3_SRC2_POSXY 0
+EK3_SRC2_VELXY 6
+EK3_SRC2_POSZ 1
+EK3_SRC2_VELZ 6
+EK3_SRC2_YAW 1
+EK3_SRC_OPTIONS 0
+# VISO_TYPE 1 would block arming until VIO is healthy, but VIO only has to carry the tunnels (little to see on the pad):
+# skip the vision pre-arm check (bit 18). 4.7.2 name; their file's ARMING_CHECK is the pre-4.7 one
+ARMING_SKIPCHK 262144

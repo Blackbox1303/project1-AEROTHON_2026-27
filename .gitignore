@@ -28,3 +28,15 @@ __pycache__/
 *.log
 /vio_cuda_ws/sim/backup_*/
 /vio_cuda_ws/sim/.pylib/
+# ground app (2026-10-28): the scripts only - apps/, wheels/ and pylib/ are made by update_code.sh / install.sh
+!/ground_app/
+/ground_app/apps/
+/ground_app/wheels/
+/ground_app/pylib/
+/ground_app/VERSION
+# container image build files
+!/docker/
+# WeChat QR detector models (1 MB) for the offboard QR app
+!/isaac_ros-dev/calibration/wechat_qrcode/
+# sim worlds made at every launch
+/vio_cuda_ws/sim/worlds/.ap_*

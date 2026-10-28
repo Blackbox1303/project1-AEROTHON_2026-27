@@ -5,6 +5,9 @@ loggers, /mission/start - with everything saved under runs/<run> (on disk: survi
     ... fcu:=px4      # the old PX4 SITL instead of ArduCopter (default fcu:=ardupilot, as on the real drone, 2026-10-27)
 Watch it from the laptop: ~/host_gui.sh there (gz_ip:=10.42.0.247, the default; 127.0.0.1 = Jetson only, no GUI).
 Ctrl-C stops everything, in the container too (scripts/stop_all.sh).
+corridor:=aerothon: the tunnels are flown by the AeroTHON folder's corridor navigation + VIO (cuVSLAM on the D435 IR
+pair + the autopilot IMU) in its own container (scripts/aerothon_corridor.sh, log runs/<run>/aerothon_corridor.log);
+vio_fc:=1 also sends that VIO to ArduPilot's EKF3 (SITL gets vio_cuda_ws/sim/ardupilot_vio_sim.parm).
 
 Steps: scripts/container_up.sh (the dev container, detached, if not running; its entrypoint hook
 install_ignition_deps.sh installs MAVROS into every new container) -> host_all.launch.py (Gazebo headless, PX4 SITL,
@@ -70,7 +73,11 @@ def setup(context):
     gj_c = f'{run_c}/geofence_used.json'                       # the copy, as the container sees it
     if not (WORLDS / f'{world}.sdf').exists():
         raise RuntimeError(f'no world {WORLDS / world}.sdf')
+    aerothon, vio_fc = g('corridor') == 'aerothon', g('vio_fc') in ('1', 'true')
+    if g('corridor') not in ('current', 'aerothon'):
+        raise RuntimeError(f"corridor:={g('corridor')}: current | aerothon")
     (run_dir / 'launch_args.txt').write_text(
+        f'corridor={g("corridor")}\nvio_fc={int(aerothon and vio_fc)}\nmarker={g("marker")}\n'
         f'world={world}\nfcu={g("fcu")}\ngz_ip={g("gz_ip")}\nautostart={g("autostart")}\nworld_json={gj}\nstarted={time.ctime()}\n')
     print(f'[sim_mission] run dir: {run_dir}')
 
@@ -80,11 +87,23 @@ def setup(context):
         launch_arguments={'world': str(WORLDS / f'{world}.sdf'), 'gz_ip': g('gz_ip'),
                           'gz_partition': g('gz_partition'), 'headless': '1', 'router': router,
                           'fcu': g('fcu')}.items())
+    marker = g('marker')
+    if marker not in ('qr', 'aruco'):
+        raise RuntimeError(f"marker:={marker}: qr | aruco")
+    # the board markers (qr_reader / qr_locator read AEROTHON_MARKER): QR codes, or ArUco for the 8084 mission
+    code_env = ['-e', f'AEROTHON_MARKER={marker}']
+    if g('code'):                                # a committed version: its checkout first on the container's PYTHONPATH
+        code_path = subprocess.run([str(SCRIPTS / 'code_version.py'), 'ensure', g('code')], capture_output=True,
+                                   text=True, check=True).stdout.strip()
+        code_env += ['-e', f'AEROTHON_CODE_PATH={code_path}']
+        print(f'[sim_mission] mission code {g("code")}: {code_path}')
     mission = ExecuteProcess(
-        cmd=['docker', 'exec', '-u', 'admin', CONTAINER, 'bash', '/workspaces/isaac_ros-dev/src/launch_all/scripts/'
-             'container_mission.sh', run_c, world, g('autostart'), gj_c, g('fcu')],
+        cmd=['docker', 'exec', '-u', 'admin', *code_env, CONTAINER, 'bash', '/workspaces/isaac_ros-dev/src/launch_all/scripts/'
+             'container_mission.sh', run_c, world, g('autostart'), gj_c, g('fcu'), g('corridor')],
         output='screen')
     saver = ExecuteProcess(cmd=[str(SCRIPTS / 'save_run.sh'), str(run_dir), 'loop'], output='log')
+    corridor = [ExecuteProcess(cmd=[str(SCRIPTS / 'aerothon_corridor.sh'), 'sim', '1' if vio_fc else '0',
+                                    str(run_dir / 'aerothon_corridor.log')], output='screen')] if aerothon else []
 
     def stop_all(_event, _ctx):
         # docker exec doesn't stop what it started in the container when killed: stop it all explicitly, and wait
@@ -96,11 +115,13 @@ def setup(context):
 
     return [
         SetEnvironmentVariable('ROS_LOG_DIR', str(run_dir / 'ros_logs')),
+        # run_competition_ap.sh: + ardupilot_vio_sim.parm (EKF3 source set 2 = VIO velocity)
+        SetEnvironmentVariable('AP_VIO', '1' if aerothon and vio_fc else ''),
         container_up,
         RegisterEventHandler(OnProcessExit(target_action=container_up, on_exit=[
             host, saver,
             # Gazebo + PX4 up and the bridge running (host_all starts it after 15 s) before the container stack
-            TimerAction(period=float(g('container_delay')), actions=[mission]),
+            TimerAction(period=float(g('container_delay')), actions=[mission, *corridor]),
         ])),
         RegisterEventHandler(OnShutdown(on_shutdown=[OpaqueFunction(function=lambda c: stop_all(None, c))])),
     ]
@@ -113,6 +134,15 @@ def generate_launch_description():
         DeclareLaunchArgument('fcu', default_value='ardupilot',
                               description='ardupilot (ArduCopter 4.7.2 SITL, as on the real drone) | px4 (PX4 1.16 SITL)'),
         DeclareLaunchArgument('run', default_value='', description='run dir name (default <world>_<date_time>)'),
+        DeclareLaunchArgument('code', default_value='',
+                              description="mission code version: '' = the working tree, else a commit of the ~/workspaces "
+                                          'repo (scripts/code_version.py list)'),
+        DeclareLaunchArgument('marker', default_value=os.environ.get('AEROTHON_MARKER', 'qr'),
+                              description='qr | aruco: what the start and delivery boards carry'),
+        DeclareLaunchArgument('corridor', default_value='current',
+                              description='current | aerothon: corridor nav + VIO from ~/AeroTHON_2026/vio_cuda_ws'),
+        DeclareLaunchArgument('vio_fc', default_value='0',
+                              description='corridor:=aerothon: 1 = its VIO goes to ArduPilot EKF3 (source set 2 in the tunnels)'),
         DeclareLaunchArgument('gz_ip', default_value=os.environ.get('GZ_IP', '10.42.0.247'),
                               description="Jetson LAN IP: the laptop's host_gui.sh can watch; 127.0.0.1: Jetson only"),
         DeclareLaunchArgument('gz_partition', default_value=os.environ.get('GZ_PARTITION', 'vio')),

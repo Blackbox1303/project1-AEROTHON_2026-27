@@ -360,6 +360,17 @@ class VrxDeliverySystem:
         self.takeoff_alt = 5.0
         self.search_alt = 10.0
         self.deliver_alt = 5.0
+        # payload drop: 'winch' (N20 + Cytron MDD20A on ArduPilot RELAY1 = PWM1 run / RELAY2 = DIR1, 6 m line,
+        # passive hook that lets go on a slack line) | 'gripper' (MAV_CMD_DO_GRIPPER). The same numbers as
+        # aerothon_nav mission_supervisor's winch_* parameters.
+        self.drop_mechanism = 'winch'
+        self.winch_relay_run, self.winch_relay_dir, self.winch_dir_down = 0, 1, 1
+        self.winch_speed = 0.3377          # m/s: 21.5 mm spool x pi x 300 rpm / 60
+        self.winch_max = 6.0 - 0.3         # m of line that may go out
+        self.winch_stowed_drop = 0.25      # m from the FC down to the payload's bottom, wound in
+        self.winch_slack = 0.5             # m past touch-down (slack line -> the hook opens)
+        self.winch_release_wait = 2.0      # s
+        self.winch_retract_ratio = 0.95
 
     def log_mission(self, state, **info):
         with self.lock:
@@ -998,12 +1009,59 @@ class VrxDeliverySystem:
         self.fly_to(x, y, alt, yaw=yaw, vmax=min(1.2, max(0.5, alt / 4)), tol=0.3, timeout=timeout)
 
     def trigger_winch_drop(self):
-        """Trigger payload release via MAV_CMD_DO_GRIPPER (211) + servo fallback."""
-        self.log_mission('DROP', action='releasing winch / gripper')
-        ok1 = self.mav_cmd(211, 1, 0)  # MAV_CMD_DO_GRIPPER: GRIPPER_ACTION_RELEASE = 1
+        """The payload drop: the winch (default) or the gripper (drop_mechanism). -> released?"""
+        if self.drop_mechanism == 'winch':
+            return self.winch_drop()
+        self.log_mission('DROP', action='releasing gripper')
+        # MAV_CMD_DO_GRIPPER: param1 instance, param2 GRIPPER_ACTIONS: RELEASE = 0, GRAB = 1 (the old "grab" sent
+        # param1 0 / param2 0 = release again, so the gripper never closed)
+        ok1 = self.mav_cmd(211, 1, 0)
         time.sleep(1.5)
-        self.mav_cmd(211, 0, 0)        # GRIPPER_ACTION_GRAB = 0 (reset after drop_wait)
+        self.mav_cmd(211, 1, 1)        # grab again (closed for the rest of the flight)
         return ok1
+
+    def winch_relay(self, instance, on):
+        """MAV_CMD_DO_SET_RELAY (181), relay instance 0 = RELAY1; a few tries (the radio drops packets)."""
+        for _ in range(3):
+            if self.mav_cmd(181, instance, 1 if on else 0):
+                return True
+        return False
+
+    def winch_drive(self, down, length):
+        """Run the winch `length` m out (down) or in, open loop on time; the motor is braked whatever happens.
+        GUIDED holds the last position target meanwhile. -> ok"""
+        if length <= 0:
+            return True
+        if not self.winch_relay(self.winch_relay_dir, bool(self.winch_dir_down) == bool(down)):
+            return False
+        try:
+            if not self.winch_relay(self.winch_relay_run, True):
+                return False
+            end = time.monotonic() + length / self.winch_speed
+            while time.monotonic() < end:
+                if self.abort_reason and down:
+                    return False
+                time.sleep(0.05)
+            return True
+        finally:
+            for _ in range(5):
+                if self.winch_relay(self.winch_relay_run, False):
+                    break
+
+    def winch_drop(self):
+        """Lower the payload until it sits on the ground and the line goes slack (the passive hook lets go), wait,
+        wind the line back in. -> the full length went out (no sensor confirms the hook opened)"""
+        z = self.pose[2] if self.pose else self.deliver_alt
+        length = min(self.winch_max, max(0.0, z - self.winch_stowed_drop) + self.winch_slack)
+        self.log_mission('DROP', action='lowering on the winch', height=round(z, 2), lower_m=round(length, 2))
+        t0 = time.monotonic()
+        ok = self.winch_drive(True, length)
+        out = min(length, (time.monotonic() - t0) * self.winch_speed)
+        if ok:
+            time.sleep(self.winch_release_wait)
+        self.log_mission('DROP', action='winding in', lowered=ok, line_out=round(out, 2))
+        self.winch_drive(False, out * self.winch_retract_ratio)
+        return ok
 
     def scan_start_qr_here(self, duration=5.0):
         """Scan VRX frames for `duration` seconds and latch the most frequent QR payload as `start_qr`."""

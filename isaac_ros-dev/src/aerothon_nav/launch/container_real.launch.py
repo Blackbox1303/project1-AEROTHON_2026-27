@@ -16,6 +16,10 @@ MAVROS on the Pixhawk 6C Mini on the host.
            delivery_nav.launch.py (explorer; its Nav2 stays paused: A* routes), mission.launch.py (supervisor)
 world_json = the ground station's geofence (runs/gcs/mission_geofence.json: the GPS corners -> odom): REQUIRED - the
 offboard bridge's keep-in / tunnel ceiling and the supervisor's zone come from it.
+corridor_impl:=aerothon: the AeroTHON folder's corridor navigation + VIO (launch_all/aerothon_corridor_stack.py, in its
+aerothon-vio container) owns the D435 (IR pair for cuVSLAM, emitter off; depth; colour for its banner detector), the
+IMU relay at 250 Hz, base_link -> imu_link -> camera_link (its rig.yaml) and obstacle_scan - none of those start here,
+and corridor_nav.launch.py leaves out corridor_nav / entry_align / banner_detector / altitude_planner.
 """
 import math
 import os
@@ -47,7 +51,8 @@ def setup(context):
     read_angle = float(g('read_angle'))
     gain = round(float(g('search_altitude')) * math.tan(math.radians(read_angle)), 2)   # read radius on the ground
     rig = load_rig(os.path.join(get_package_share_directory('vio_bringup'), 'config', 'rig.yaml'))
-    return [
+    impl = g('corridor_impl')
+    sensors = [] if impl == 'aerothon' else [
         # PX4 IMU (MAVROS runs on the host): rate setter + relay stamped on the PC clock, like the sim's sim_view
         include('vio_bringup', 'mavros_imu.launch.py', mavros='false', sim='false', imu_rate='50.0', rviz='false',
                 tf_viz='false'),
@@ -68,11 +73,14 @@ def setup(context):
              }]),
         Node(package='vio_bringup', executable='obstacle_scan', output='screen',
              parameters=[{'use_sim_time': False, 'band': 0.15, 'stride': 2, 'cloud_stride': 2}]),
+    ]
+    return [
+        *sensors,
         include('vio_bringup', 'arducam_real.launch.py', calibration=calib),
         # the start QR is read on the full-resolution QR-scan stream too (arducam_csi, while the mission scans QRs)
         include('aerothon_nav', 'corridor_nav.launch.py', sim='false', course=g('course'),
                 qr_fallback='/arducam/qr/image_raw',
-                nav2='false', world_json=gj, use_sim_time='false'),
+                nav2='false', world_json=gj, use_sim_time='false', corridor_impl=impl),
         include('aerothon_nav', 'delivery.launch.py', sim='false', world_json=gj, nadir_topic='',
                 hd_topic='/arducam/qr/image_raw',
                 read_angle=str(read_angle), use_sim_time='false'),
@@ -103,6 +111,8 @@ def generate_launch_description():
         DeclareLaunchArgument('read_angle', default_value='15.0',
                               description="deg off nadir a QR is read at (the real fisheye: see arducam_calib's px/module)"),
         DeclareLaunchArgument('search_altitude', default_value='10.0', description='m (for the read radius)'),
+        DeclareLaunchArgument('corridor_impl', default_value='current',
+                              description='current | aerothon (corridor nav + VIO from ~/AeroTHON_2026, its container)'),
         SetEnvironmentVariable('FASTRTPS_DEFAULT_PROFILES_FILE', '/workspaces/isaac_ros-dev/fastdds_udp.xml'),
         OpaqueFunction(function=setup),
     ])

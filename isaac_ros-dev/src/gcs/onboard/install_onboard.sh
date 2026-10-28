@@ -1,7 +1,7 @@
 #!/bin/bash
 # ON THE JETSON, once (and again to change the Pixhawk link): the radio-only ground station's onboard half.
-#   bash install_onboard.sh [link]     link: /dev/ttyTHS1:921600 (Pixhawk TELEM2 -> Jetson UART, the default),
-#                                            /dev/ttyACM0:921600 (USB)
+#   bash install_onboard.sh [link]     link: /dev/ttyACM0:921600 (USB port 1, the default - this drone's TELEM2
+#                                            is the RC receiver), /dev/ttyTHS1:921600 (a Jetson UART)
 # Installs two systemd --user services (they start at boot, like the dashboard - linger is on):
 #   aerothon-router     mavlink-router on the Pixhawk link AND the sim's PX4 (UDP 14540), ALWAYS on (so a radio
 #                       command reaches the Jetson before any stack runs): MAVROS 14640, onboard dashboard 14650,
@@ -12,7 +12,7 @@
 # SER_TEL2_BAUD 921600, MAV_1_MODE Onboard), MAV_0_FORWARD 1, MAV_1_FORWARD 1 - forwarding carries the radio's
 # commands to the Jetson and the agent's status back down. Reboot the Pixhawk after.
 set -e
-LINK=${1:-/dev/ttyTHS1:921600}
+LINK=${1:-/dev/ttyACM0:921600}
 DEV=${LINK%%:*}; BAUD=${LINK##*:}
 GCS=$HOME/workspaces/isaac_ros-dev/src/gcs
 CONF=$HOME/workspaces/isaac_ros-dev/runs/gcs/onboard_router.conf
@@ -84,7 +84,7 @@ Description=AeroTHON onboard MAVLink agent (radio commands -> the onboard dashbo
 After=aerothon-router.service gcs-dashboard.service
 
 [Service]
-ExecStart=/usr/bin/python3 $GCS/onboard/mav_agent.py --link $LINK
+ExecStart=/usr/bin/python3 $GCS/onboard/mav_agent.py --mavlink auto --link $LINK
 Restart=always
 RestartSec=3
 

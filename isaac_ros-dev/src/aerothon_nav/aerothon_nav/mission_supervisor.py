@@ -32,13 +32,20 @@
                   RETURN_HOME, LAND)
   SEARCH_DELIVERY climb to search_altitude, /delivery/map/reset, /delivery/search/start (qr_locator: only reads
                   from now on can be the target), /delivery/explore/start; wait for /delivery/target
-  DELIVER         Nav2 (delivery) to the target, descend to deliver_altitude, settle deliver_hold s, DROP: PX4
-                  gripper release (MAV_CMD_DO_GRIPPER over /mavros/cmd/command; PX4 payload_deliverer), wait
-                  drop_wait s, grab again (closed for the rest of the flight), climb back to search_altitude.
-                  A release PX4 doesn't accept is retried drop_retries times, then logged (DROP_FAILED) and the
-                  mission goes on to the exit - the drone still has to come home.
-                  Hardware: the release servo's output function = Gripper (430, e.g. PWM_AUX_FUNC1 430),
-                  PD_GRIPPER_TYPE 0 (servo), PD_GRIPPER_TO = the servo's travel time. SITL needs nothing.
+  DELIVER         Nav2 (delivery) to the target, descend to deliver_altitude, settle deliver_hold s, DROP with
+                  drop_mechanism:
+                  winch (default): N20 gear motor on a Cytron MDD20A, 6 m nylon line, passive hook that lets go when
+                  the payload sits on the ground and the line goes slack. Two ArduPilot relays (MAV_CMD_DO_SET_RELAY
+                  over /mavros/cmd/command): RELAY1 -> MDD20A PWM1 (run / brake), RELAY2 -> DIR1. Pays out
+                  height - winch_stowed_drop + winch_slack (capped at the line), holding position, waits
+                  winch_release_wait s, winds winch_retract_ratio of it back in, climbs back to search_altitude.
+                  Open loop on time x winch_speed (encoder not read). An aborted drop brakes the motor and winds the
+                  line in on a timer while the failsafe flies. /mission/winch (SetBool) = bench test.
+                  gripper: release (MAV_CMD_DO_GRIPPER), wait drop_wait s, grab again.
+                  A release the autopilot doesn't accept is retried drop_retries times, then logged (DROP_FAILED) and
+                  the mission goes on to the exit - the drone still has to come home.
+                  Hardware (ArduCopter): vio_bringup/config/ardupilot_vio_params.parm (winch relays); the sim:
+                  vio_cuda_ws/sim/ardupilot_sim_params.parm (SITL relay pins, SIM_PIN_MASK shows them).
   ALIGN_EXIT      /nav/entry/align, colour exit_colour (v3 green); the corridor found is checked against the entrance geofence: one
                   whose centre line is within exclude_radius of the entry corridor's IS the entry corridor -> rejected
   ALIGN_GEOFENCE  exit fallback (no exit banner, or it led back to the entry corridor): entry_align mode geofence,
@@ -58,7 +65,8 @@ FAILSAFE (any FAILED step, a state's time limit, the mission timer `mission_time
   window was passed it lands in place instead (the floor below is free): retracing a 1.06 m opening on the drifting
   GPS-only estimate clipped the frame (2026-10-21 sim).
 Direct legs fly through offboard_bridge (aerothon_nav/direct_flight.py); the corridor and delivery legs through
-their Nav2 instances. Services /mission/start, /mission/abort (std_srvs/Trigger), /mission/gripper (std_srvs/SetBool:
+their Nav2 instances. Services /mission/start, /mission/abort (std_srvs/Trigger), /mission/winch (std_srvs/SetBool:
+true = pay out winch_test_length, false = wind it in), /mission/gripper (std_srvs/SetBool:
 true = release, false = grab; bench test / loading, refused during a mission); state on /mission/state;
 every transition on /mission/log (String JSON: time, state, info).
 """
@@ -147,6 +155,22 @@ class MissionSupervisor(Node):
         p('zone_speed', 1.5)         # m/s on those routes (rules: <= 10 km/h; 2.5 too fast, user 2026-10-25)
         p('direct_deliver_radius', 2.0)  # m: a target this close is flown to directly, not via Nav2
         p('gripper_timeout', 1.0)    # s = PX4 PD_GRIPPER_TO: PX4 acks the action as done after that
+        # DROP MECHANISM: winch (N20 gear motor + 6 m nylon line + passive release hook, user 2026-10-28) | gripper.
+        # Winch: Cytron MDD20A channel 1 driven by two ArduPilot relays (FMU outputs as GPIO, MAV_CMD_DO_SET_RELAY):
+        # PWM1 = run (low = brake), DIR1 = direction. Open loop: paid-out length = winch_speed x run time (the N20's
+        # hall encoder is not read - the Pixhawk can't count it in Copter).
+        p('drop_mechanism', 'winch')  # winch | gripper (servo gripper, MAV_CMD_DO_GRIPPER)
+        p('winch_relay_run', 0)       # ArduPilot relay instance (0 = RELAY1) on MDD20A PWM1
+        p('winch_relay_dir', 1)       # relay instance (1 = RELAY2) on MDD20A DIR1
+        p('winch_dir_down', 1)        # DIR level that unwinds (pays out) the line: swap to 0 if it winds the wrong way
+        p('winch_speed', 0.3377)      # m/s of line: spool 21.5 mm x pi x 300 rpm / 60 (bare drum; calibrate)
+        p('winch_line', 6.0)          # m of line on the spool
+        p('winch_line_reserve', 0.3)  # m never paid out (the knot on the spool must not take the load)
+        p('winch_stowed_drop', 0.25)  # m from the altitude reference (FC) down to the payload's bottom when wound in
+        p('winch_slack', 0.5)         # m paid out past touch-down: the line goes slack, the hook lets go
+        p('winch_release_wait', 2.0)  # s holding at the bottom (slack line) before winding in
+        p('winch_retract_ratio', 0.95)  # wind in this share of the paid-out time: the hook must not jam the spool
+        p('winch_test_length', 0.5)   # m out (then in) for /mission/winch (bench test, props off)
         p('home_altitude', 2.3)
         p('failsafe_hold', 5.0)
         p('failsafe_home', False)     # fly home after the failsafe hold: the straight line home crosses the tunnel
@@ -205,13 +229,13 @@ class MissionSupervisor(Node):
         p('return_reserve', 240.0)    # s
         p('min_corridor_length', 4.0) # m: corridor_nav min_length (exit detection from here on; v3 tunnels 6.7 m)
         p('length_slack', 1.5)        # m: return corridor min_length = entry corridor length - this
-        p('deliver_reserve', 60.0)    # s
+        p('deliver_reserve', 90.0)    # s (winch: ~35 s of it lowering + winding in 5.5 m at 0.34 m/s)
         p('limit_takeoff', 90.0)     # s per state
         p('limit_read_qr', 45.0)
         p('limit_align', 300.0)
         p('limit_corridor', 240.0)
         p('limit_search', 900.0)
-        p('limit_deliver', 150.0)
+        p('limit_deliver', 200.0)
         p('limit_home', 180.0)
         p('limit_land', 90.0)
         self.g = lambda n: self.get_parameter(n).value  # noqa: E731
@@ -242,7 +266,10 @@ class MissionSupervisor(Node):
         self.create_subscription(String, '/nav/corridor/state', self.on_corridor_state, 10)
         self.create_subscription(String, '/delivery/explore/state', lambda m: setattr(self, 'explore_state', m.data), 10)
         self.create_subscription(PoseStamped, '/delivery/target', self.on_target, LATCHED)
-        self.qr_read = set()         # payloads qr_locator has read in this search (the qr_count end)
+        self.target_seen = False     # the target payload read in the zone (maybe not confirmed yet)
+        self.qr_read = []            # (x, y) of the boards qr_locator has read in this search (the qr_count end):
+        #                              by position, not payload - one board misread twice ('raw4x4#..' and its real
+        #                              '3X3#107') counted as 2 and ended the search with the target unread (2026-10-28)
         self.create_subscription(String, '/delivery/qrs', self.on_qrs, 10)
         self.target_fine = None
         self.create_subscription(String, '/delivery/target_fine',
@@ -280,6 +307,11 @@ class MissionSupervisor(Node):
         # failsafe would put the autopilot back in GUIDED over the operator's LAND / RTL)
         self.create_service(Trigger, '/mission/operator', self.on_operator)
         self.create_service(SetBool, '/mission/gripper', self.on_gripper, callback_group=reentrant)
+        # winch bench test: true = pay out winch_test_length, false = wind it in (props off, refused in a mission)
+        self.create_service(SetBool, '/mission/winch', self.on_winch, callback_group=reentrant)
+        self.winch_out = 0.0          # m of line out (estimate: run time x winch_speed)
+        self.winch_lock = threading.Lock()
+        self.winch_timer = None       # the background wind-in after an aborted drop
         self.create_timer(1.0, lambda: self.state_pub.publish(String(data=self.state)))
         self.crashed = False
         self.operator = False
@@ -519,6 +551,12 @@ class MissionSupervisor(Node):
         return True, f'gripper {"released" if release else "grabbed"} ({text})'
 
     def drop(self, deadline):
+        """The payload drop with the configured mechanism (drop_mechanism) -> released?"""
+        if self.g('drop_mechanism') == 'winch':
+            return self.drop_winch(deadline)
+        return self.drop_gripper(deadline)
+
+    def drop_gripper(self, deadline):
         """Release the payload, wait drop_wait holding altitude, close the gripper again. -> released?"""
         alt = self.g('deliver_altitude')
         for attempt in range(1, int(self.g('drop_retries')) + 1):
@@ -546,6 +584,154 @@ class MissionSupervisor(Node):
             self.get_logger().warn(f'could not close the gripper after the drop: {msg}')
         return True
 
+    # ---- drop mechanism (winch: N20 + MDD20A on two ArduPilot relays)
+    def relay(self, instance, on):
+        """MAV_CMD_DO_SET_RELAY (181): param1 relay instance (0 = RELAY1), param2 0 / 1. ArduPilot answers FAILED
+        for a relay that isn't set up (RELAYn_FUNCTION 1 + RELAYn_PIN). -> (ok, message)"""
+        req = CommandLong.Request(command=181, param1=float(instance), param2=1.0 if on else 0.0)
+        r = self.call(self.px4_command, req, timeout=self.g('mav_timeout'))
+        if not r.success and r.result != 0:
+            return False, (f'relay {int(instance) + 1} {"on" if on else "off"}: '
+                           f'{self.ACK_TEXT.get(r.result, str(r.result))} (RELAY{int(instance) + 1}_FUNCTION 1 and '
+                           f'_PIN set on the autopilot?)')
+        return True, ''
+
+    def winch_stop(self):
+        """Brake the motor (MDD20A PWM low), whatever else fails. -> ok"""
+        with self.winch_lock:
+            if self.winch_timer is not None:
+                self.winch_timer.cancel()
+                self.winch_timer = None
+        for _ in range(3):
+            try:
+                if self.relay(self.g('winch_relay_run'), False)[0]:
+                    return True
+            except Abort:
+                pass
+        self.get_logger().error('WINCH: could not stop the motor (relay off refused)')
+        return False
+
+    def winch_run(self, down, length, deadline=None, alt=None):
+        """Pay out (down) or wind in `length` m, open loop (time = length / winch_speed). In flight (alt given) it
+        holds alt meanwhile and checks the deadline / abort; on the bench it just waits. Updates winch_out. The
+        motor is braked on the way out, whatever happens. -> (ok, message)"""
+        if length <= 0.0:
+            return True, 'nothing to run'
+        dir_level = bool(self.g('winch_dir_down')) == bool(down)
+        ok, msg = self.relay(self.g('winch_relay_dir'), dir_level)
+        if not ok:
+            return False, msg
+        time.sleep(0.05)                                  # DIR settled before the motor runs
+        speed = self.g('winch_speed')
+        sign = 1.0 if down else -1.0
+        t0 = time.monotonic()
+        last = t0
+        try:
+            ok, msg = self.relay(self.g('winch_relay_run'), True)
+            if not ok:
+                return False, msg
+            end = t0 + length / speed
+            while True:
+                now = time.monotonic()
+                self.winch_out = max(0.0, self.winch_out + sign * (now - last) * speed)
+                last = now
+                if now >= end:
+                    break
+                if alt is not None:
+                    self.check(deadline)
+                    self.flight.hold(min(0.2, end - now), alt)
+                else:
+                    time.sleep(min(0.05, end - now))
+        finally:
+            self.winch_stop()
+            now = time.monotonic()
+            self.winch_out = max(0.0, self.winch_out + sign * (now - last) * speed)
+        return True, f'{"out" if down else "in"} {length:.2f} m in {time.monotonic() - t0:.1f} s'
+
+    def winch_rewind_async(self):
+        """After an aborted drop: wind the line in on a timer while the failsafe flies (the drone must not land on
+        its own line / swinging hook). Not after a crash."""
+        out = self.winch_out
+        if out <= 0.05 or self.crashed:
+            return
+        try:
+            if not self.relay(self.g('winch_relay_dir'), not bool(self.g('winch_dir_down')))[0]:
+                return
+            time.sleep(0.05)
+            if not self.relay(self.g('winch_relay_run'), True)[0]:
+                return
+        except Abort:
+            self.winch_stop()
+            return
+        t = out * self.g('winch_retract_ratio') / self.g('winch_speed')
+        self.get_logger().warn(f'WINCH: winding in {out:.2f} m ({t:.0f} s) after the aborted drop')
+
+        def done():
+            with self.winch_lock:
+                self.winch_timer = None
+            self.winch_stop()
+            self.winch_out = max(0.0, out - t * self.g('winch_speed'))
+        with self.winch_lock:
+            self.winch_timer = threading.Timer(t, done)
+            self.winch_timer.daemon = True
+            self.winch_timer.start()
+
+    def drop_winch(self, deadline):
+        """Lower the payload on the line until it sits on the ground and the line goes slack (the passive hook lets
+        go), hold winch_release_wait, wind the line back in. Length = height - winch_stowed_drop + winch_slack,
+        capped at winch_line - winch_line_reserve. -> released? (= the full length went out: no sensor confirms the
+        hook opened)"""
+        alt = self.g('deliver_altitude')
+        z = self.pose()[2]
+        need = max(0.0, z - self.g('winch_stowed_drop')) + self.g('winch_slack')
+        cap = self.g('winch_line') - self.g('winch_line_reserve')
+        length = min(need, cap)
+        if need > cap:
+            self.get_logger().warn(f'WINCH: {need:.2f} m needed from {z:.2f} m, only {cap:.2f} m of line: the payload '
+                                   'may not reach the ground (the hook only opens on a slack line)')
+        self.set_state('DROP', mechanism='winch', height=round(z, 2), lower_m=round(length, 2),
+                       eta_s=round(length / self.g('winch_speed'), 1))
+        try:
+            msg = ''
+            for attempt in range(1, int(self.g('drop_retries')) + 1):
+                self.check(deadline)
+                ok, msg = self.winch_run(True, length - self.winch_out, deadline, alt)
+                if ok:
+                    break
+                self.set_state('DROP', attempt=attempt, result=msg)
+                self.flight.hold(1.0, alt)
+            else:
+                self.set_state('DROP_FAILED', reason=msg, line_out=round(self.winch_out, 2))
+                self.winch_run(False, self.winch_out * self.g('winch_retract_ratio'), deadline, alt)
+                return False
+            self.set_state('DROP', result=f'payload lowered ({msg}), line out {self.winch_out:.2f} m')
+            end = time.monotonic() + self.g('winch_release_wait')
+            while time.monotonic() < end:
+                self.check(deadline)
+                self.flight.hold(0.2, alt)
+            back = self.winch_out * self.g('winch_retract_ratio')
+            ok, msg = self.winch_run(False, back, deadline, alt)
+            self.set_state('DROP', result=f'line wound in ({msg})' if ok else f'wind-in failed: {msg}',
+                           line_out=round(self.winch_out, 2))
+            return True
+        except BaseException:
+            self.winch_stop()
+            self.winch_rewind_async()
+            raise
+
+    def on_winch(self, req, res):
+        if self.running:
+            res.success, res.message = False, f'mission running ({self.state})'
+            return res
+        try:
+            n = self.g('winch_test_length')
+            res.success, res.message = self.winch_run(bool(req.data), n)
+            res.message += f' (line out ~{self.winch_out:.2f} m)'
+        except Abort as e:
+            self.winch_stop()
+            res.success, res.message = False, str(e)
+        return res
+
     def on_abort(self, req, res):
         self.abort_reason = 'abort requested'
         res.success, res.message = True, 'aborting'
@@ -553,10 +739,18 @@ class MissionSupervisor(Node):
 
     def on_qrs(self, m):
         try:
-            qrs = json.loads(m.data).get('qrs') or []
+            d = json.loads(m.data)
         except ValueError:
             return
-        self.qr_read |= {q['payload'] for q in qrs if q.get('payload') and q.get('in_zone', True)}  # not the pad's start QR
+        qrs, start = d.get('qrs') or [], d.get('start_qr') or ''
+        # the target's payload read but not yet confirmed: not "all read, none matched" - the 5th board read WAS the
+        # target, 1 s before qr_locator's confirm_hits, and the search ended without the drop (2026-10-28 sim)
+        self.target_seen = self.target_seen or any(start and q.get('payload') == start and q.get('in_zone', True)
+                                                   for q in qrs)
+        for q in qrs:                                 # in_zone: not the pad's start QR
+            if (q.get('payload') and q.get('in_zone', True) and not q['payload'].startswith('raw')
+                    and not any(math.dist((q['x'], q['y']), b) < 2.0 for b in self.qr_read)):
+                self.qr_read.append((q['x'], q['y']))
 
     def on_operator(self, req, res):
         self.operator = True
@@ -979,7 +1173,7 @@ class MissionSupervisor(Node):
                     except Abort as e:
                         self.get_logger().warn(f'explorer route end not set ({e})')
                 drop = self.g('drop')
-                self.qr_read = set()
+                self.qr_read, self.target_seen = [], False
                 self.trigger('/delivery/map/reset')
                 self.trigger('/delivery/search/start')
                 self.trigger('/delivery/explore/start')
@@ -991,7 +1185,7 @@ class MissionSupervisor(Node):
                 out_of_time = lambda: self.mission_elapsed() > search_end or in_zone() > zone_search  # noqa: E731
                 # the target read ends the search (QR area only: then home and land; whole mission: the drop, then the
                 # exit corridor), and so do all qr_count boards read - the target among them was missed then
-                all_read = lambda: len(self.qr_read) >= self.g('qr_count')  # noqa: E731
+                all_read = lambda: len(self.qr_read) >= self.g('qr_count') and not self.target_seen  # noqa: E731
                 self.wait(lambda: self.target is not None or all_read() or self.explore_state.startswith('DONE')
                           or out_of_time(), deadline, 0.5)
                 self.trigger('/delivery/explore/stop', required=False)
@@ -1241,6 +1435,8 @@ class MissionSupervisor(Node):
 
     def failsafe(self, why, home):
         if self.crashed or self.operator:            # nothing to fly: motors killed / the operator flies
+            if self.crashed:
+                self.winch_stop()                    # a pending wind-in must not run on a crashed drone
             self.set_state('CRASH' if self.crashed else 'OPERATOR', reason=why)
             for name in ('/delivery/explore/stop', '/nav/entry/cancel', '/nav/corridor/cancel'):
                 try:

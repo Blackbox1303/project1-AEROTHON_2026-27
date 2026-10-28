@@ -39,3 +39,20 @@ EK3_SRC2_VELXY 6
 EK3_SRC2_POSZ 1
 EK3_SRC2_VELZ 6
 EK3_SRC2_YAW 6
+
+# --- Payload winch (mission_supervisor drop_mechanism winch): N20 gear motor on a Cytron MDD20A, channel 1.
+#     FMU PWM 5 (GPIO 54 = SERVO13) -> MDD20A PWM1: high = run, low = brake.  RELAY1 (MAVLink relay instance 0)
+#     FMU PWM 6 (GPIO 55 = SERVO14) -> MDD20A DIR1: the direction.             RELAY2 (instance 1)
+#     + a common GND between the Pixhawk FMU rail and the MDD20A. 3.3 V logic is enough for the MDD20A inputs.
+#     The FMU outputs follow the IO outputs (MAIN 1-8 = SERVO1-8) as SERVO9..14: check that SERVO13 / SERVO14 are
+#     not motors on this frame before writing. Feed the MDD20A at the N20's rated voltage (6 / 12 V BEC), not the
+#     raw battery: the relays drive it at 100 % duty. Relays are not blocked by the safety switch or disarm: props off
+#     for the bench test (ros2 service call /mission/winch std_srvs/srv/SetBool "{data: true}").
+SERVO13_FUNCTION -1
+SERVO14_FUNCTION -1
+RELAY1_FUNCTION 1
+RELAY1_PIN 54
+RELAY1_DEFAULT 0
+RELAY2_FUNCTION 1
+RELAY2_PIN 55
+RELAY2_DEFAULT 0

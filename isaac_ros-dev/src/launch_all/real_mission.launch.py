@@ -12,6 +12,9 @@ geofence_used.json, launch_args.txt. PX4's flight log stays on the Pixhawk's SD 
 Needs: the ground station geofence (world_json, default runs/gcs/mission_geofence.json - Save + Apply on the
 dashboard), the D435 on USB 3, the Arducam on CSI CAM0 (overlay enabled), and ideally the Arducam calibration.
 Ctrl-C (or the dashboard's Stop) stops everything, in the container too (scripts/stop_all.sh).
+corridor:=aerothon: the tunnels are flown by the AeroTHON folder's corridor navigation + VIO (cuVSLAM on the D435 IR
+pair + the Pixhawk IMU) in its own container (scripts/aerothon_corridor.sh); it owns the D435 then. vio_fc:=1 sends
+that VIO to EKF3 and switches source set 2 in the tunnels - ONLY with EK3_SRC2_VELXY 6 / VISO_TYPE 1 on the FC.
 """
 import os
 import shutil
@@ -43,6 +46,7 @@ def router_conf(link, gcs_ip, path):
     path.write_text('[General]\nTcpServerPort = 5760\nReportStats = false\n\n' + fcu +
                     '\n[UdpEndpoint mavros]\nMode = Normal\nAddress = 127.0.0.1\nPort = 14640\n'
                     '\n[UdpEndpoint gcs_dashboard]\nMode = Normal\nAddress = 127.0.0.1\nPort = 14650\n'
+                    '\n[UdpEndpoint gcs_aruco]\nMode = Normal\nAddress = 127.0.0.1\nPort = 14651\n'   # 8084
                     f'\n[UdpEndpoint qgc]\nMode = Normal\nAddress = {gcs_ip}\nPort = 14550\n'
                     # QGC anywhere on the network: a UDP link to <jetson>:14551 in QGC (Comm Links)
                     '\n[UdpEndpoint qgc_any]\nMode = Server\nAddress = 0.0.0.0\nPort = 14551\n')
@@ -62,12 +66,17 @@ def setup(context):
     calib_c = calib.replace(str(WS), '/workspaces/isaac_ros-dev') if calib else ''
     conf = run_dir / 'router.conf'
     router_conf(g('link'), g('gcs_ip'), conf)
+    aerothon, vio_fc = g('corridor') == 'aerothon', g('vio_fc') in ('1', 'true')
+    if g('corridor') not in ('current', 'aerothon'):
+        raise RuntimeError(f"corridor:={g('corridor')}: current | aerothon")
     (run_dir / 'launch_args.txt').write_text(
+        f'corridor={g("corridor")}\nvio_fc={int(aerothon and vio_fc)}\nmarker={g("marker")}\n'
         f'link={g("link")}\ngcs_ip={g("gcs_ip")}\nworld_json={gj}\ncalibration={calib or "(none: nominal lens)"}\n'
         f'course={g("course")}\nstarted={time.ctime()}\n')
     print(f'[real_mission] run dir: {run_dir}; link {g("link")}; Arducam calibration {calib or "NONE (nominal lens)"}')
     # the calibration / QR test page (systemd arducam-calib, at boot) holds the camera: the mission's Arducam node needs it
     subprocess.run(['systemctl', '--user', 'stop', 'arducam-calib'], check=False)
+    subprocess.run([str(SCRIPTS / 'aruco_test.sh'), 'stop'], check=False)          # so does the ArUco test page
 
     container_up = ExecuteProcess(cmd=[str(SCRIPTS / 'container_up.sh')], output='screen')
     use_onboard = g('router') == 'auto' and subprocess.run(
@@ -78,12 +87,24 @@ def setup(context):
     mavros = Node(package='mavros', executable='mavros_node', output='screen',
                   parameters=[{'fcu_url': 'udp://:14640@', 'tgt_system': 1, 'tgt_component': 1},
                               str(WS / 'src/vio_bringup/config/mavros_host_plugins.yaml')])
+    marker = g('marker')
+    if marker not in ('qr', 'aruco'):
+        raise RuntimeError(f"marker:={marker}: qr | aruco")
+    # the board markers (qr_reader / qr_locator read AEROTHON_MARKER): QR codes, or ArUco for the 8084 mission
+    code_env = ['-e', f'AEROTHON_MARKER={marker}']
+    if g('code'):                                # a committed version: its checkout first on the container's PYTHONPATH
+        code_path = subprocess.run([str(SCRIPTS / 'code_version.py'), 'ensure', g('code')], capture_output=True,
+                                   text=True, check=True).stdout.strip()
+        code_env += ['-e', f'AEROTHON_CODE_PATH={code_path}']
+        print(f'[real_mission] mission code {g("code")}: {code_path}')
     mission = ExecuteProcess(
-        cmd=['docker', 'exec', '-u', 'admin', CONTAINER, 'bash',
+        cmd=['docker', 'exec', '-u', 'admin', *code_env, CONTAINER, 'bash',
              '/workspaces/isaac_ros-dev/src/launch_all/scripts/container_real.sh',
-             run_c, f'{run_c}/geofence_used.json', calib_c, g('course')],
+             run_c, f'{run_c}/geofence_used.json', calib_c, g('course'), g('corridor')],
         output='screen')
     saver = ExecuteProcess(cmd=[str(SCRIPTS / 'save_run.sh'), str(run_dir), 'loop'], output='log')
+    corridor = [ExecuteProcess(cmd=[str(SCRIPTS / 'aerothon_corridor.sh'), 'real', '1' if vio_fc else '0',
+                                    str(run_dir / 'aerothon_corridor.log')], output='screen')] if aerothon else []
 
     def stop_all(_ctx):
         subprocess.run([str(SCRIPTS / 'save_run.sh'), str(run_dir)], timeout=60, check=False)
@@ -96,7 +117,7 @@ def setup(context):
         container_up,
         RegisterEventHandler(OnProcessExit(target_action=container_up, on_exit=[
             *([] if use_onboard else [router]), mavros, saver,
-            TimerAction(period=float(g('container_delay')), actions=[mission]),
+            TimerAction(period=float(g('container_delay')), actions=[mission, *corridor]),
         ])),
         RegisterEventHandler(OnShutdown(on_shutdown=[OpaqueFunction(function=lambda c: stop_all(c))])),
     ]
@@ -115,6 +136,15 @@ def generate_launch_description():
                               description=f'Arducam calibration yaml (default {CALIB} if it exists)'),
         DeclareLaunchArgument('course', default_value='v2', description='aerothon_nav config/course_<course>.yaml'),
         DeclareLaunchArgument('run', default_value='', description='run dir name (default real_drone_<date_time>)'),
+        DeclareLaunchArgument('code', default_value='',
+                              description="mission code version: '' = the working tree, else a commit of the ~/workspaces "
+                                          'repo (scripts/code_version.py list)'),
+        DeclareLaunchArgument('marker', default_value=os.environ.get('AEROTHON_MARKER', 'qr'),
+                              description='qr | aruco: what the start and delivery boards carry'),
+        DeclareLaunchArgument('corridor', default_value='current',
+                              description='current | aerothon: corridor nav + VIO from ~/AeroTHON_2026/vio_cuda_ws'),
+        DeclareLaunchArgument('vio_fc', default_value='0',
+                              description='corridor:=aerothon: 1 = its VIO goes to EKF3 (needs EK3_SRC2_* on the FC)'),
         DeclareLaunchArgument('container_delay', default_value='8.0', description='s after MAVROS starts'),
         DeclareLaunchArgument('router', default_value='auto',
                               description='auto: the onboard aerothon-router if it runs, else one started here'),

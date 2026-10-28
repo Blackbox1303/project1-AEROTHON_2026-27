@@ -7,7 +7,9 @@ missed its 20 Hz rate 3842 times in one search and the drone crawled at 0.7 m/s 
   plan      cells >= 100 grown by `clearance` are blocked; the start cell may be blocked (the escape gets the drone
             out of a margin, but a path from its edge must still exist); a blocked goal moves to the nearest free
             cell within snap_radius (a QR read from beside a red zone - the camera reads ~3 m off nadir). 8-connected
-            A* on a grid coarsened to `step` m, then string-pulled to line-of-sight waypoints.
+            A* on a grid coarsened to `step` m, then string-pulled to line-of-sight waypoints. `avoid` (cells already
+            flown over) costs avoid_cost extra per cell: the route takes fresh ground where it can, and the string
+            pulling doesn't shortcut back across it
   PathFlight.step()  one DirectFlight command towards the current waypoint (call at ~10 Hz); facing the leg, so
             the fisheye's wide (across) axis sweeps sideways. Returns 'flying' | 'arrived' | 'idle'.
 """
@@ -56,8 +58,13 @@ def snap_free(m, blocked, x, y, radius):
     return (float(wx[n]), float(wy[n])) if d[n] <= radius else None
 
 
-def plan(m, start, goal, clearance=0.6, step=0.5, snap_radius=0.0):
-    """Waypoints [(x, y), ...] from start to goal (goal last; start not included), or None (no path)."""
+def path_length(start, wps):
+    return sum(math.dist(a, b) for a, b in zip([tuple(start)] + list(wps[:-1]), wps))
+
+
+def plan(m, start, goal, clearance=0.6, step=0.5, snap_radius=0.0, avoid=None, avoid_cost=0.0):
+    """Waypoints [(x, y), ...] from start to goal (goal last; start not included), or None (no path).
+    avoid: bool array of the map's shape, cells that cost avoid_cost extra (soft, never blocked)."""
     _, r, ox, oy = grid_of(m)
     blocked = blocked_mask(m, clearance)
     if snap_radius > 0:
@@ -71,6 +78,11 @@ def plan(m, start, goal, clearance=0.6, step=0.5, snap_radius=0.0):
     pad[:h, :w] = blocked
     coarse = pad.reshape(H, f, W, f).any(axis=(1, 3))
     cs = r * f
+    cav = np.zeros((H, W), bool)
+    if avoid is not None and avoid_cost > 0 and avoid.shape == blocked.shape:
+        pad = np.zeros((H * f, W * f), bool)
+        pad[:h, :w] = avoid
+        cav = pad.reshape(H, f, W, f).any(axis=(1, 3))
 
     def cell(p):
         return (min(H - 1, max(0, int((p[1] - oy) / cs))), min(W - 1, max(0, int((p[0] - ox) / cs))))
@@ -103,7 +115,7 @@ def plan(m, start, goal, clearance=0.6, step=0.5, snap_radius=0.0):
                 continue
             if dj and di and (coarse[c[0] + dj, c[1]] or coarse[c[0], c[1] + di]):
                 continue                              # no corner cutting
-            nc = cost + dc
+            nc = cost + dc * (1.0 + avoid_cost * cav[n])
             if nc < best.get(n, math.inf):
                 best[n], came[n] = nc, c
                 heapq.heappush(q, (nc + hfun(n), nc, n))
@@ -118,20 +130,26 @@ def plan(m, start, goal, clearance=0.6, step=0.5, snap_radius=0.0):
     pts = [(ox + (c[1] + 0.5) * cs, oy + (c[0] + 0.5) * cs) for c in cells]
     pts[0], pts[-1] = tuple(start), tuple(goal) if not coarse[cell(goal)] else pts[-1]
 
-    def clear(a, b):                                  # segment a-b over free fine cells only
-        n = int(math.hypot(b[0] - a[0], b[1] - a[1]) / (r * 0.5)) + 1
+    seen = np.cumsum([0] + [int(cav[c]) for c in cells[1:]])   # avoided cells the A* path crosses up to each point
+
+    def clear(a, b, budget):                          # segment a-b over free fine cells only, and over no more
+        n = int(math.hypot(b[0] - a[0], b[1] - a[1]) / (r * 0.5)) + 1   # avoided cells than the A* path there
+        hit = set()
         for t in np.linspace(0.0, 1.0, n + 1):
             x, y = a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t
             i, j = int((x - ox) / r), int((y - oy) / r)
             if 0 <= i < w and 0 <= j < h and blocked[j, i]:
                 if math.hypot(x - start[0], y - start[1]) > 1.0:   # leaving a blocked start cell is allowed
                     return False
-        return True
+            c = cell((x, y))
+            if cav[c] and c != cell(a):
+                hit.add(c)
+        return len(hit) <= budget
 
     out, i = [], 0                                    # string pulling: furthest visible point each time
     while i < len(pts) - 1:
         k = len(pts) - 1
-        while k > i + 1 and not clear(pts[i], pts[k]):
+        while k > i + 1 and not clear(pts[i], pts[k], seen[k] - seen[i]):
             k -= 1
         out.append(pts[k])
         i = k

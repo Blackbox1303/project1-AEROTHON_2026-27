@@ -14,7 +14,7 @@ SIM_DIR="$(cd "$(dirname "$0")" && pwd)"
 WORLD_SRC="$(realpath "${1:-$SIM_DIR/worlds/competition.sdf}")"
 AP_BIN="$AP_DIR/build/sitl/bin/arducopter"
 WORK="$HOME/workspaces/isaac_ros-dev/runs/ap_sitl"
-MODEL="iris_d435_vio"
+MODEL="${AP_MODEL:-iris_d435_vio}"      # AP_MODEL=iris_b19: the 8084 offboard sim (B19 analog camera only)
 INSTANCE="${MODEL}_0"
 STEP=0.0025                       # s: 400 Hz physics = SCHED_LOOP_RATE (PX4 ran the world at 4 ms)
 
@@ -80,7 +80,7 @@ gz service -s "/world/$NAME/create" \
     --reqtype gz.msgs.EntityFactory \
     --reptype gz.msgs.Boolean \
     --timeout 10000 \
-    --req "sdf_filename: \"$SIM_DIR/models/$MODEL/model.sdf\", name: \"$INSTANCE\", pose: {position: {x: 0, y: 0, z: 0.25}}"
+    --req "sdf_filename: \"$SIM_DIR/models/$MODEL/model.sdf\", name: \"$INSTANCE\", pose: {position: {x: ${AP_SPAWN_X:-0}, y: ${AP_SPAWN_Y:-0}, z: 0.25}}"
 
 gz service -s "/world/$NAME/control" --reqtype gz.msgs.WorldControl --reptype gz.msgs.Boolean \
     --timeout 3000 --req 'pause: false' > /dev/null 2>&1 || true
@@ -92,12 +92,13 @@ if [ "${HEADLESS:-0}" = 0 ]; then                    # HEADLESS=1: GUI elsewhere
 fi
 
 D="$AP_DIR/Tools/autotest/default_params"
-echo "Starting ArduCopter SITL (home $HOME_LOC), MAVLink -> udp 127.0.0.1:14540"
+# AP_VIO=1 (sim_mission corridor:=aerothon vio_fc:=1): + the VIO -> EKF3 source set 2 params
+echo "Starting ArduCopter SITL (home $HOME_LOC), MAVLink -> udp 127.0.0.1:14540${AP_VIO:+, VIO -> EKF3 source set 2}"
 cd "$WORK"
 # own TCP (SERIAL1/2: 5782/5783) and RC-in (5581) ports: a hand-started `arducopter -I0` (5760-5763, 5501) can run
 # beside it. The JSON link stays on 9002 (iris_with_ardupilot's fdm_port_in)
 "$AP_BIN" --model JSON --speedup 1 --wipe --base-port 5780 --rc-in-port 5581 -I0 --home "$HOME_LOC" \
-    --defaults "$D/copter.parm,$D/gazebo-iris.parm,$SIM_DIR/ardupilot_sim_params.parm" \
+    --defaults "$D/copter.parm,$D/gazebo-iris.parm,$SIM_DIR/ardupilot_sim_params.parm${AP_VIO:+,$SIM_DIR/ardupilot_vio_sim.parm}" \
     --serial0 udpclient:127.0.0.1:14540 &
 AP=$!
 wait "$AP"

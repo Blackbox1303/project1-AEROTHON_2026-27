@@ -77,6 +77,10 @@
     <option value="tunnel" class="seg-full">Tunnels + banners only</option>
     <option value="qr_drop">QR area + payload drop</option>
   </select>
+  <select id="codever" class="noradio" title="which mission code flies (the supervisor, explorer and the other mission nodes): the working tree, or a committed version - a known-good one to fall back to without reverting files"><option value="">code: current (working tree)</option></select>
+  <select id="corridor" class="noradio onlyros" onchange="corridorUi()" title="who flies the tunnels. current: our corridor_nav / entry_align on the flight controller's estimate + 2D SLAM (D435 depth, emitter on). AeroTHON: the ~/AeroTHON_2026/vio_cuda_ws code in its own container - cuVSLAM VIO on the D435 IR pair + the Pixhawk IMU, its corridor_nav (gap follower, Nav2), entry_align, obstacle_scan; banners still by drone_qr_detector's detector on the Arducam">
+    <option value="current">corridor: current</option><option value="aerothon">corridor: AeroTHON (cuVSLAM stereo + IMU)</option></select>
+  <label class="pill noradio onlyros" id="viofcwrap" title="AeroTHON corridor only: send its VIO velocity to ArduPilot EKF3 and fly the tunnels on it (source set 2, switched at the entrance, back to GPS at the exit). The sim gets the params itself; the REAL flight controller needs EK3_SRC2_VELXY 6 + VISO_TYPE 1 set first (vio_bringup/config) - off: VIO is only computed and checked"><input type="checkbox" id="viofc"> VIO → EKF3</label>
   <button class="go" id="launchbtn" onclick="launchStack()" title="Gazebo + autopilot SITL + MAVROS + the mission nodes (sim), or the drone's whole stack (real); 1-3 min">▶ Launch stack</button>
   <button class="simonly" id="gzbtn" onclick="gz('start', 'sync=1')" title="sync the worlds / models from the Jetson, then open the Gazebo GUI on this PC (it waits for the sim if it is still starting)">🖥 Open Gazebo (sync)</button>
   <button class="stop" id="stopbtn" onclick="stopStack()" title="stop everything: Gazebo, the autopilot SITL / link, MAVROS, the mission nodes - and close the Gazebo GUI here. Nothing starts again until you press Launch">■ Stop stack</button>
@@ -151,7 +155,7 @@
     <h2>Preflight</h2>
     <div class="checks" id="checks"></div>
   </div>
-  <div class="card noradio">
+  <div class="card">
     <h2>Geofence (GPS)</h2>
     <div class="row"><b>Field boundary</b> <span class="d" id="nfield"></span>
       <button onclick="capture('field')">⊕ Capture drone GPS</button><button onclick="addRow('field')">+ row</button></div>
@@ -162,7 +166,7 @@
     <div class="row">
       <button onclick="saveGf()">Save</button>
       <button class="go" onclick="saveGf().then(() => post('apply', {mode: val('mode')}))">Save + Apply</button>
-      <button onclick="ask('Replace with the sim world\'s field + zone?').then(y => y && post('from_world', {world: val('world')}).then(() => gfDirty=false))">Fill from sim world</button>
+      <button class="noradio" onclick="ask('Replace with the sim world\'s field + zone?').then(y => y && post('from_world', {world: val('world')}).then(() => gfDirty=false))">Fill from sim world</button>
     </div>
     <div class="d">Tunnels are not recorded. Apply converts to map coordinates (the autopilot's GPS origin) for the drone; relaunch the stack with "use my geofence".</div>
   </div>
@@ -211,7 +215,8 @@ function launchStack() {
   // sim: the segment starts by itself at READY (+ green preflight); real: Start by hand after the preflight
   post('stack_start', {mode: val('mode'), world: val('world'), use_geofence: chk('usegf'),
                        link: val('mode') === 'offboard' ? val('offlink') : val('link'), video: val('video'),
-                       segment: val('segment'), payload: val('payload'), read_qr: chk('readqr'), override: chk('override')});
+                       segment: val('segment'), payload: val('payload'), read_qr: chk('readqr'), override: chk('override'),
+                       code: val('codever'), corridor: val('corridor'), vio_fc: chk('viofc')});
 }
 function stopStack() {
   ask('Stop the whole stack (Gazebo, autopilot / link, MAVROS, mission nodes) and close the Gazebo GUI?').then(y => {
@@ -309,6 +314,9 @@ function render(s) {
   $('stack').textContent = ph === 'stopped' ? 'stack: stopped' : ready ? `stack: ${s.stack.mode} READY` :
     `stack ${s.stack.mode}: ${ph} · ${mmss(s.stack.up_s)}`;
   if (s.stack.go) $('stack').textContent += ' · ' + s.stack.go;
+  if (s.stack.code && ph !== 'stopped') $('stack').textContent += ' · code ' + s.stack.code;
+  if (s.stack.corridor === 'aerothon' && ph !== 'stopped')
+    $('stack').textContent += ' · corridor AeroTHON' + (s.stack.vio_fc ? ' + VIO→EKF3' : '');
   $('stack').className = 'pill ' + (ready ? 'ok' : ph === 'stopped' ? '' : 'warn');
   $('launchbtn').disabled = ph !== 'stopped' || (s.radio && t.armed);
   $('stopbtn').disabled = ph === 'stopped' || ph === 'stopping';
@@ -332,6 +340,10 @@ function render(s) {
     ['Lat', fmt(t.lat, 7)], ['Lon', fmt(t.lon, 7)], ['Local x/y/z', s.ros.pose ? s.ros.pose.slice(0, 3).map(v => v.toFixed(1)).join(' / ') : '–'],
     ['Explored', s.ros.coverage.explored != null ? (100 * s.ros.coverage.explored).toFixed(0) + ' %' : '–'],
     ['QRs rejected', s.ros.coverage.rejected_qrs ?? '–'], ['Start QR', s.ros.start_qr || '–'],
+    // cuVSLAM's position in its own frame (where it started) - over the radio from mav_agent in radio mode
+    ['VIO x/y/z', s.vio_pose && s.vio_pose.xyz ? s.vio_pose.xyz.map(v => v.toFixed(1)).join(' / ') : 'no VIO'],
+    ['VIO age', s.vio_pose && s.vio_pose.age != null ? fmt(s.vio_pose.age, 1) + ' s' : '–'],
+    ['VIO health', (s.vio_pose && s.vio_pose.health) || '–'],
   ];
   $('tiles').innerHTML = tiles.map(([k, v]) => `<div class="tile"><span>${k}</span><b>${esc(v ?? '–')}</b></div>`).join('');
   // QR status box under camera
@@ -386,6 +398,19 @@ async function gzStatus() {
 }
 let gzLastErr = null;
 setInterval(gzStatus, 3000); gzStatus();
+// the mission code versions (git commits of ~/workspaces) for the Launch row
+fetch('/api/code_versions', {method: 'POST'}).then(r => r.json()).then(j => {
+  (j.versions || []).forEach(v => { const o = document.createElement('option'); o.value = v.sha;
+    o.textContent = `code: ${v.sha} ${v.date} - ${v.subject}`.slice(0, 90); $('codever').appendChild(o); });
+}).catch(() => {});
+
+// the corridor choice (remembered per browser); VIO -> EKF3 only means something with the AeroTHON corridor
+function corridorUi() {
+  $('viofcwrap').style.display = val('corridor') === 'aerothon' ? '' : 'none';
+  try { localStorage.setItem('gcs_corridor', val('corridor')); } catch (e) {}
+}
+try { $('corridor').value = localStorage.getItem('gcs_corridor') || 'current'; } catch (e) {}
+corridorUi();
 
 function setMode(m) {
   $('mode').value = m;

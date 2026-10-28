@@ -62,11 +62,13 @@ img#v{width:100%;max-width:1640px;display:block}a{color:#8cf}</style></head><bod
 <span style="color:#aaa">exposure:</span>
 <button id="e_3" onclick="expo(3)">3 ms</button><button id="e_5" onclick="expo(5)">5 ms</button>
 <button id="e_8" onclick="expo(8)">8 ms</button><button id="e_12" onclick="expo(12)">12 ms</button>
+<button id="e_15" onclick="expo(15)">15 ms</button><button id="e_20" onclick="expo(20)">20 ms</button>
 <span style="color:#aaa">QR size m:</span><input id="qs" size="4" title="side of the dark code square (not the paper), for the distances; empty = in code widths" onchange="post('qrsize','?v='+(this.value||0))">
 <span style="color:#aaa">options:</span>
 <button id="btn_gpu" onclick="post('toggle_gpu')">GPU: OFF</button>
 <button id="btn_enhance" onclick="post('toggle_enhance')">Enhance: OFF</button>
 <button id="btn_hq" onclick="post('toggle_hq')">HQ: 70%</button>
+<button id="btn_filter" onclick="post('toggle_filter')">Filter: DNN Only</button>
 <a href="/board.png" target="_blank">checkerboard</a> <a href="/qr.png" target="_blank">test QR</a></header>
 <details id="help" style="padding:4px 12px;background:#1a1d22">
 <summary style="cursor:pointer;color:#8cf">How to calibrate the camera (click to open)</summary>
@@ -113,18 +115,21 @@ frame();
 async function tick(){try{const s=await (await fetch('/status')).json();
 for(const m of ['view','calib','undist','detect','qr'])document.getElementById('m_'+m).className=s.mode==m?'on':'';
 for(const v of [0,120,90,75,60])document.getElementById('f_'+v).className=s.fov==v?'on':'';
-for(const v of [3,5,8,12])document.getElementById('e_'+v).className=s.exposure==v?'on':'';
+for(const v of [3,5,8,12,15,20])document.getElementById('e_'+v).className=s.exposure==v?'on':'';
 document.getElementById('az').className=s.auto_zoom?'on':'';
 const bgpu=document.getElementById('btn_gpu');if(bgpu){bgpu.className=s.use_gpu?'on':'';bgpu.textContent=s.use_gpu?'GPU: ON (Orin)':'GPU: OFF (CPU)';}
 const benh=document.getElementById('btn_enhance');if(benh){benh.className=s.enhance?'on':'';benh.textContent=s.enhance?'Enhance: ON':'Enhance: OFF';}
 const bhq=document.getElementById('btn_hq');if(bhq){bhq.className=s.hq?'on':'';bhq.textContent=s.hq?'HQ: 95%':'HQ: 70%';}
+const bfil=document.getElementById('btn_filter');if(bfil){bfil.className=s.dnn_only?'on':'';bfil.textContent=s.dnn_only?'Filter: DNN Only':'Filter: All Guesses';}
 const qs=document.getElementById('qs');if(document.activeElement!==qs)qs.value=s.qr_size?s.qr_size:'';
 document.getElementById('st').textContent=s.text}catch(e){} setTimeout(tick,500)} tick()
 </script></body></html>"""
 
 
 # the chase on a QR box that can't be read: (fov deg, scale x the lens's own detail, frames averaged) per step; the
-# whole chase runs on the camera's SCAN settings (--scan-exposure-ms at --scan-fps: the camera is held still to read)
+# whole chase runs on the camera's SCAN settings (--scan-exposure-ms at --scan-fps: the camera is held still to read);
+# a step hands over to the next once its frames are averaged and --chase-tries passes still don't read (frames, not
+# seconds: a slow pass or the camera's reopen gap used to skip a step's averaging altogether, 2026-10-28)
 CHASE = [(30, 2.0, 6), (15, 3.0, 10)]
 
 
@@ -157,8 +162,10 @@ class Tool:
         self.auto_zoom = a.auto_zoom     # zoom the view onto a QR as soon as one is read
         self.zoom = None                 # {d: ray of the code (camera frame), t: last read}
         self.qr_cfg = None               # the view config of qr_found
+        self.qr_rays = {}                # latest decode: payload -> corner rays (camera frame), drawn in any view
         self.zstack = []                 # [(view cfg, zoomed grey view float32)] - the frames averaged
         self.qr_seen = (None, [], 0.0)   # (view cfg, detector boxes [{poly, kind, score}], time)
+        self.seen_shape = (1, 1)         # the size of the read's view the boxes are in (the page's view is >= 1280 px)
         self.load_frames()
         self.wc = None
         wd = Path(a.wechat_dir)
@@ -176,13 +183,14 @@ class Tool:
         except cv2.error as e:
             print(f'QR detection network unavailable: {e}')
         self.n_detect = 0
-        self.last_full = ([], 0.0)       # (boxes of the last full network scan, time)
+        self.last_full = ([], 0.0, None)  # (boxes of the last full network scan, time, the view's shape)
         from pyzbar.pyzbar import ZBarSymbol, decode
         self.zbar = lambda img: decode(img, symbols=[ZBarSymbol.QRCODE])
         self.cv_qr = cv2.QRCodeDetector()
         self.use_gpu = getattr(a, 'gpu', False)
         self.enhance = getattr(a, 'enhance', False)
         self.hq = getattr(a, 'hq', False)
+        self.dnn_only = True
         self.cuda_available = False
         try:
             import torch
@@ -202,7 +210,7 @@ class Tool:
             # gain was maxed and the grain hid 2.5 px/module codes (2026-10-26)
             return a.qr_width, a.qr_height, a.scan_exposure_ms, a.scan_fps
         if self.mode in ('qr', 'detect'):
-            return a.qr_width, a.qr_height, a.qr_max_exposure_ms, 21
+            return a.qr_width, a.qr_height, a.qr_max_exposure_ms, a.qr_fps
         return a.width, a.height, a.max_exposure_ms, 30
 
     def pipeline(self, w, h, exp, fps):
@@ -392,26 +400,29 @@ class Tool:
         y = np.cross(z, x)
         return np.vstack([x, y, z])
 
-    def rectify(self, img, d=None, fov=None, scale=1.0):
+    def rectify(self, img, d=None, fov=None, scale=1.0, min_n=1280):
         """(view, focal px of the view, R camera -> view): a pinhole view along d (default the optical axis), fov wide,
-        at scale x the lens's own detail in the middle; the image itself (None, None) when fov is 0."""
+        at scale x the lens's own detail in the middle, >= min_n px; the image itself (None, None) when fov is 0."""
         fov = self.fov if fov is None else fov
         if not fov:
             return img, None, None
         h, w = img.shape[:2]
-        key = (h, w, d, fov, scale, bool(self.calib))
+        key = (h, w, d, fov, scale, min_n, bool(self.calib))
         if key not in self.rect:
             K, D = self.lens(w, h)
-            f = float(K[0, 0]) * scale
-            n = int(min(2400, 2 * f * math.tan(math.radians(fov) / 2)))
-            newK = np.array([[f, 0, n / 2], [0, f, n / 2], [0, 0, 1]])
+            # the page shows >= 1280 px (a 538 px view blown up by the browser looked grainy); the QR read takes
+            # min_n=0, the lens's own detail - 1280 px added nothing there but 2-5x the cost of every step (2026-10-28)
+            target_n = max(min_n, 160, int(min(2400, 2 * float(K[0, 0]) * scale * math.tan(math.radians(fov) / 2))))
+            f_new = (target_n / 2.0) / math.tan(math.radians(fov) / 2.0)
+            newK = np.array([[f_new, 0, target_n / 2.0], [0, f_new, target_n / 2.0], [0, 0, 1.0]])
             R = np.eye(3) if d is None else self.rot_to(d)
-            maps = cv2.fisheye.initUndistortRectifyMap(K, D, R, newK, (n, n), cv2.CV_16SC2)
-            if len(self.rect) > 6:
+            maps = cv2.fisheye.initUndistortRectifyMap(K, D, R, newK, (target_n, target_n), cv2.CV_16SC2)
+            if len(self.rect) > 10:                   # the page's and the read's view of each config
                 self.rect.clear()
-            self.rect[key] = (maps, f, R)
+            self.rect[key] = (maps, f_new, R)
         maps, f, R = self.rect[key]
-        return cv2.remap(img, *maps, interpolation=cv2.INTER_LINEAR), f, R
+        src = cv2.medianBlur(img, 3) if (getattr(self, 'enhance', False) or self.mode == 'undist') else img
+        return cv2.remap(src, *maps, interpolation=cv2.INTER_LINEAR), f, R
 
     def ray_of(self, c, shape, fv, R, frame_shape):
         """Unit ray (camera frame) of view pixel c: through the view's pinhole, or the fisheye model (fov 0)."""
@@ -424,22 +435,27 @@ class Tool:
         th, ph = self.max_angle(K, D, math.hypot(dx, dy)), math.atan2(dy, dx)
         return np.array([math.sin(th) * math.cos(ph), math.sin(th) * math.sin(ph), math.cos(th)])
 
-    # ---- QR
-    def wechat(self, gray, tile=768, overlap=160):
-        """WeChat over tiles: its CNN detector shrinks its input to 384 px, so a 75 px code in a 3280 px frame is lost
-        whole (2026-10-26 benchmark: 768 px tiles found 9 of 12 codes at 2.5-3.5 px/module)."""
-        out = {}
-        h, w = gray.shape[:2]
-        step = tile - overlap
-        for y in range(0, max(1, h - overlap), step):
-            for x in range(0, max(1, w - overlap), step):
-                x0, y0 = max(0, min(x, w - tile)), max(0, min(y, h - tile))
-                texts, pts = self.wc.detectAndDecode(gray[y0:y0 + tile, x0:x0 + tile])
-                for t, p in zip(texts, pts):
-                    if t and t.strip() not in out:
-                        out[t.strip()] = np.asarray(p, float).reshape(-1, 2) + [x0, y0]
-        return out
+    def px_of(self, rays, shape, fv, R, frame_shape):
+        """View pixels (N, 2) of unit rays (N, 3, camera frame) - the inverse of ray_of; None if one is behind the view."""
+        rays = np.asarray(rays, float).reshape(-1, 3)
+        if fv:
+            v = rays @ R.T
+            if (v[:, 2] <= 1e-6).any():
+                return None
+            return v[:, :2] / v[:, 2:3] * fv + [shape[1] / 2, shape[0] / 2]
+        K, D = self.lens(frame_shape[1], frame_shape[0])
+        k = np.asarray(D).ravel()
+        th = np.arccos(np.clip(rays[:, 2], -1.0, 1.0))
+        t2 = th * th
+        td = th * (1 + k[0] * t2 + k[1] * t2 ** 2 + k[2] * t2 ** 3 + k[3] * t2 ** 4)
+        ph = np.arctan2(rays[:, 1], rays[:, 0])
+        return np.column_stack([K[0, 0] * td * np.cos(ph) + K[0, 2], K[0, 0] * td * np.sin(ph) + K[1, 2]])
 
+    def sensor_px(self, side, fv, frame_shape):
+        """A length in view px -> sensor px (the detail the lens has there): x the lens's focal / the view's."""
+        return side * self.lens(frame_shape[1], frame_shape[0])[0][0, 0] / fv if fv else side
+
+    # ---- QR
     def seen_qrs(self, gray):
         """QR codes FOUND but not necessarily readable: OpenCV's detector (the three finder squares), no decoding."""
         try:
@@ -508,13 +524,26 @@ class Tool:
         return out
 
     def net_scan(self, gray, conf, centres=None, tile=384, overlap=96):
-        """Tiles of 384 px at full detail (a code must be >= ~40 px at the network's input: a 60 px code in a 768 px
-        tile, halved, fell to 0.45), either all over (~0.9 s for a 1572 px view) or one tile round each centre."""
+        """Hierarchical scan: 1-pass global glance over resized frame (fast, 1 call), falling back to 3x3 coarse tiles."""
         h, w = gray.shape[:2]
+        # Step 1: Global Glance - evaluate entire frame resized to 384x384 in a single forward pass
+        try:
+            small_gray = cv2.resize(gray, (384, 384), interpolation=cv2.INTER_LINEAR)
+            global_boxes = self.net_boxes(small_gray, 0, 0, conf)
+            if global_boxes:
+                scaled = []
+                sx, sy = w / 384.0, h / 384.0
+                for c, p in global_boxes:
+                    scaled.append((c, p * [sx, sy]))
+                return scaled
+        except Exception:
+            pass
+
+        # Step 2: Target-centered or coarse grid fallback for small distant codes
         if centres is None:
-            step = tile - overlap
-            spots = [(max(0, min(x, w - tile)), max(0, min(y, h - tile)))
-                     for y in range(0, max(1, h - overlap), step) for x in range(0, max(1, w - overlap), step)]
+            step_x = max(1, (w - tile) // 2) if w > tile else tile
+            step_y = max(1, (h - tile) // 2) if h > tile else tile
+            spots = [(x, y) for y in (0, step_y, max(0, h - tile)) for x in (0, step_x, max(0, w - tile))]
         else:
             spots = [(int(max(0, min(cx - tile / 2, w - tile))), int(max(0, min(cy - tile / 2, h - tile))))
                      for cx, cy in centres]
@@ -553,16 +582,25 @@ class Tool:
             for c, p in self.net_scan(gray, self.a.net_conf, None if full else [q.mean(axis=0) for q in cands]):
                 out.append({'poly': p, 'kind': 'model', 'score': round(c, 2)})
             if full:
-                self.last_full = ([b for b in out], time.monotonic())
-            elif time.monotonic() - self.last_full[1] < 1.5:   # what the last full scan found, while it is fresh
+                self.last_full = ([b for b in out], time.monotonic(), gray.shape)
+            elif time.monotonic() - self.last_full[1] < 1.5 and self.last_full[2] == gray.shape:
+                # what the last full scan of this view found, while it is fresh
                 out += [b for b in self.last_full[0] if all(self.iou(b['poly'], o['poly']) < 0.3 for o in out)]
         for p in self.seen_qrs(gray):
             if all(self.iou(p, b['poly']) < 0.3 for b in out):
                 out.append({'poly': p, 'kind': 'finder', 'score': 1.0})
-        for b in self.contrast_scored(gray, cands):
-            if all(self.iou(b['poly'], o['poly']) < 0.1 for o in out):
-                out.append(b)
+        # Filter out noisy contrast guesses when dnn_only is active to prevent false QR detections
+        if not getattr(self, 'dnn_only', True):
+            for b in self.contrast_scored(gray, cands):
+                if b['score'] >= 0.80 and all(self.iou(b['poly'], o['poly']) < 0.1 for o in out):
+                    out.append(b)
         return sorted(out, key=lambda b: (b['kind'] == 'contrast', -b['score']))
+
+    def strong(self, boxes):
+        """The boxes sure enough to chase: the network's from --zoom-conf (it gave 0.5-0.7 on bare grain and cloth, a
+        real code ~1.0, 2026-10-28), corner squares, strong contrast guesses."""
+        return [b for b in boxes if (b['kind'] == 'model' and b['score'] >= self.a.zoom_conf) or b['kind'] == 'finder'
+                or (b['kind'] == 'contrast' and b['score'] >= 0.75)]
 
     def contrast_scored(self, gray, cands):
         """Boxes that look like a QR, no reading: [{poly, kind, score}], best first.
@@ -656,16 +694,16 @@ class Tool:
         return f'{d * self.a.qr_size:.2f} m' if self.a.qr_size > 0 else f'{d:.2f} w'
 
     def decode(self, gray, slow=True):
-        """slow=False: native size only (the live test: 2x upscaling and OpenCV's detector every third frame)."""
+        """The whole view, zbar only (slow: also 2x up to 1000 px). WeChat on a whole view with no readable code in it
+        took 2-30 s - its fallback search through the sensor grain, and the loop managed 1 frame / 5 s (2026-10-28) -
+        so WeChat reads only the detector's box crops (decode_boxes). No OpenCV decoder: the container's cv2 has no
+        QUIRC (its detectAndDecodeMulti finds codes but never reads one)."""
         mean = float(gray.mean())
         if mean < 80 or mean > 200:
             gray = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
-        out = self.wechat(gray) if self.wc is not None else {}
-        if out or (self.wc is not None and not slow):
-            return out
+        out = {}
         gray = cv2.GaussianBlur(gray, (3, 3), 0)
-        # 2x upscaling only below full resolution (a 6560 px image takes seconds)
-        for scale in ((1.0, 2.0) if slow and gray.shape[1] <= 2000 else (1.0,)):
+        for scale in ((1.0, 2.0) if slow and gray.shape[1] <= 1000 else (1.0,)):
             img = gray if scale == 1.0 else cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
             for d in self.zbar(img):
                 p = d.data.decode('utf-8', errors='replace').strip()
@@ -674,16 +712,49 @@ class Tool:
                     out[p] = np.array(pts, float) / scale
             if out:
                 return out
-        if not slow:
-            return out
-        try:
-            ok, pl, pts, _ = self.cv_qr.detectAndDecodeMulti(gray)
-            if ok and pts is not None:
-                for p, poly in zip(pl, pts):
-                    if p:
-                        out[p.strip()] = np.asarray(poly, float).reshape(-1, 2)
-        except cv2.error:
-            pass
+        return out
+
+    def decode_boxes(self, gray, boxes, limit=4):
+        """Read the detector's boxes from tight crops (box + 30 %, quiet zone padded) -> {payload: polygon in gray}.
+        A crop is ~15-30 ms of WeChat and 2x zbar on it is cheap; WeChat on the whole view took seconds (decode)."""
+        out = {}
+        h, w = gray.shape[:2]
+        for b in boxes[:limit]:
+            p = b['poly']
+            m = max(16.0, 0.3 * float(np.ptp(p, axis=0).max()))
+            x0, y0 = np.maximum(p.min(axis=0) - m, 0).astype(int)
+            x1, y1 = np.minimum(p.max(axis=0) + m, (w, h)).astype(int)
+            crop = gray[y0:y1, x0:x1]
+            if crop.size < 400:
+                continue
+            # a big code is shrunk to <= 400 px (still >= 10 px/module): WeChat's cost grows with the crop when the code
+            # in it can't be read
+            k = min(1.0, 400.0 / max(crop.shape))
+            if k < 1.0:
+                crop = cv2.resize(crop, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
+            mean = float(crop.mean())
+            if mean < 80 or mean > 200:
+                crop = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4)).apply(crop)
+            pad = 32                                  # a quiet zone round the code, in case the crop cut into it
+            work = cv2.copyMakeBorder(crop, pad, pad, pad, pad, cv2.BORDER_REPLICATE)
+            got = {}
+            if self.wc is not None:
+                try:
+                    texts, pts = self.wc.detectAndDecode(work)
+                    got = {t.strip(): np.asarray(q, float).reshape(-1, 2) for t, q in zip(texts, pts) if t and t.strip()}
+                except Exception:
+                    pass
+            if not got:
+                for s in (1.0, 2.0):
+                    img = work if s == 1.0 else cv2.resize(work, None, fx=s, fy=s, interpolation=cv2.INTER_CUBIC)
+                    for d in self.zbar(img):
+                        t = d.data.decode('utf-8', errors='replace').strip()
+                        if t and d.polygon:
+                            got[t] = np.array([(q.x, q.y) for q in d.polygon], float) / s
+                    if got:
+                        break
+            for t, q in got.items():
+                out.setdefault(t, (q - pad) / k + [x0, y0])
         return out
 
     # ---- worker: annotate the latest frame for the stream
@@ -732,14 +803,20 @@ class Tool:
                 cfg = (None, self.fov, 1.0)
                 vis, fv, _ = self.rectify(f, *cfg)
                 vis = vis.copy()
-                self.draw_boxes(vis, cfg, fv, {})
+                self.draw_boxes(vis, cfg, fv, {}, f.shape)
             elif self.mode == 'qr':
                 # the decode runs in qr_loop at its own pace; every streamed frame gets its latest boxes (< 1 s old)
                 cfg = self.view_cfg()
                 vis, fv, R = self.rectify(f, *cfg)
                 vis = vis.copy()
-                # boxes only from a decode of this same view (a zoom change moves everything)
-                found = self.qr_found if time.monotonic() - self.qr_found_t < 1.0 and self.qr_cfg == cfg else {}
+                # the latest read put into THIS view through its corner rays: requiring the read's own view hid nearly
+                # every read (a read starts the zoom and the zoom follows the code, so the view had moved on, 2026-10-28)
+                found = {}
+                if time.monotonic() - self.qr_found_t < self.a.read_show_s:
+                    for p, rays in self.qr_rays.items():
+                        px = self.px_of(rays, vis.shape, fv, R, f.shape)
+                        if px is not None and ((px >= 0) & (px < vis.shape[1::-1])).all(axis=1).any():
+                            found[p] = px
                 if cfg[0] is not None:
                     z = self.zoom
                     step = '' if z is None else (f'step {z["level"] + 1}/{len(CHASE)}  SCAN: exposure <= '
@@ -747,24 +824,28 @@ class Tool:
                                                  f'{len(self.zstack)} frames averaged - hold still')
                     cv2.putText(vis, f'CHASING the QR: {cfg[1]} deg x{cfg[2]:g}  {step}', (12, 36),
                                 cv2.FONT_HERSHEY_SIMPLEX, 1.0, (80, 255, 80), 2)
-                self.draw_boxes(vis, cfg, fv, found)
+                self.draw_boxes(vis, cfg, fv, found, f.shape)
                 for p, poly in found.items():
                     pts = poly.astype(np.int32)
                     cv2.polylines(vis, [pts], True, (0, 255, 255), 4)
                     c = poly.mean(axis=0)
                     ray = self.ray_of(c, vis.shape, fv, R, f.shape)
                     ang = f'  {math.degrees(math.acos(max(-1.0, min(1.0, ray[2])))):.0f} deg off axis'
-                    side = min(np.linalg.norm(poly[i] - poly[(i + 1) % 4]) for i in range(4)) / (cfg[2] if fv else 1)
-                    # px per module of the SENSOR (the zoom's enlargement taken out), 21-module (version 1) code
+                    side = self.sensor_px(min(np.linalg.norm(poly[i] - poly[(i + 1) % 4]) for i in range(4)), fv, f.shape)
+                    # px per module of the SENSOR (the view's enlargement taken out), 21-module (version 1) code
                     cv2.putText(vis, f'{p[:48]}  {side:.0f}px = {side / 21:.1f} px/module (v1){ang}', (int(pts[:, 0].min()), int(pts[:, 1].min()) - 12),
                                 cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 3)
             if self.enhance:
                 try:
                     lab = cv2.cvtColor(vis, cv2.COLOR_BGR2LAB)
                     l, a, b = cv2.split(lab)
-                    cl = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8)).apply(l)
-                    blur = cv2.GaussianBlur(cl, (0, 0), 1.2)
-                    cl = cv2.addWeighted(cl, 1.3, blur, -0.3, 0)
+                    cl = cv2.createCLAHE(clipLimit=1.6, tileGridSize=(8, 8)).apply(l)
+                    # Edge-aware sharpening: only boost strong edges, do not amplify sensor grain
+                    blur = cv2.GaussianBlur(cl, (0, 0), 1.0)
+                    diff = cv2.subtract(cl, blur)
+                    _, edge_mask = cv2.threshold(diff, 5, 255, cv2.THRESH_BINARY)
+                    sharp = cv2.addWeighted(cl, 1.25, blur, -0.25, 0)
+                    cl = np.where(edge_mask > 0, sharp, cl)
                     vis = cv2.cvtColor(cv2.merge((cl, a, b)), cv2.COLOR_LAB2BGR)
                 except Exception:
                     pass
@@ -775,16 +856,19 @@ class Tool:
             ok, jpg = cv2.imencode('.jpg', small, [cv2.IMWRITE_JPEG_QUALITY, q])
             if ok:
                 self.view = jpg.tobytes()
-            time.sleep(0.08)
+            # ~5 views/s while reading: a 1280 px remap + JPEG every 80 ms took CPU the read loop needs (2026-10-28)
+            time.sleep(0.2 if self.mode in ('qr', 'detect') else 0.08)
 
-    def draw_boxes(self, vis, cfg, fv, found):
-        """The detector's boxes (from a pass over this same view, < 1.5 s old) unless the code was read."""
+    def draw_boxes(self, vis, cfg, fv, found, frame_shape):
+        """The detector's boxes (from a pass over this same view, < 1.5 s old) unless the code was read. The read's view
+        is the lens's own size, the page's >= 1280 px: same centre and field, so the boxes scale by the sizes' ratio."""
         scfg, boxes, st = self.qr_seen
         if scfg != cfg or time.monotonic() - st > 1.5 or found:
             return
+        k = vis.shape[1] / max(self.seen_shape[1], 1)
         pcfg, pairs = self.qr_pairs
         if pcfg == cfg:
-            ctr = {b['id']: b.get('square', b['poly']).mean(axis=0) for b in boxes if 'id' in b}
+            ctr = {b['id']: b.get('square', b['poly']).mean(axis=0) * k for b in boxes if 'id' in b}
             # lines only between neighbours (the minimum spanning tree), all pairs are listed in the status
             tree, done = [], {1}
             while len(done) < len(ctr):
@@ -802,8 +886,9 @@ class Tool:
                         cv2.putText(vis, self.dist_text(d), (int(m[0]) - 40, int(m[1]) - 8), cv2.FONT_HERSHEY_SIMPLEX,
                                     0.9, col, th)
         for b in boxes:
-            pts = b['poly'].astype(np.int32)
-            side = min(np.linalg.norm(b['poly'][i] - b['poly'][(i + 1) % 4]) for i in range(4)) / (cfg[2] if fv else 1)
+            poly = b['poly'] * k
+            pts = poly.astype(np.int32)
+            side = self.sensor_px(min(np.linalg.norm(poly[i] - poly[(i + 1) % 4]) for i in range(4)), fv, frame_shape)
             if b['kind'] == 'model':
                 col, label = (60, 255, 60), f'QR {b["score"]:.2f}'
             elif b['kind'] == 'finder':
@@ -830,21 +915,20 @@ class Tool:
             gray = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
             if self.enhance:
                 try:
-                    cl = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8)).apply(gray)
-                    blur = cv2.GaussianBlur(cl, (0, 0), 1.2)
-                    gray = cv2.addWeighted(cl, 1.35, blur, -0.35, 0)
+                    g_denoise = cv2.medianBlur(gray, 3)
+                    gray = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(g_denoise)
                 except Exception:
                     pass
             if self.mode == 'detect':                 # boxes only, the wide view, no reading, no chase
                 self.zoom = None
                 cfg = (None, self.fov, 1.0)
-                view, fv, R = self.rectify(gray, *cfg)
+                view, fv, R = self.rectify(gray, *cfg, min_n=0)
                 boxes = self.detect_boxes(view)
                 self.qr_pairs = (cfg, self.measure(view, boxes, fv, R, f.shape))
-                self.qr_seen = (cfg, boxes, time.monotonic())
+                self.qr_seen, self.seen_shape = (cfg, boxes, time.monotonic()), view.shape
                 continue
             cfg = self.view_cfg()
-            view, fv, R = self.rectify(gray, *cfg)
+            view, fv, R = self.rectify(gray, *cfg, min_n=0)
             if cfg[0] is not None:
                 # zoomed: average the last views of the code (the step's count) (sensor grain at high gain / short exposure
                 # was what lost a 3 px/module code, 2026-10-26), denoise the small view, decode that, then the
@@ -864,37 +948,52 @@ class Tool:
                     self.zstack = [(cfg, v32)]
                 avg = np.clip(sum(v for _, v in self.zstack) / len(self.zstack), 0, 255).astype(np.uint8)
                 clean = cv2.fastNlMeansDenoising(avg, None, self.a.denoise, 5, 7) if self.a.denoise > 0 else avg   # ~100 ms
-                found = self.decode(clean, slow=True) or self.decode(view, slow=self.qr_n % 3 == 0)
+                # the detector's boxes read from tight crops first, the whole view only when that fails
+                boxes = self.detect_boxes(view)
+                found = (self.decode_boxes(clean, boxes) or self.decode_boxes(view, boxes)
+                         or self.decode(clean, slow=True) or self.decode(view, slow=self.qr_n % 3 == 0))
                 if not found:
-                    # the zoom missed: try the wide view in the same pass instead of losing the code
+                    # the zoom missed: the wide view in the same pass, its boxes read from crops too - a code outside
+                    # a zoom left on something else was found there but never read (2026-10-28); a sure box there and
+                    # none in the zoom re-aims the zoom at it
                     wcfg = (None, self.fov, 1.0)
-                    wview, wfv, wR = self.rectify(gray, *wcfg)
-                    wfound = self.decode(wview, slow=False)
-                    if wfound:
-                        cfg, view, fv, R, found = wcfg, wview, wfv, wR, wfound
+                    wview, wfv, wR = self.rectify(gray, *wcfg, min_n=0)
+                    wboxes = self.detect_boxes(wview)
+                    wfound = self.decode_boxes(wview, wboxes) or self.decode(wview, slow=False)
+                    if wfound or (not self.strong(boxes) and self.strong(wboxes)):
+                        cfg, view, fv, R, found, boxes = wcfg, wview, wfv, wR, wfound, wboxes
             else:
                 self.zstack = []
-                found = self.decode(view, slow=self.qr_n % 3 == 0)
+                boxes = self.detect_boxes(view)
+                found = self.decode_boxes(view, boxes) or self.decode(view, slow=self.qr_n % 3 == 0)
             now = time.monotonic()
-            boxes = [] if found else self.detect_boxes(view)        # in frame but not read
+            if found:
+                boxes = []                                          # boxes = in frame but not read
             if cfg[0] is None:
                 self.qr_pairs = (cfg, self.measure(view, boxes, fv, R, f.shape))
-            self.qr_seen = (cfg, boxes, now)
-            strong = [b for b in boxes if b['kind'] != 'contrast' or b['score'] >= 0.75]
+            self.qr_seen, self.seen_shape = (cfg, boxes, now), view.shape
+            strong = self.strong(boxes)
             target = next(iter(found.values())) if found else (strong[0]['poly'] if strong else None)
             z = self.zoom
             if target is not None and self.auto_zoom:
                 d = self.ray_of(target.mean(axis=0), view.shape, fv, R, f.shape)
                 if z is None:
-                    self.zoom = {'d': d, 't': now, 'level': 0, 't_level': now}             # start the chase
+                    self.zoom = {'d': d, 't': now, 'level': 0, 'tries': 0}                 # start the chase
                 else:
-                    z['d'], z['t'] = d, now                                                # follow it
-                    if (not found and now - max(z['t_level'], self.cam_open_t + 0.8) > self.a.chase_step
-                            and z['level'] < len(CHASE) - 1):
-                        z['level'], z['t_level'] = z['level'] + 1, now                     # still unread: step up
-                        self.zstack = []
-                    elif found:
-                        z['t_level'] = now                                                 # read: stay at this step
+                    # follow it, re-aiming only past --zoom-reaim-deg: a new direction every pass (d rounded to 3 dp)
+                    # was a new view every pass - new remap maps, the averaging stack reset (2026-10-28)
+                    if math.degrees(math.acos(max(-1.0, min(1.0, float(np.dot(z['d'], d)))))) > self.a.zoom_reaim_deg:
+                        z['d'] = d
+                    z['t'] = now
+                    if found:
+                        z['tries'] = 0                                                     # read: stay at this step
+                    elif len(self.zstack) >= CHASE[min(z['level'], len(CHASE) - 1)][2]:
+                        z['tries'] += 1                                                    # the step's frames averaged
+                        if z['tries'] >= self.a.chase_tries and z['level'] < len(CHASE) - 1:
+                            z['level'], z['tries'] = z['level'] + 1, 0                     # still unread: step up
+                            self.zstack = []
+                        elif z['tries'] >= self.a.chase_tries:
+                            self.zoom, self.zstack = None, []                              # every step tried: wide
             elif z is not None and now - max(z['t'], self.cam_open_t + 0.8) > self.a.zoom_hold:   # (not the reopen's gap)
                 self.zoom = None                                                           # gone: back to wide
             for p in found:
@@ -904,6 +1003,8 @@ class Tool:
                 self.qr_last, self.qr_last_t = (p, time.strftime('%H:%M:%S')), now
             self.qr_log = [e for e in self.qr_log if now - e[0] < 5.0] + [(now, list(found))]
             if found:
+                self.qr_rays = {p: np.array([self.ray_of(q, view.shape, fv, R, f.shape) for q in poly])
+                                for p, poly in found.items()}
                 self.qr_found, self.qr_found_t, self.qr_cfg = found, now, cfg
 
     def status(self):
@@ -975,6 +1076,7 @@ def make_handler(tool):
                 return self.send(200, json.dumps({'mode': tool.mode, 'fov': tool.fov, 'auto_zoom': tool.auto_zoom,
                                                   'exposure': tool.a.qr_max_exposure_ms, 'qr_size': tool.a.qr_size,
                                                   'use_gpu': tool.use_gpu, 'enhance': tool.enhance, 'hq': tool.hq,
+                                                  'dnn_only': tool.dnn_only,
                                                   'text': tool.status()}).encode())
             if u.path == '/view.jpg':                  # the latest annotated view (the page polls it)
                 if not tool.view:
@@ -1041,6 +1143,9 @@ def make_handler(tool):
             if u.path == '/toggle_hq':
                 tool.hq = not tool.hq
                 return self.send(200, json.dumps({'hq': tool.hq}).encode())
+            if u.path == '/toggle_filter':
+                tool.dnn_only = not tool.dnn_only
+                return self.send(200, json.dumps({'dnn_only': tool.dnn_only}).encode())
             if u.path == '/qrsize':                    # the dark code square's side, m (0 = distances in code widths)
                 tool.a.qr_size = max(0.0, float(q.get('v', ['0'])[0] or 0))
                 return self.send(200, b'{}')
@@ -1078,13 +1183,20 @@ def main():
                     help='calib: auto-capture only when the corners move slower than this (px/s at 1640 wide)')
     ap.add_argument('--qr-width', type=int, default=3280, help='QR test: full resolution')
     ap.add_argument('--qr-height', type=int, default=2464)
-    ap.add_argument('--qr-max-exposure-ms', type=float, default=5.0, help='QR test: short exposure (less blur)')
+    ap.add_argument('--qr-max-exposure-ms', type=float, default=12.0, help='QR test: max exposure (12ms indoor clean, 5ms outdoor fast flight)')
+    ap.add_argument('--qr-fps', type=int, default=10,
+                    help='QR test frame rate (the read loop uses a few a second; each 3280 px frame costs CPU)')
     ap.add_argument('--qr-fov', type=int, default=75, help='QR test view: straightened middle of the lens, deg (0 = fisheye)')
     ap.add_argument('--auto-zoom', type=int, default=1, help='1: zoom the view onto a QR once one is read')
     ap.add_argument('--zoom-hold', type=float, default=4.0, help='s without a read or a box before going back to wide')
-    ap.add_argument('--chase-step', type=float, default=4.0, help='s at one chase step without a read before the next')
-    ap.add_argument('--scan-exposure-ms', type=float, default=80.0,
-                    help='QR test: exposure cap once a code is found but not read (the camera held still)')
+    ap.add_argument('--zoom-reaim-deg', type=float, default=1.5, help='re-aim the zoom only when the code drifts this far')
+    ap.add_argument('--read-show-s', type=float, default=3.0, help='s a read stays drawn on the view (a pass can take s)')
+    ap.add_argument('--zoom-conf', type=float, default=0.75,
+                    help='a network box starts / keeps a chase from this score (grain gave 0.5-0.7, a code ~1.0)')
+    ap.add_argument('--chase-tries', type=int, default=2,
+                    help='passes over a chase step\'s full frame average without a read before the next step')
+    ap.add_argument('--scan-exposure-ms', type=float, default=25.0,
+                    help='QR test: exposure cap once a code is found but not read (80 ms smeared a module of hand / drone motion)')
     ap.add_argument('--scan-fps', type=int, default=10, help='QR test: frame rate of the scan settings (<= 1000 / exposure)')
     ap.add_argument('--qr-size', type=float, default=0.0, help='side of the dark code square, m, for the distances (0: code widths)')
     ap.add_argument('--min-score', type=float, default=0.55, help='"looks like a QR" boxes from this score')

@@ -1,11 +1,13 @@
 # Camera rig: Pixhawk IMU (imu_link, FLU) -> D435 (camera_link, FLU, x forward).
 # Read by the launch files; rewritten by calibration/kalibr_to_rig.py.
-source: manual  # test bench: camera 6 cm in front of the Pixhawk, same plane, both facing forward
+source: manual  # real drone: tape-measured mount (2026-10-28), D435 upside down
 
 # pose of camera_link expressed in imu_link
 imu_to_camera:
-  translation: [0.06, 0.0, 0.0]        # metres
-  rotation_xyzw: [0.0, 0.0, 0.0, 1.0]
+  # real drone 2026-10-28 (user): D435 mounted UPSIDE DOWN, lens forward = 180 deg roll about x;
+  # 7 cm in front of, 5 cm left of and 8 cm below the Pixhawk (tape-measured: a Kalibr run replaces both)
+  translation: [0.07, 0.05, -0.08]     # metres, imu_link FLU (x fwd, y left, z up)
+  rotation_xyzw: [1.0, 0.0, 0.0, 0.0]  # 180 deg about x
 
 # added to IMU stamps by imu_relay (= -timeshift_cam_imu from Kalibr)
 time_offset: 0.0  # seconds

@@ -1,0 +1,10 @@
+# The USB split (2026-10-28): the Pixhawk 6C Mini's one USB cable is two serial ports on the Jetson.
+#   USB port 1 (SERIAL0, MAV1): mavlink-router -> MAVROS (the VIO feed to EKF3, ~30 Hz ODOMETRY) + the onboard
+#                               dashboard. NOT relayed to the telemetry radio: the VIO feed alone (~7 KB/s) is more
+#                               than a 57600 SiK carries (~5 KB/s) - SITL test: 349 of 351 ODOMETRY reached the radio
+#                               port before, 0 after; the FC still uses what comes in on this port
+#   USB port 2 (SERIAL7, MAV3): mav_agent (status, VIO position, boards, geofence) - relayed to and from the radio
+# Dry run first:  launch_all/scripts/ardupilot_params.py vio_bringup/config/ardupilot_usb_split.parm --link /dev/ttyACM0:115200
+# Then --write, and REBOOT the Pixhawk (some MAVn_OPTIONS flags need it). Check: ls /dev/serial/by-id/ shows -if00 and -if02.
+MAV1_OPTIONS 2        # bit 1 NO_FORWARD: don't forward MAVLink to or from USB port 1
+SERIAL7_PROTOCOL 2    # USB port 2: MAVLink 2 (the agent's TUNNEL packets need v2)

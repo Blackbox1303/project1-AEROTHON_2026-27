@@ -8,7 +8,9 @@ Steps: the always-on onboard router (aerothon-router) paused for the run -> mavl
 the flight controller (`link`) to the 8080 dashboard (14650), the explorer (14552), QGC on the Lenovo (10.42.0.1:14550,
 and any QGC on 14551) -> link:=sitl also starts ArduCopter SITL (built-in quad physics, no Gazebo) -> vrx_explore.py.
 Ctrl-C (the dashboard's Stop) stops it all and resumes the onboard router.
-  link      sitl (bench) | /dev/ttyUSB0:57600 (the SiK radio) | udp:<port> (a MAVLink stream sent to this port)
+  link      sitl (bench) | /dev/ttyUSB0:57600 (the SiK radio) | udp:<port> (a MAVLink stream sent to this port) |
+            gazebo (the 8084 ArUco sim: Gazebo `world` + ArduCopter SITL on the iris_b19 model - its downward B19
+            analog camera's gz topic is the video, the zone is the world's; GZ_IP / GZ_PARTITION as the other sims)
   segment   qr (search + read, no drop) | qr_drop (the drop on the QR matching the start QR)
   video     the VRX's USB video device ('' = pick it on the 8094 page)
   alt / drop_alt  search / drop height (course rules: 10 m / 5 m)
@@ -35,6 +37,11 @@ ROUTER_TAIL = """
 Mode = Normal
 Address = 127.0.0.1
 Port = 14650
+
+[UdpEndpoint gcs_aruco]
+Mode = Normal
+Address = 127.0.0.1
+Port = 14651
 
 [UdpEndpoint vrx_explore]
 Mode = Server
@@ -74,14 +81,17 @@ def setup(context):
     run = g('run') or f'offboard_{time.strftime("%Y-%m-%d_%H-%M-%S")}'
     run_dir = WS / 'runs' / run
     run_dir.mkdir(parents=True, exist_ok=True)
-    zone, zone_src = zone_from(g('world_json'))
+    gazebo = link == 'gazebo'
+    if gazebo and not (WORLDS / f"{g('world')}.sdf").exists():
+        raise RuntimeError(f"link:=gazebo needs world:=<name> in {WORLDS} (got {g('world')!r})")
+    zone, zone_src = zone_from(g('world_json') or (str(WORLDS / f"{g('world')}.json") if gazebo else ''))
 
     # the onboard router owns UDP 14540 and the Pixhawk's USB port: paused for the run
     paused = systemctl('is-active', '--quiet') == 0
     if paused:
         systemctl('stop')
         print('[offboard_vrx] onboard aerothon-router paused (resumed on stop)')
-    if link == 'sitl':
+    if link in ('sitl', 'gazebo'):
         fcu = '[UdpEndpoint fcu]\nMode = Server\nAddress = 127.0.0.1\nPort = 14540\n'
     elif link.startswith('udp:'):
         fcu = f'[UdpEndpoint fcu]\nMode = Server\nAddress = 0.0.0.0\nPort = {int(link[4:])}\n'
@@ -95,7 +105,8 @@ def setup(context):
                      + fcu + ROUTER_TAIL)
     (run_dir / 'launch_args.txt').write_text(
         f'link={link}\nsegment={seg}\nvideo={g("video")}\nalt={g("alt")}\ndrop_alt={g("drop_alt")}\n'
-        f'zone={zone} ({zone_src})\nstarted={time.ctime()}\n')
+        f'zone={zone} ({zone_src})\nmarker={g("marker")}\nlens={g("lens")}\nworld={g("world") if gazebo else ""}\n'
+        f'started={time.ctime()}\n')
     print(f'[offboard_vrx] run dir {run_dir}; zone {zone} from {zone_src}')
 
     acts = [ExecuteProcess(cmd=['mavlink-routerd', '-c', str(conf)], output='log', name='router')]
@@ -109,15 +120,25 @@ def setup(context):
                  '--defaults', f'{AP}/Tools/autotest/default_params/copter.parm,{SIM}/ardupilot_sim_params.parm',
                  '--serial0', 'udpclient:127.0.0.1:14540'],
             cwd=str(sitl_dir), output='log', name='arducopter_sitl', sigterm_timeout='3', sigkill_timeout='3'))
+    gz_env = {'GZ_IP': g('gz_ip'), 'GZ_PARTITION': g('gz_partition')}
+    if gazebo:
+        # Gazebo headless + ArduCopter SITL (lock-step JSON) on the B19-only airframe, spawned on the pad; the dashboard
+        # puts it down at the zone before the start (sim_place_at_zone), as the 8080 sim's QR-area segments
+        acts.append(ExecuteProcess(
+            cmd=[str(SIM / 'run_competition_ap.sh'), str(WORLDS / f"{g('world')}.sdf")],
+            additional_env={**gz_env, 'AP_MODEL': 'iris_b19', 'HEADLESS': '1'},
+            output='log', name='gazebo_sitl', sigterm_timeout='8', sigkill_timeout='8'))
     app = ['python3', str(APP), '--link', 'udpout:127.0.0.1:14552', '--alt', g('alt'), '--drop-alt', g('drop_alt'),
            '--zone', *[str(v) for v in zone], '--port', g('port'), '--qgc', '127.0.0.1:9']   # QGC: via the router
     if seg == 'qr_drop':
         app.append('--drop')
-    if g('video'):
-        app += ['--video', g('video')]
+    video = g('video') or ('gz:/b19/image_raw' if gazebo else '')
+    if video:
+        app += ['--video', video]
     if g('start_qr'):
         app += ['--start-qr', g('start_qr')]
-    acts.append(ExecuteProcess(cmd=app, cwd=str(WS), output='screen', name='vrx_explore'))
+    app += ['--marker', g('marker'), '--lens', g('lens')]
+    acts.append(ExecuteProcess(cmd=app, cwd=str(WS), output='screen', name='vrx_explore', additional_env=gz_env))
 
     def stop(_ctx):
         if paused:
@@ -134,6 +155,13 @@ def generate_launch_description():
         DeclareLaunchArgument('video', default_value='', description="VRX USB video device ('' = pick on the page)"),
         DeclareLaunchArgument('alt', default_value='10.0', description='search height, m'),
         DeclareLaunchArgument('drop_alt', default_value='5.0', description='drop height, m'),
+        DeclareLaunchArgument('marker', default_value=os.environ.get('AEROTHON_MARKER', 'qr'),
+                              description='qr | aruco: what the boards carry'),
+        DeclareLaunchArgument('world', default_value='', description='link:=gazebo: the sim world name (worlds/<name>.sdf)'),
+        DeclareLaunchArgument('gz_ip', default_value=os.environ.get('GZ_IP', '10.42.0.247')),
+        DeclareLaunchArgument('gz_partition', default_value=os.environ.get('GZ_PARTITION', 'vio')),
+        DeclareLaunchArgument('lens', default_value='pinhole',
+                              description='analog camera lens: pinhole (as 8080) | b19 (equidistant, rated 130 deg diagonal)'),
         DeclareLaunchArgument('start_qr', default_value='', description='target payload (else read at the pad)'),
         DeclareLaunchArgument('world_json', default_value='', description='geofence json (delivery_zone)'),
         DeclareLaunchArgument('port', default_value='8094', description='the explorer page'),

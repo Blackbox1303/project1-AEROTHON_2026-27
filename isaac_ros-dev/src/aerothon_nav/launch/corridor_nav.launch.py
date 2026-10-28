@@ -15,13 +15,17 @@ Needs the Arducam (sim: sim_arducam.launch.py) for the banner and the start QR:
     ros2 service call /mission/read_qr std_srvs/srv/Trigger     (hovering over it; result on /mission/start_qr)
     sim: qr_fallback:=/arducam/nadir_hd/image_raw  pylib:=<ws>/sim/.pylib  (pyzbar for the laptop)
 Frames: map -(static, sim_view)-> odom -(odom_tf)-> base_link -> imu_link -> camera_link -> ...
+corridor_impl:=aerothon: corridor_nav, entry_align and altitude_planner come from the AeroTHON folder instead
+(launch_all/aerothon_corridor_stack.py, in its own container); the banners are found by drone_qr_detector's
+banner_node (rect_banner_view's detector on the Arducam, as /banner_detector); odom_tf, offboard_bridge,
+slam_toolbox and qr_reader stay ours.
 """
 import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
-from launch.conditions import IfCondition
+from launch.conditions import IfCondition, LaunchConfigurationEquals, LaunchConfigurationNotEquals
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -36,6 +40,7 @@ def generate_launch_description():
         param_rewrites={'default_nav_to_pose_bt_xml': os.path.join(pkg, 'behavior_trees', 'navigate_corridor.xml')},
         convert_types=True)
     course_file = [os.path.join(pkg, 'config', 'course_'), LaunchConfiguration('course'), '.yaml']
+    ours = LaunchConfigurationNotEquals('corridor_impl', 'aerothon')
     return LaunchDescription([
         DeclareLaunchArgument('sim', default_value='false', description='sim time + restamped PX4 pose'),
         DeclareLaunchArgument('course', default_value='v2', description='corridor settings: v2 (new) | v1 (first course)'),
@@ -47,6 +52,8 @@ def generate_launch_description():
         # so this Nav2 is unused: off by default - it was only ever paused, and still held ~8 processes' RAM on the
         # 8 GB Jetson. nav2:=true for corridor_nav nav_mode nav2 (and the supervisor's corridor_nav2 true)
         DeclareLaunchArgument('nav2', default_value='false', description='the corridor Nav2 (nav_mode nav2 only)'),
+        DeclareLaunchArgument('corridor_impl', default_value='current',
+                              description='current | aerothon (its corridor nodes run in the aerothon-vio container)'),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(os.path.join(get_package_share_directory('nav2_bringup'),
                                                        'launch', 'navigation_launch.py')),
@@ -57,16 +64,20 @@ def generate_launch_description():
         Node(package='aerothon_nav', executable='offboard_bridge', output='screen',
              parameters=[os.path.join(pkg, 'config', 'offboard_bridge.yaml'),
                          {'geofence_json': LaunchConfiguration('world_json')}]),
-        Node(package='aerothon_nav', executable='corridor_nav', output='screen',
+        Node(package='aerothon_nav', executable='corridor_nav', output='screen', condition=ours,
              parameters=[{'use_sim_time': sim}, course_file]),
-        Node(package='aerothon_nav', executable='banner_detector', output='screen',
+        Node(package='aerothon_nav', executable='banner_detector', output='screen', condition=ours,
              parameters=[os.path.join(pkg, 'config', 'banner.yaml'), {'use_sim_time': sim}]),
-        Node(package='aerothon_nav', executable='entry_align', output='screen',
+        # corridor_impl aerothon: rect_banner_view's detector (fisheye -> rectilinear, true-aspect check) on the Arducam
+        Node(package='drone_qr_detector', executable='banner_node', name='banner_detector', output='screen',
+             condition=LaunchConfigurationEquals('corridor_impl', 'aerothon'),
+             parameters=[{'use_sim_time': sim, 'with_letters': sim}]),
+        Node(package='aerothon_nav', executable='entry_align', output='screen', condition=ours,
              parameters=[{'use_sim_time': sim}, course_file]),
         # 2D SLAM of the corridors on the levelled D435 scan -> /map (corridor Nav2 global costmap static layer)
         Node(package='slam_toolbox', executable='async_slam_toolbox_node', name='slam_toolbox', output='screen',
              parameters=[os.path.join(pkg, 'config', 'slam_toolbox_2d.yaml'), {'use_sim_time': sim}]),
-        Node(package='aerothon_nav', executable='altitude_planner', output='screen',
+        Node(package='aerothon_nav', executable='altitude_planner', output='screen', condition=ours,
              parameters=[{'use_sim_time': sim, 'dump_file': LaunchConfiguration('altitude_dump')}]),
         Node(package='aerothon_nav', executable='qr_reader', output='screen',
              parameters=[{'use_sim_time': sim, 'pylib': LaunchConfiguration('pylib'),

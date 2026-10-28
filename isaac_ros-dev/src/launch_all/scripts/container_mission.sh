@@ -1,14 +1,18 @@
 #!/bin/bash
-# container_mission.sh <run dir in the container> <world name> [autostart 1|0] [geofence json] [ardupilot|px4]: INSIDE the container - the mission stack
+# container_mission.sh <run dir in the container> <world name> [autostart 1|0] [geofence json] [ardupilot|px4]
+#   [corridor current|aerothon]: INSIDE the container - the mission stack
 # (container_all) + loggers of /mission/log and /nav/altitude/state, all into the run dir; then /mission/start once
 # the delivery Nav2 is up (autostart 1). Started by sim_mission.launch.py through docker exec.
 RC=$1; W=$2; AUTO=${3:-1}; GJ=${4:-/workspaces/isaac_ros-dev/sim/worlds/$W.json}
 export AEROTHON_AUTOPILOT=${5:-ardupilot}       # offboard_bridge / mission_supervisor: flight modes of that autopilot
 source /opt/ros/humble/setup.bash; source /workspaces/isaac_ros-dev/install/setup.bash
 export FASTRTPS_DEFAULT_PROFILES_FILE=/workspaces/isaac_ros-dev/fastdds_udp.xml
-mkdir -p "$RC"; rm -f ~/.ros/aerothon_*                           # a clean mission: no stored QR / map / geofence
+# the mission code version chosen on the dashboard (code_version.py): its aerothon_nav first on the import path
+[ -n "$AEROTHON_CODE_PATH" ] && export PYTHONPATH=$AEROTHON_CODE_PATH:$PYTHONPATH
+mkdir -p "$RC"; rm -f ~/.ros/aerothon_*
+echo "mission code: ${AEROTHON_CODE_PATH:-the working tree (current)}" > "$RC/code_version.txt"                           # a clean mission: no stored QR / map / geofence
 ros2 launch aerothon_nav container_all.launch.py vslam:=false course:=v2_slowsim \
-    world_json:=$GJ > "$RC/container.log" 2>&1 &
+    world_json:=$GJ corridor_impl:=${6:-current} > "$RC/container.log" 2>&1 &
 ros2 topic echo --full-length /mission/log std_msgs/msg/String > "$RC/mission_log.txt" 2>&1 &
 ros2 topic echo --full-length /nav/altitude/state std_msgs/msg/String > "$RC/altitude_state.txt" 2>&1 &
 if [ "$AUTO" = 1 ]; then

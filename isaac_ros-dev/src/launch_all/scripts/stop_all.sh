@@ -1,7 +1,7 @@
 #!/bin/bash
 # Stop the container mission stack (sim or real), the offboard VRX run (explorer + bench SITL) and the host side (Gazebo, PX4 / ArduCopter SITL, bridge, MAVROS, mavlink-router). Patterns live in this file, so a
 # caller's command line never matches them. The always-on onboard router (runs/gcs/onboard_router.conf) is left alone.
-pats='ros2 topic echo|container_all\.launch|container_real\.launch|tunnel_real\.launch|realsense2_camera_node|mavlink-routerd -c [^ ]*(sim|/router)\.conf|host_all\.launch|mavros_node|parameter_bridge|bin/px4|sitl/bin/arducopter --model (JSON|quad)|src/gcs/vrx_explore/vrx_explore\.py|gz sim|aerothon_nav/lib|slam_toolbox|nav2_|lifecycle_manager|static_transform_publisher|vio_bringup/lib|run_competition|cuvslam\.launch|visual_slam_container'
+pats='ros2 topic echo|container_all\.launch|container_real\.launch|tunnel_real\.launch|realsense2_camera_node|mavlink-routerd -c [^ ]*(sim|/router)\.conf|host_all\.launch|mavros_node|parameter_bridge|bin/px4|sitl/bin/arducopter --model (JSON|quad)|src/gcs/vrx_explore/vrx_explore\.py|gz sim|aerothon_nav/lib|slam_toolbox|nav2_|lifecycle_manager|static_transform_publisher|vio_bringup/lib|run_competition|cuvslam\.launch|visual_slam_container|aerothon_corridor_stack|aerothon_corridor\.sh'
 mine=$$
 # The tunnel + SLAM stack (tunnel_slam / tunnel_sim_saved launches, the container cuVSLAM launch, the dashboard's RViz /
 # RTAB-Map) shares process names with the mission stack (mavros_node, slam_toolbox, realsense2_camera_node, ...): a

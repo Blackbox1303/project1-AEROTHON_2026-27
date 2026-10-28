@@ -36,6 +36,15 @@ SERVO9_FUNCTION 28
 SIM_GRPS_ENABLE 1
 SIM_GRPS_PIN 9
 
+# Payload winch (drop_mechanism winch, the default): two relays = MDD20A PWM1 (run) / DIR1. SITL GPIO only takes pins
+# 0-15 (the real drone: 54 / 55) and shows their levels in SIM_PIN_MASK (bit 13 = run, bit 14 = dir). Off at boot.
+RELAY1_FUNCTION 1
+RELAY1_PIN 13
+RELAY1_DEFAULT 0
+RELAY2_FUNCTION 1
+RELAY2_PIN 14
+RELAY2_DEFAULT 0
+
 # gazebo-iris.parm's precision-landing / rangefinder test setup is not used here
 PLND_ENABLED 0
 RNGFND1_TYPE 0

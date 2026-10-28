@@ -8,6 +8,8 @@ new Arducam frame is decoded using:
      (`aligned_mean`) + border-padded WeChat super-resolution / zbar.
   3. Direct full-frame WeChat + zbar fallback.
 The payload decoded most often wins. Payloads are plain strings - never opened or followed.
+marker 'aruco' (default: the AEROTHON_MARKER environment variable, else 'qr'): the start board is an ArUco marker
+3x3 .. 6x6 instead, read on the undistorted image (aruco_tools.detect_fisheye); the payload is e.g. '4X4#23'.
   service: /mission/read_qr (std_srvs/Trigger) -> success + payload in `message`
   out:     /mission/start_qr (std_msgs/String JSON {payload, source, hits, frames, also_seen, time}),
            latched; the same JSON in store_file, so a restarted node (or the supervisor) still has it
@@ -56,7 +58,24 @@ class QrReader(Node):
         p('wechat_dir', '')          # WeChat model files (qr_tools.model_dir) - '' = the default place
         p('net_conf', 0.55)
         p('chase_avg', 4)
+        p('marker', os.environ.get('AEROTHON_MARKER', 'qr'))   # qr | aruco
         g = lambda n: self.get_parameter(n).value  # noqa: E731
+        self.g = g
+        self.cam = None
+        self.frames = {}
+        self.chase = {}
+        self.aruco = None
+        if g('marker') == 'aruco':
+            from aerothon_nav import aruco_tools
+            self.aruco_tools = aruco_tools
+            self.aruco = aruco_tools.Detector(raw=False)   # a 4x4-6x6 grid off the dictionaries is a misread
+            self.get_logger().info('start marker: ArUco 3x3 .. 6x6 on the undistorted image')
+        else:
+            self.init_qr()
+        self.init_ros()
+
+    def init_qr(self):
+        g = self.g
         if g('pylib'):
             sys.path.insert(0, g('pylib'))
         from pyzbar.pyzbar import ZBarSymbol, decode
@@ -71,10 +90,9 @@ class QrReader(Node):
             self.qnet = None
         self.get_logger().info(f'start QR decoders: {"WeChat + " if self.wc else ""}zbar, '
                                f'QrNet={"on" if self.qnet else "off"}')
-        self.g = g
-        self.cam = None
-        self.frames = {}
-        self.chase = {}
+
+    def init_ros(self):
+        g = self.g
         cb = ReentrantCallbackGroup()
         self.create_subscription(CameraInfo, g('info_topic'), self.on_info, qos_profile_sensor_data)
         # RELIABLE depth 1: best effort loses most fragments of these large frames
@@ -115,6 +133,12 @@ class QrReader(Node):
             if found:
                 return found
         return set()
+
+    def read_aruco(self, gray, fisheye=True):
+        """Marker payloads in a frame: through undistorted views on the fisheye, straight on a pinhole image."""
+        if fisheye and self.cam is not None:
+            return set(self.aruco_tools.detect_fisheye(self.aruco, gray, self.cam))
+        return {p for p, _ in self.aruco.detect(gray)}
 
     def read(self, gray):
         """Multi-stage start QR decode: central gnomonic rectification -> candidate/QrNet bounding box search +
@@ -178,7 +202,8 @@ class QrReader(Node):
                 seen[key] += 1
                 if key == 'fallback_topic' and votes['topic']:
                     continue                         # only when the real camera's view fails
-                for payload in self.read(to_gray(m)):
+                gray = to_gray(m)
+                for payload in (self.read_aruco(gray, key == 'topic') if self.aruco else self.read(gray)):
                     votes[key][payload] += 1
             if any(c >= self.g('min_hits') + 1 for c in votes['topic'].values()):
                 break                                # early exit once confidently decoded multiple times
