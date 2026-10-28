@@ -1,0 +1,20 @@
+# The mission container (isaac_ros_dev-aarch64-pyzbar): the Isaac ROS dev image + libzbar / pyzbar.
+# BASE_IMAGE: the Isaac ROS image built by isaac_ros_common (docker/build_images.sh). On the original Jetson the base
+# was a saved snapshot, isaac_ros_dev-aarch64:pyzbar-backup (the default here).
+ARG BASE_IMAGE=isaac_ros_dev-aarch64:pyzbar-backup
+FROM ${BASE_IMAGE}
+
+USER root
+
+RUN set -eux; \
+    for f in /etc/apt/sources.list.d/*; do \
+      [ -f "$f" ] || continue; \
+      if grep -q 'dl.yarnpkg.com/debian' "$f"; then \
+        mv "$f" "$f.disabled"; \
+      fi; \
+    done; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends libzbar0; \
+    rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m pip install pyzbar

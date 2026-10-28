@@ -1,0 +1,42 @@
+# VIO layer on top of Isaac ROS 3.2 (ros2_humble.realsense):
+# MAVROS for the Pixhawk (PX4) IMU, RViz IMU plugin, and prebuilt cuVSLAM.
+# Same file for the laptop (x86_64) and the Jetson (aarch64): it only uses apt / pip packages
+# that exist for both.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+RUN --mount=type=cache,target=/var/cache/apt \
+    apt-get update && apt-get install -y \
+        ros-humble-mavros \
+        ros-humble-mavros-extras \
+        ros-humble-mavros-msgs \
+        ros-humble-rviz-imu-plugin \
+        ros-humble-imu-tools \
+        ros-humble-rqt-image-view \
+        ros-humble-isaac-ros-visual-slam \
+        ros-humble-isaac-ros-examples \
+        ros-humble-isaac-ros-realsense \
+        ros-humble-realsense2-camera \
+        ros-humble-diagnostic-updater \
+        ros-humble-nav2-bringup \
+        ros-humble-nav2-simple-commander \
+        python3-opencv \
+        python3-yaml \
+        python3-serial \
+        libzbar0 \
+        gstreamer1.0-tools \
+        gstreamer1.0-plugins-base \
+        gstreamer1.0-plugins-good \
+        usbutils
+
+# The base image's pip numpy 2.x breaks apt's python3-opencv (built against numpy 1.x: "_ARRAY_API not
+# found"); the mission nodes need cv2. Only cupy (unused here) wants numpy 2.
+# pyzbar (QR decoding, pure Python on top of libzbar0): the nodes' default when no `pylib` is given.
+RUN python3 -m pip install --no-cache-dir "numpy<2" pyzbar==0.1.9
+
+# numpy's OpenBLAS: one busy-waiting thread per core after every big matrix product (418 % CPU in one node)
+ENV OPENBLAS_NUM_THREADS=1
+
+# GeographicLib datasets for MAVROS, baked in so the image doesn't depend on the host having them.
+# The laptop still bind-mounts its own copy over this (scripts/start_container.sh).
+RUN /opt/ros/humble/lib/mavros/install_geographiclib_datasets.sh
