@@ -1,0 +1,34 @@
+csi_camera_node:
+  ros__parameters:
+    source_mode: "auto"           # auto: shares port 8090 if another user has arducam_calib open, else ROS topic, else direct CSI
+    shared_http_host: "127.0.0.1"
+    shared_http_port: 8090
+    share_server_port: 8091
+    sensor_id: 0
+    width: 3280                   # Full IMX219 sensor required for 1m x 1m QR codes at 10m altitude (~70.5 px at nadir)
+    height: 2464
+    fps: 21
+    publish_rate: 6.0
+    exposure_ms: 6.0              # Short exposure prevents motion blur in flight
+    calibration_file: "/workspaces/isaac_ros-dev/calibration/arducam_fisheye_clean.yaml"
+    focal_scale: 1.0
+
+qr_drone_locator:
+  ros__parameters:
+    calibration_file: "/workspaces/isaac_ros-dev/calibration/arducam_fisheye_clean.yaml"
+    focal_scale: 1.0
+    drone_frame: "base_link"
+    camera_frame: "arducam_optical_frame"
+    mount_xyz: [0.13, 0.0, -0.03]
+    mount_rpy: [0.0, 1.570796, 0.0]
+    qr_size_m: 1.0                # 1.0 m for drone mission (set to e.g. 0.25 or 0.30 for 3m wall test)
+    qr_modules: 21
+    target_distance_m: 10.0       # 10.0 m for drone altitude (set to 3.0 for 3m wall test)
+    rate_hz: 4.0
+    center_fov_deg: 75.0
+    patch_fov_deg: 22.0
+    patch_zoom: 2.0
+    max_candidates: 8
+    chase_avg_frames: 4
+    use_net: true
+    net_conf: 0.55

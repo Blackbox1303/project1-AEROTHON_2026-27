@@ -1,5 +1,5 @@
 # AeroTHON code snapshot repo (local, 2026-10-27): ONLY our own code is tracked - everything else is ignored.
-# Vendor packages with their own .git (isaac_ros_*, realsense-ros, drone_qr_detector), build / install / log, run data,
+# Vendor packages with their own .git (isaac_ros_*, realsense-ros), build / install / log, run data,
 # calibration frames and model weights stay out.
 /*
 !/.gitignore
@@ -18,6 +18,9 @@
 !/isaac_ros-dev/src/gcs/
 !/isaac_ros-dev/src/launch_all/
 !/isaac_ros-dev/src/vio_bringup/
+# drone_qr_detector (2026-10-29, user: the container code all in this repo): its own .git moved to
+# isaac_ros-dev/runs/backups/drone_qr_detector.git (history kept, not pushed: no such GitHub repo)
+!/isaac_ros-dev/src/drone_qr_detector/
 !/vio_cuda_ws/
 /vio_cuda_ws/*
 !/vio_cuda_ws/sim/

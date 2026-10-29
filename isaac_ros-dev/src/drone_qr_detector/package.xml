@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>drone_qr_detector</name>
+  <version>0.1.0</version>
+  <description>Standalone IMX219 wide-angle fisheye camera driver (with shared CSI access), gnomonic-rectified QR detector, and 3D drone-frame QR localizer for 1m x 1m QR codes at 10m altitude and 3m wall calibration.</description>
+  <maintainer email="f20230424@hyderabad.bits-pilani.ac.in">szyfrowac</maintainer>
+  <license>Apache-2.0</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>visualization_msgs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
