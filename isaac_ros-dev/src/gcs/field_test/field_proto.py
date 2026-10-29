@@ -35,6 +35,7 @@ CODES = {
     18: ('carry_height', 'm'),             # how high the drone is carried (the camera's ground projection)
     19: ('lane_spacing', 'm'),
     20: ('status', ''),                    # a status packet now
+    21: ('spin_test', 's (0 = 6 s)'),      # props OFF: all four motors in turn FR RR RL FL (cw chase), mid level
 }
 BY_NAME = {v[0]: k for k, v in CODES.items()}
 

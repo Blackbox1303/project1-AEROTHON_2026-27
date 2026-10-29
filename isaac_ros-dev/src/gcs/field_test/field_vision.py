@@ -365,6 +365,7 @@ class App:
         self.events, self.n_ev = [], 0
         self.fc, self.fc_t = {}, 0.0
         self.motors_on = False
+        self.spin_until = 0.0                         # spin_test: the cw chase on all four until then
         self.levels = {'low': a.spin_low, 'mid': a.spin_mid, 'high': a.spin_high}
         self.mode = 'idle'                            # idle | walk_qr | walk_obstacle
         self.guide = self.idle_guide()
@@ -458,14 +459,27 @@ class App:
             self.event(msg)
             return True, msg
         if n == 'walk_stop':
+            self.spin_until = 0.0
             self.mode = 'idle'
             self.guide = self.idle_guide()
             self.event('walk-through stopped')
             return True, 'stopped'
         if n == 'motors':
             self.motors_on = bool(float(arg))
+            if not self.motors_on:
+                self.spin_until = 0.0
             self.event(f'motor cues {"ON - props must be OFF" if self.motors_on else "off"}')
             return True, f'motor cues {"on" if self.motors_on else "off"}'
+        if n == 'spin_test':
+            secs = min(20.0, float(arg) or 6.0)
+            if secs < 0:
+                self.spin_until = 0.0
+                return True, 'spin test stopped'
+            self.spin_until = time.time() + secs
+            msg = (f'spin test: all four motors in turn FR RR RL FL for {secs:.0f} s at {self.levels["mid"]:.0f} % '
+                   f'- PROPS OFF')
+            self.event(msg)
+            return True, msg
         if n == 'virtual_alt':
             v = float(arg)
             if not SCAN_FLOOR <= v <= 30.0:
@@ -1037,6 +1051,8 @@ class App:
     def motor_cue(self):
         g = self.guide
         fresh = time.time() - self.fc_t < 3.0
+        if time.time() < self.spin_until:            # spin_test: on by itself, for its seconds only
+            return {'pattern': 'cw', 'deg': 0, 'level': 'mid', 'throttle': self.levels['mid'], 'on': fresh}
         m = dict(g['motor']) if self.motors_on and self.mode != 'idle' else {'pattern': 'off', 'deg': 0, 'level': 'mid'}
         m['throttle'] = self.levels[m['level']]
         m['on'] = self.motors_on and fresh

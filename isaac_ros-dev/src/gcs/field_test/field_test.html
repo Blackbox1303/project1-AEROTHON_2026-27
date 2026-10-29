@@ -72,6 +72,7 @@ label{font-size:13px;color:var(--muted)}
    <button class=stop onclick="cmd('walk_stop')">Stop walk</button><button onclick="cmd('next')">Skip board</button></div>
   <div class=row><b style="width:84px">Motors</b><label><input type=checkbox id=props style="width:auto"> props are OFF</label>
    <button id=mon onclick="motors(1)">Motor cues ON</button><button class=stop onclick="motors(0)">OFF</button>
+   <button onclick="spinTest()">Spin all 4 (6 s)</button>
    <span class=cable><label>spin % low <input id=lvl_low> mid <input id=lvl_mid> high <input id=lvl_high></label><button onclick=levels()>set</button></span></div>
   <div class=row><b style="width:84px">Heights</b><label>virtual <input id=valt value=10></label><button onclick="num('virtual_alt','valt')">set</button>
    <label>carried at <input id=carry value=1.2></label><button onclick="num('carry_height','carry')">set</button>
@@ -115,6 +116,10 @@ async function cmd(name, arg, text) {
 function motors(on) {
   if (on && !$('props').checked) { $('msg').textContent = 'tick "props are OFF" first'; return; }
   cmd('motors', on);
+}
+function spinTest() {
+  if (!$('props').checked) { $('msg').textContent = 'tick "props are OFF" first'; return; }
+  cmd('spin_test', 6);
 }
 function num(name, id) { cmd(name, parseFloat($(id).value)); }
 function typed() { const v = $('sq').value.trim(); if (v) cmd('start_qr', 0, v); }

@@ -46,6 +46,7 @@ class Link:
         self.t_fc = 0.0
         self.cue = {'pattern': 'off', 'on': False}
         self.t_cue = 0.0
+        self.t_test = 0.0                      # the Pixhawk's last ACCEPTED motor test
         self.sent = 0
 
     def request_streams(self):
@@ -85,6 +86,7 @@ class Link:
                     s['motor_msg'] = f'motor test refused by the Pixhawk (result {m.result}): {s["fc_text"]}'
                 else:
                     s['motor_msg'] = 'motor test accepted'
+                    self.t_test = time.time()
             elif t == 'STATUSTEXT':
                 s['fc_text'] = m.text.rstrip('\0')[:80]
 
@@ -105,10 +107,14 @@ class Link:
         k = 0
         while True:
             c, step = self.cue, self.a.step_s
+            # ArduCopter's HEARTBEAT says armed while its own motor test runs (1 Hz, so it lags): that 'armed' is ours
+            # while the tests are being accepted. Really armed = the tests refused -> no fresh ACCEPT -> stop in ~2 s.
+            testing = time.time() - self.t_test < step + 1.5
+            disarmed = self.st['armed'] is False or (self.st['armed'] and testing)
             ok = (c.get('on') and c.get('pattern') not in (None, 'off') and time.time() - self.t_cue < 1.0
-                  and self.st['armed'] is False and time.time() - self.t_fc < 2.0)
+                  and disarmed and time.time() - self.t_fc < 2.0)
             if not ok:
-                if c.get('on') and c.get('pattern') not in (None, 'off') and self.st['armed']:
+                if c.get('on') and c.get('pattern') not in (None, 'off') and self.st['armed'] and not testing:
                     self.st['motor_msg'] = 'ARMED: no motor cues'
                 k = 0
                 time.sleep(0.1)

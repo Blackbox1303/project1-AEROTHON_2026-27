@@ -60,7 +60,7 @@ case "${1:-start}" in
     ENV="source /opt/ros/humble/setup.bash; source $WSC/install/setup.bash; export FASTRTPS_DEFAULT_PROFILES_FILE=$WSC/fastdds_udp.xml; unset DISPLAY"
     # the D435 as the mission has it (container_real.launch.py): colour + depth 640x360@30, emitter on
     docker exec -d -u admin $C bash -c "$ENV; echo \$\$ > $WSC/runs/field_test/rs.pid; exec ros2 run realsense2_camera \
-realsense2_camera_node --ros-args -r __node:=camera -p enable_depth:=true -p enable_color:=true \
+realsense2_camera_node --ros-args -r __node:=camera -r __ns:=/ -p enable_depth:=true -p enable_color:=true \
 -p enable_infra1:=false -p enable_infra2:=false -p enable_gyro:=false -p enable_accel:=false \
 -p depth_module.emitter_enabled:=1 -p depth_module.depth_profile:=640x360x30 -p rgb_camera.color_profile:=640x360x30 \
 -p align_depth.enable:=false -p pointcloud.enable:=false > $WSC/runs/field_test/realsense.log 2>&1"
