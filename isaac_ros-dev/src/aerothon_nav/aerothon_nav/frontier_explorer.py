@@ -460,7 +460,7 @@ class FrontierExplorer(Node):
                                                        self.g('verify_step'))])
         self.get_logger().info(f'candidate at ({gx:.1f}, {gy:.1f}): deep read {r["result"]} '
                                f'{r.get("score", r.get("why", ""))} - {self.g("verify_step"):g} m lower')
-        self.cand_t, self.cand_arrive = time.monotonic(), self.now_s()   # hover at the new height, then again
+        self.cand_t, self.cand_arrive = self.now_s(), self.now_s()   # hover at the new height, then again
         return True
 
     def candidate_step(self):
@@ -517,9 +517,9 @@ class FrontierExplorer(Node):
                         self.cand_goal, self.cand_t, self.cand_look, self.cand_arrive = None, None, None, None
                 return True
             elif math.hypot(gx - p.x, gy - p.y) < self.g('cand_reach') or (self.goal_done and self.last_status == 4):
-                self.cand_t = self.cand_t or time.monotonic()
+                self.cand_t = self.cand_t or self.now_s()   # node clock: sim time in the sim
                 self.cand_arrive = self.cand_arrive or self.now_s()
-                if time.monotonic() - self.cand_t > self.g('cand_hover'):
+                if self.now_s() - self.cand_t > self.g('cand_hover'):
                     if self.g('deep_read') and self.deep_read(gx, gy):
                         return True
                     r = self.g('look_radius')

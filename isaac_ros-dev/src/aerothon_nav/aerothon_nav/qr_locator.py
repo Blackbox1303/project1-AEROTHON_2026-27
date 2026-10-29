@@ -654,6 +654,11 @@ class QrLocator(Node):
                 return
             self.last[source] = now
             gray = to_gray(m)
+            if self.state == 'IDLE' and self.verify is None:
+                # no search yet (take-off, tunnels): nothing reads these boards - the HUD frame only. The full HD pass
+                # here held a whole core all through the tunnels (2026-10-29 sim)
+                self._update_hud_image(gray, {})
+                return
             if self.aruco is not None:
                 found = self.read_aruco(gray, source)
             elif self.qnet is not None and (source in ('fisheye_hd', 'nadir_hd') or not self.g('hd_topic')):

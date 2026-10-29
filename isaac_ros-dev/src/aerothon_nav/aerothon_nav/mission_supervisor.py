@@ -148,9 +148,13 @@ class MissionSupervisor(Node):
         p('exit_colour', 'green')    # banner of the tunnel to fly into from the zone (v3: green; v2: orange)
         p('overhead_banner', True)   # OVERHEAD_GREEN: the Arducam banner fix from takeoff_altitude before ALIGN_GREEN
         p('overhead_step', 2.0)      # m between look points
-        p('overhead_search_dist', 10.0)  # m out from the start QR along the search heading
+        p('overhead_search_dist', 2.0)   # m out from the start QR along the search heading: from 5 m the camera sees
+        #                              ~4-5 m ahead; further out the tunnel roofs begin (the sim's tunnel ceiling then
+        #                              pulled the drone down to 2.3 m at the mouth, 2026-10-29) - farther: D435 search
         p('overhead_lateral', [0.0, 4.0, -4.0])  # m: search lines beside the first (start side only)
-        p('overhead_look', 1.5)      # s hovering per look (the detector runs at 4 Hz, a track needs 2 hits)
+        p('overhead_look', 1.5)      # s hovering per look at least (the detector runs at 4 Hz, a track needs 2 hits) ...
+        p('overhead_frames', 4)      # ... and until it has processed this many frames (the loaded sim: ~1 per 8 s)
+        p('overhead_look_max', 40.0) # s (wall) per look at most
         p('overhead_banner_len', [2.0, 5.5])  # m: the floor banner (11.5 ft = 3.5 m) projected on the ground; the
         #                              top banner projected on the ground from 5 m comes out ~2.5 x longer
         p('overhead_hold_back', 1.5) # m on the start side of the banner where the drone looks from (never over the roof)
@@ -315,7 +319,7 @@ class MissionSupervisor(Node):
         self.px4_command = cli(CommandLong, '/mavros/cmd/command', callback_group=reentrant)
         self.entry_params = cli(SetParameters, '/entry_align/set_parameters')
         self.overhead_params = cli(SetParameters, '/overhead_banner/set_parameters')
-        self.overhead_dets = []
+        self.overhead_dets, self.overhead_frames = [], 0
         self.create_subscription(String, '/nav/banner/overhead', self.on_overhead, 10)
         self.corridor_params = cli(SetParameters, '/corridor_nav/set_parameters')
         self.explorer_params = cli(SetParameters, '/frontier_explorer/set_parameters')
@@ -597,8 +601,8 @@ class MissionSupervisor(Node):
         else:
             self.set_state('DROP_FAILED', reason=msg)
             return False
-        end = time.monotonic() + self.g('drop_wait')
-        while time.monotonic() < end:
+        end = self.clock_s() + self.g('drop_wait')       # node clock: sim time in the sim (t_min = real life)
+        while self.clock_s() < end:
             self.check(deadline)
             self.flight.hold(0.2, alt)
         try:
@@ -1150,7 +1154,9 @@ class MissionSupervisor(Node):
 
     def on_overhead(self, m):
         d = json.loads(m.data)
-        if d.get('colour') in ('green', 'red'):
+        if d.get('colour') == 'none':
+            self.overhead_frames += 1
+        elif d.get('colour') in ('green', 'red'):
             self.overhead_dets = (self.overhead_dets + [d])[-200:]
 
     @staticmethod
@@ -1164,14 +1170,15 @@ class MissionSupervisor(Node):
     def overhead_look(self):
         """Hover overhead_look s -> (green fix or None, red centres). A green fix: the floor banner's centre and the
         direction of its long edge (mod 180 deg) on the ground, from its corner rays."""
-        self.overhead_dets = []
-        end = time.monotonic() + self.g('overhead_look')
-        while time.monotonic() < end:
+        self.overhead_dets, self.overhead_frames = [], 0
+        t0, c0 = time.monotonic(), self.clock_s()
+        while (self.clock_s() - c0 < self.g('overhead_look') or self.overhead_frames < self.g('overhead_frames')) \
+                and time.monotonic() - t0 < self.g('overhead_look_max'):
             if self.abort_reason:
                 raise Abort(self.abort_reason)
             time.sleep(0.05)
         lo, hi = self.g('overhead_banner_len')
-        greens, reds = [], []
+        greens, reds, seen = [], [], []
         for d in self.overhead_dets:
             c = self.ground(d['origin'], d['ray'])
             if c is None:
@@ -1181,14 +1188,18 @@ class MissionSupervisor(Node):
                 continue
             q = [self.ground(d['origin'], r) for r in d.get('corner_rays') or []]
             if len(q) != 4 or any(v is None for v in q):
+                seen.append(f'green@({c[0]:.1f},{c[1]:.1f}) corners {len(q)}')
                 continue
             edges = [q[(i + 1) % 4] - q[i] for i in range(4)]
             k = 0 if np.linalg.norm(edges[0]) + np.linalg.norm(edges[2]) >= \
                 np.linalg.norm(edges[1]) + np.linalg.norm(edges[3]) else 1
             e = edges[k] - edges[k + 2]                   # the two long edges run opposite ways round the quad
             length = np.linalg.norm(e) / 2
+            seen.append(f'green@({c[0]:.1f},{c[1]:.1f}) {length:.1f}m')
             if lo <= length <= hi:
                 greens.append((d['score'], c, math.atan2(e[1], e[0]), length))
+        self.get_logger().info(f'overhead look: {self.overhead_frames} frames, {len(reds)} red, '
+                               f'green {seen[:6]}')
         if not greens:
             return None, reds
         best = max(greens, key=lambda g: g[0])
@@ -1485,8 +1496,8 @@ class MissionSupervisor(Node):
                     self.target_fine = None                  # reads from the drop height only
                     self.fly(tx, ty, self.g('deliver_altitude'), deadline, vmax=0.5, tol=self.g('deliver_tol'))
                     self.refine_over_target(tx, ty, deadline)
-                    hold_end = time.monotonic() + self.g('deliver_hold')
-                    while time.monotonic() < hold_end:
+                    hold_end = self.clock_s() + self.g('deliver_hold')   # node clock (sim time in the sim)
+                    while self.clock_s() < hold_end:
                         self.check(deadline)
                         self.flight.hold(0.2, self.g('deliver_altitude'))
                     released = self.drop(deadline)
@@ -1532,8 +1543,8 @@ class MissionSupervisor(Node):
         """At the drop height: wait for qr_locator's fine fix (reads from here, hovering: no motion lag, twice the
         resolution of 10 m) and re-centre on it. No fix in fine_wait: drop at the 10 m fix (logged)."""
         alt = self.g('deliver_altitude')
-        end = time.monotonic() + self.g('fine_wait')
-        while time.monotonic() < end:
+        end = self.clock_s() + self.g('fine_wait')       # node clock (sim time in the sim)
+        while self.clock_s() < end:
             self.check(deadline)
             f = self.target_fine
             if f and f['n'] >= self.g('fine_min_reads'):

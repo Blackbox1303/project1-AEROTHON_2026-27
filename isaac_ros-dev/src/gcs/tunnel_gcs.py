@@ -37,6 +37,9 @@ DATA = WS / 'runs/gcs'
 HERE = Path(__file__).resolve().parent
 LAUNCH_ALL = WS / 'src/launch_all'
 
+# the real drone's D435 is mounted UPSIDE DOWN (lens forward, 180 deg roll - rig.yaml): its views are turned upright for
+# display only; the nodes keep the raw image (the rig TF already accounts for the roll). --no-d435-flip: the sim's D435
+D435_FLIP = True
 CAMERAS = {
     'depth': '/camera/depth/image_rect_raw',
     'color': '/camera/color/image_raw',
@@ -464,6 +467,8 @@ class Ros(threading.Thread):
                 img = np.frombuffer(m.data, np.uint8).reshape(m.height, m.width, -1)[..., :3].copy()
                 if m.encoding == 'rgb8':
                     img = img[..., ::-1]
+            if D435_FLIP:                                 # every view here is the D435's (or drawn on it)
+                img = cv2.rotate(img, cv2.ROTATE_180)
             scale = 640 / max(img.shape[1], 1)
             if scale < 1.0:
                 img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
@@ -1177,7 +1182,11 @@ def main():
     ap = argparse.ArgumentParser()
     # 8093: 8091 is the mission stack's QR HUD (qr_locator hud_port), which runs at the same time
     ap.add_argument('--port', type=int, default=8093)
+    ap.add_argument('--no-d435-flip', dest='d435_flip', action='store_false',
+                    help='show the D435 views as they come (the sim; the real one is mounted upside down)')
     args = ap.parse_args()
+    global D435_FLIP
+    D435_FLIP = args.d435_flip
     DATA.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault('FASTRTPS_DEFAULT_PROFILES_FILE', str(WS / 'fastdds_udp.xml'))
     ROS = Ros()

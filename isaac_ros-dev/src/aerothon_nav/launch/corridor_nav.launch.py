@@ -76,7 +76,8 @@ def generate_launch_description():
         # from 5 m, red = the other tunnel): both corridor implementations; idle until the supervisor sets active
         Node(package='drone_qr_detector', executable='banner_node', name='overhead_banner', output='screen',
              parameters=[{'use_sim_time': sim, 'with_letters': sim, 'out_topic': '/nav/banner/overhead',
-                          'active': False, 'rate_hz': 4.0}]),
+                          'active': False, 'heartbeat': True, 'rate_hz': 4.0, 'ground_suppress': True,
+                          'zoom': 0.5}]),
         Node(package='aerothon_nav', executable='entry_align', output='screen', condition=ours,
              parameters=[{'use_sim_time': sim}, course_file]),
         # 2D SLAM of the corridors on the levelled D435 scan -> /map (corridor Nav2 global costmap static layer)

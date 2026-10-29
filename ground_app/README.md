@@ -12,6 +12,15 @@ The AeroTHON **ground apps** in one self-contained folder, installable on any x8
 | **Sim testing: the Jetson** | `aerothon sim aruco` / `qr` | the Jetson (opened here by Ethernet cable) | Lab tests: the Jetson's full dashboard with Sim (Gazebo), Offboard Jetson, Real drone, Open Gazebo and every segment. ArUco = 8084, QR = 8080. |
 | **Switcher** | `aerothon switcher` | this computer | One page, http://127.0.0.1:8079, with a button for each app above (ArUco and QR) and Stop: switch without starting each app yourself. |
 
+**Course changes (2026-10-28), in every app:** the geofence is now GPS slots **Arena (4) + QR area (4) + Extra (2)**
+– the organisers' 6 points are either the arena or the QR area, the other 2 go in Extra (shown only). Arena only: the
+QR area's front wall is the entry tunnel's exit line (onboard / sim: found in flight; offboard: the line through the
+take-off point). The dashboard's **Course** block holds the tunnel width / height / max height inside / length / gap and
+the QR-area width (defaults 3.5 m, 10 ft, 8 ft, 10 m, 0 m, 30 m – edit when the organisers change them); Save + Apply
+sends all of it over the radio. Once in the QR area the drone stays inside it until the exit tunnel. A board that won't
+decode: decoder settings retried 5 frames → its image compared with the start QR's → only then 0.5 m lower (not
+below 5 m) and again. The offboard page has the same GPS slots (Apply GPS QR area).
+
 Other commands: `aerothon stop` (close the running app), `aerothon status`, `aerothon log` (follow its log).
 
 ## Install on another computer
