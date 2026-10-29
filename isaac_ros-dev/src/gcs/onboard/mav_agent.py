@@ -13,6 +13,9 @@ MAVROS is 191) on mavlink-router's agent endpoint (UDP 14660: router/sim.conf, o
                 saved + applied on the onboard dashboard (no cable / Wi-Fi to the Jetson, user 2026-10-28)
               10 search height trim (param2: the step in m, e.g. -0.5): in flight too - the explorer flies its search
                  height + the trim at once, never below its alt_min (user, 2026-10-28)
+              11 FIELD TEST (props off, carried by hand; gcs/field_test): param2 = its code (field_proto.CODES: 1 start
+                 / 2 stop = field_test.sh, the rest -> field_vision's /api/cmd), param3 its argument, param4 a press
+                 number. While it runs: TUNNEL 32820 its guidance ~1 Hz + STATUSTEXT 'FT <result / event>'
             -> the onboard dashboard's REST API (http://127.0.0.1:8080/api/...: its preflight gate, geofence check and
             stack logic apply unchanged) -> COMMAND_ACK (ACCEPTED / FAILED) + STATUSTEXT 'AGT: <its message>'
   status    TUNNEL (payload_type 32800, 128 B JSON) every status_period s: {p: stack phase, md: sim|real, s: FSM state,
@@ -45,7 +48,10 @@ from pymavlink import mavutil  # noqa: E402
 COMP = 194                       # MAV_COMP_ID_ONBOARD_COMPUTER2
 CMD = 31010                      # MAV_CMD_USER_1
 ACTIONS = {1: 'launch', 2: 'stop', 3: 'full', 4: 'delivery', 5: 'abort', 6: 'status', 7: 'segment', 8: 'operator',
-           9: 'geofence', 10: 'alt_trim'}
+           9: 'geofence', 10: 'alt_trim', 11: 'field'}
+FIELD_SH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'field_test', 'field_test.sh')
+FIELD_URL = 'http://127.0.0.1:8097'   # field_test/field_vision.py
+T_FIELD = 32820                  # out: the field test's guidance (field_test/field_proto.py)
 SEGMENTS = {1: 'full', 2: 'qr', 3: 'tunnel', 4: 'qr_drop'}   # action 7, param2 (the 8080 page in --radio mode)
 T_STATUS, T_DETAIL, T_VIO, T_BOARD = 32800, 32801, 32802, 32803
 T_GEOFENCE = 32810               # in: the radio page's geofence corners (action 9)
@@ -83,12 +89,14 @@ class Agent:
         self.gf_chunks = {}          # transfer id -> {chunk index: bytes} (TUNNEL 32810)
         self.board_rr = 0            # round-robin index of the periodic resend
         self.bytes_out = {}          # packet type -> bytes sent (the radio load, printed every minute)
+        self.field_on, self.field_n = False, None   # the field test answering; its last event relayed
 
     # ---- MAVLink out
     def text(self, msg, severity=6):
         """STATUSTEXT, chunked (MAVLink 2: 50 chars a chunk, same id)."""
         b = msg.encode()[:200]
-        mid = int(time.time() * 10) % 65535 + 1
+        self.text_id = getattr(self, 'text_id', int(time.time()) % 60000) % 65534 + 1   # unique: several in one tick
+        mid = self.text_id
         for k in range(0, max(1, len(b)), 50):
             self.mav.mav.statustext_send(severity, b[k:k + 50].ljust(50, b'\0'), mid, k // 50)
 
@@ -198,7 +206,57 @@ class Agent:
             return await self.apply_geofence(int(p2), int(p3), int(p4))
         if action == 'alt_trim':
             return await self.api('alt_trim', {'delta': round(float(p2), 2)})
+        if action == 'field':
+            return await self.field(int(p2), float(p3))
         return False, 'unknown action'
+
+    # ---- the field test (gcs/field_test): the radio's half
+    async def field(self, code, arg):
+        if code in (1, 2):                            # start / stop: the cameras + field_vision + field_link
+            try:
+                pr = await asyncio.create_subprocess_exec('bash', FIELD_SH, 'start' if code == 1 else 'stop',
+                                                          stdout=asyncio.subprocess.PIPE,
+                                                          stderr=asyncio.subprocess.STDOUT)
+                out, _ = await asyncio.wait_for(pr.communicate(), 120)
+            except Exception as e:
+                return False, f'field_test.sh: {e}'
+            lines = [ln for ln in out.decode(errors='replace').splitlines() if ln.strip()]
+            self.field_on, self.field_n = code == 1 and pr.returncode == 0, None
+            return pr.returncode == 0, (lines[-1] if lines else '')[:150]
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.post(f'{FIELD_URL}/api/cmd', json={'code': code, 'arg': arg},
+                                  timeout=aiohttp.ClientTimeout(total=60)) as r:
+                    d = await r.json()
+                    self.field_on = True
+                    return bool(d.get('ok')), str(d.get('message', ''))[:150]
+        except Exception as e:
+            return False, f'field test not running ({type(e).__name__}): field code 1 starts it'
+
+    async def field_loop(self):
+        """While the field test answers: its guidance as TUNNEL 32820 every second, its events as STATUSTEXT."""
+        n_probe = 0
+        while True:
+            await asyncio.sleep(1.0)
+            n_probe += 1
+            if not self.field_on and n_probe % 10:    # not running: look every 10 s (started by hand on the Jetson)
+                continue
+            try:
+                async with aiohttp.ClientSession() as s:
+                    async with s.get(f'{FIELD_URL}/api/radio?since={self.field_n or 0}',
+                                     timeout=aiohttp.ClientTimeout(total=2)) as r:
+                        d = await r.json()
+            except Exception:
+                self.field_on = False
+                continue
+            self.field_on = True
+            if self.field_n is None:                  # first contact: from now on, not its whole history
+                self.field_n = d.get('n', 0)
+                continue
+            self.tunnel(T_FIELD, d['status'])
+            for e in d.get('events', [])[-3:]:       # <= 3 a second on the radio
+                self.text(f'FT {e["text"]}', 5 if 'MATCH' in e['text'] else 6)
+            self.field_n = d.get('n', self.field_n)
 
     # ---- status
     def summary(self):
@@ -270,7 +328,7 @@ class Agent:
             # (a geofence keyed by its transfer id: a new Save + Apply after a lost chunk must run)
             # (a height trim keyed by its press number: two quick presses are two steps, a resent one is one)
             key = (m.get_srcSystem(), m.get_srcComponent(), action,
-                   int(m.param4) if action == 'geofence' else int(m.param3) if action == 'alt_trim' else 0)
+                   int(m.param4) if action in ('geofence', 'field') else int(m.param3) if action == 'alt_trim' else 0)
             if action is None:
                 self.mav.mav.command_ack_send(CMD, mavutil.mavlink.MAV_RESULT_UNSUPPORTED, 0, 0,
                                               m.get_srcSystem(), m.get_srcComponent())
@@ -312,7 +370,7 @@ class Agent:
                     self.resend_board()
                     t_bd = now
             if now - t_load >= 60.0:                  # what this agent puts on the radio, per packet type
-                names = {T_STATUS: 'status', T_DETAIL: 'detail', T_VIO: 'vio', T_BOARD: 'boards'}
+                names = {T_STATUS: 'status', T_DETAIL: 'detail', T_VIO: 'vio', T_BOARD: 'boards', T_FIELD: 'field'}
                 print('radio load B/s: ' + ', '.join(f'{names[k]} {v / (now - t_load):.0f}'
                                                     for k, v in sorted(self.bytes_out.items())), flush=True)
                 self.bytes_out, t_load = {}, now
@@ -322,7 +380,7 @@ class Agent:
     async def main(self):
         print(f'mav_agent: {self.link} ({"USB port 2, the split" if self.link.startswith("/dev/") else "via the router"}) as 1/{COMP}, dashboard {self.a.dashboard}; periods status '
               f'{self.a.status_period} s, vio {self.a.vio_period} s, boards {self.a.board_period} s', flush=True)
-        await asyncio.gather(self.ws_loop(), self.mav_loop(), self.tick_loop())
+        await asyncio.gather(self.ws_loop(), self.mav_loop(), self.tick_loop(), self.field_loop())
 
 
 def main():

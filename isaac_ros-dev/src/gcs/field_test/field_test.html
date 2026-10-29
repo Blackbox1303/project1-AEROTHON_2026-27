@@ -1,0 +1,218 @@
+<!doctype html><html><head><meta charset=utf-8><title>AeroTHON field test</title>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<style>
+:root{--bg:#f3f5f6;--panel:#fff;--ink:#18212b;--muted:#5a6876;--line:#d6dde3;--accent:#c2410c;--ok:#2f7d4f;--bad:#b42318;--warn:#a15c07}
+@media (prefers-color-scheme:dark){:root{--bg:#11171c;--panel:#182129;--ink:#e3e9ee;--muted:#9aa8b4;--line:#2b3844;--accent:#f0803c;--ok:#6cc890;--bad:#f97066;--warn:#f5b041}}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,sans-serif;margin:0;padding:12px}
+main{max-width:1400px;margin:0 auto;display:flex;flex-direction:column;gap:12px}
+h1{margin:0;font-size:20px} h2{margin:0 0 6px;font-size:14px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+.bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.pill{border:1px solid var(--line);border-radius:999px;padding:2px 10px;font-size:12px;background:var(--panel)}
+.pill.ok{color:var(--ok);border-color:var(--ok)} .pill.bad{color:var(--bad);border-color:var(--bad)} .pill.warn{color:var(--warn);border-color:var(--warn)}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px}
+.cols{display:grid;grid-template-columns:minmax(320px,1.1fr) minmax(320px,1fr);gap:12px}
+@media (max-width:900px){.cols{grid-template-columns:1fr}}
+#say{font-size:24px;font-weight:700;line-height:1.25;min-height:2.6em}
+#sub{color:var(--muted);font-family:ui-monospace,monospace;font-size:13px}
+.guide{display:grid;grid-template-columns:180px 1fr;gap:14px;align-items:center}
+.row{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:4px 0}
+button{font:600 13px system-ui;border:1px solid var(--line);background:var(--bg);color:var(--ink);border-radius:7px;padding:7px 10px;cursor:pointer}
+button.go{background:var(--accent);border-color:var(--accent);color:#fff} button.stop{border-color:var(--bad);color:var(--bad)}
+button:disabled{opacity:.45;cursor:default}
+input{font:13px ui-monospace,monospace;padding:4px 6px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);width:70px}
+input.wide{width:220px}
+label{font-size:13px;color:var(--muted)}
+.views{display:grid;grid-template-columns:2fr 1fr;gap:8px} .views img{width:100%;border-radius:6px;background:#000;min-height:80px;display:block}
+.vcol{display:flex;flex-direction:column;gap:8px}
+#log{font:12px ui-monospace,monospace;max-height:320px;overflow:auto;white-space:pre-wrap}
+#log div{border-bottom:1px solid var(--line);padding:2px 0}
+#msg{font:13px ui-monospace,monospace;white-space:pre-wrap;min-height:1.4em}
+#map{width:100%;height:260px;background:var(--bg);border-radius:6px}
+.legend{font-size:12px;color:var(--muted)}
+.hide{display:none!important}
+</style></head><body><main>
+<div class=bar><h1>AeroTHON field test</h1><span class="pill bad">PROPS OFF - carried by hand</span>
+ <span id=link class=pill>-</span><span id=cams class=pill>-</span><span id=fcp class=pill>-</span><span id=mot class=pill>-</span></div>
+
+<div class=cols>
+ <div class=card>
+  <h2>Guidance</h2>
+  <div class=guide>
+   <svg id=compass viewBox="-100 -100 200 200" width=180 height=180>
+    <circle r=88 fill=none stroke="currentColor" stroke-opacity=.25 stroke-width=2 />
+    <text y=-70 text-anchor=middle font-size=13 fill="currentColor" opacity=.6>NOSE</text>
+    <g fill="currentColor" opacity=.5><rect x=-14 y=-22 width=28 height=44 rx=6 /></g>
+    <g id=mFR><circle cx=34 cy=-34 r=13 /></g><g id=mRR><circle cx=34 cy=34 r=13 /></g>
+    <g id=mRL><circle cx=-34 cy=34 r=13 /></g><g id=mFL><circle cx=-34 cy=-34 r=13 /></g>
+    <g id=goArrow><line x1=0 y1=0 x2=0 y2=-78 stroke="var(--ok)" stroke-width=7 stroke-linecap=round />
+      <polygon points="0,-95 -12,-72 12,-72" fill="var(--ok)" /></g>
+    <path id=yawArc fill=none stroke="var(--accent)" stroke-width=7 stroke-linecap=round />
+    <polygon id=yawHead fill="var(--accent)" />
+    <text id=hgt x=0 y=8 text-anchor=middle font-size=26 font-weight=700 fill="var(--accent)"></text>
+   </svg>
+   <div><div id=say>-</div><div id=sub></div><div id=hsay style="font-weight:600;margin-top:6px"></div>
+     <div id=mcue class=legend></div></div>
+  </div>
+  <div class=legend style="margin-top:8px">Motor cues (props OFF): the <b>spinning side</b> is the way to walk;
+   a <b>chase round the frame</b> clockwise = yaw right, anticlockwise = yaw left; <b>criss-cross</b> = only the height
+   changes; speed = height: <b>fast up</b>, medium keep, <b>slow down</b> (5 m only to lower the payload, scanning never
+   below 5.5 m). Nothing spinning = stand still.</div>
+ </div>
+
+ <div class=card>
+  <h2>Controls</h2>
+  <div class=row><button class=go onclick="cmd('start')">Start on the Jetson</button><button class=stop onclick="cmd('stop')">Stop it</button>
+   <button onclick="cmd('status')">Status</button></div>
+  <div class=row><b style="width:84px">Scan</b><button onclick="cmd('detect_qr')">Detect QR codes</button><button onclick="cmd('scan_qr')">Scan QR code</button>
+   <button onclick="cmd('start_qr')">Read START QR</button></div>
+  <div class=row><b style="width:84px"></b><button onclick="cmd('red')">Red zone</button><button onclick="cmd('green')">Green banner</button>
+   <button onclick="cmd('blue')">Blue banner</button><button onclick="cmd('obstacle')">Obstacles</button></div>
+  <div class=row><b style="width:84px">Walk</b><button class=go onclick="cmd('walk_qr')">QR area search</button><button class=go onclick="cmd('walk_obstacle')">Obstacle nav</button>
+   <button class=stop onclick="cmd('walk_stop')">Stop walk</button><button onclick="cmd('next')">Skip board</button></div>
+  <div class=row><b style="width:84px">Motors</b><label><input type=checkbox id=props style="width:auto"> props are OFF</label>
+   <button id=mon onclick="motors(1)">Motor cues ON</button><button class=stop onclick="motors(0)">OFF</button>
+   <span class=cable><label>spin % low <input id=lvl_low> mid <input id=lvl_mid> high <input id=lvl_high></label><button onclick=levels()>set</button></span></div>
+  <div class=row><b style="width:84px">Heights</b><label>virtual <input id=valt value=10></label><button onclick="num('virtual_alt','valt')">set</button>
+   <label>carried at <input id=carry value=1.2></label><button onclick="num('carry_height','carry')">set</button>
+   <label>lanes <input id=lane value=3></label><button onclick="num('lane_spacing','lane')">set</button></div>
+  <div class=row><b style="width:84px">QR area</b><button onclick="cmd('corner',1)">corner 1 here</button><button onclick="cmd('corner',2)">2</button>
+   <button onclick="cmd('corner',3)">3</button><button onclick="cmd('corner',4)">4</button><button onclick="cmd('corner',0)">clear</button>
+   <button onclick="cmd('area_geofence')">from the geofence</button></div>
+  <div class="row cable"><b style="width:84px">Start QR</b><input id=sq class=wide placeholder="type the payload (cable only)"><button onclick="typed()">set</button>
+   <span id=sqnow class=legend></span></div>
+  <div id=msg></div>
+ </div>
+</div>
+
+<div class="cols cable">
+ <div class=card><h2>Views <span class=legend>(Arducam straight down: top = nose; D435 forward)</span></h2>
+  <div class=views><img id=v_arducam alt="Arducam"><div class=vcol><img id=v_color alt="D435 colour"><img id=v_depth alt="D435 depth"></div></div></div>
+ <div class=card><h2>QR area <span id=areainfo class=legend></span></h2><svg id=map></svg></div>
+</div>
+<div id=radionote class="card hide">Telemetry radio only: no video. The answers (what the QR says, match or not, red /
+ banners / obstacles) and the guidance come down as text; the Pixhawk's height, GPS and heading from its telemetry.</div>
+
+<div class=card><h2>Results and events</h2><div id=log></div></div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let link = 'cable', busy = false, lastEv = '';
+const show = (el, on) => el.classList.toggle('hide', !on);
+
+async function post(path, body) {
+  const r = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+  return r.json();
+}
+async function cmd(name, arg, text) {
+  if (busy && !['walk_stop','motors'].includes(name)) { $('msg').textContent = 'busy with the last command ...'; return; }
+  busy = true; $('msg').textContent = name + ' ...';
+  try { const d = await post('api/cmd', {name, arg: arg ?? 0, text});
+        $('msg').textContent = (d.ok ? 'OK  ' : 'FAILED  ') + (d.message || ''); }
+  catch (e) { $('msg').textContent = 'FAILED  ' + e; }
+  busy = false;
+}
+function motors(on) {
+  if (on && !$('props').checked) { $('msg').textContent = 'tick "props are OFF" first'; return; }
+  cmd('motors', on);
+}
+function num(name, id) { cmd(name, parseFloat($(id).value)); }
+function typed() { const v = $('sq').value.trim(); if (v) cmd('start_qr', 0, v); }
+async function levels() {
+  const d = await post('api/levels', {low: +$('lvl_low').value, mid: +$('lvl_mid').value, high: +$('lvl_high').value});
+  $('msg').textContent = (d.ok ? 'OK  ' : 'FAILED  ') + d.message;
+}
+
+const MDEG = {FR:45, RR:135, RL:225, FL:315}, CHASE = {cw:['FR','RR','RL','FL'], ccw:['FL','RL','RR','FR'], all:['FR','RL','FL','RR']};
+let tick = 0;
+function drawGuide(g, motorsOn) {
+  tick++;
+  $('say').textContent = g ? g.say : 'no guidance';
+  if (!g) return;
+  $('sub').textContent = `${g.mode} / ${g.state}` + (g.lane ? `  lane ${g.lane}/${g.lanes}` : '');
+  $('hsay').textContent = g.height_say || (g.height ? (g.height > 0 ? 'height UP' : 'height DOWN') : '');
+  $('hgt').textContent = g.height > 0 ? '▲' : g.height < 0 ? '▼' : '';
+  const go = g.go, yaw = g.yaw;
+  const yawing = yaw != null && Math.abs(yaw) >= 35;
+  show($('goArrow'), go != null && !yawing);
+  if (go != null) $('goArrow').setAttribute('transform', `rotate(${go})`);
+  if (yawing) {
+    const s = Math.sign(yaw), a = Math.min(Math.abs(yaw), 170) * Math.PI / 180, r = 62;
+    const x = s * r * Math.sin(a), y = -r * Math.cos(a);
+    $('yawArc').setAttribute('d', `M0,${-r} A${r},${r} 0 ${a > Math.PI ? 1 : 0},${s > 0 ? 1 : 0} ${x.toFixed(1)},${y.toFixed(1)}`);
+    const tx = Math.cos(a) * s, ty = Math.sin(a);           // the tangent, along the turn
+    $('yawHead').setAttribute('points', `${x + 14 * tx},${y + 14 * ty} ${x - 9 * Math.sin(a) * s},${y + 9 * Math.cos(a)} ${x + 9 * Math.sin(a) * s},${y - 9 * Math.cos(a)}`);
+  }
+  show($('yawArc'), yawing); show($('yawHead'), yawing);
+  const m = g.motor || {pattern:'off'};
+  let lit = [];
+  if (m.pattern === 'dir') lit = Object.keys(MDEG).filter(k => Math.abs(((m.deg - MDEG[k] + 540) % 360) - 180) <= 67.5);
+  else if (CHASE[m.pattern]) lit = [CHASE[m.pattern][tick % 4]];
+  for (const k of Object.keys(MDEG)) $('m' + k).setAttribute('fill', lit.includes(k) ? (motorsOn ? 'var(--accent)' : 'var(--muted)') : 'currentColor');
+  for (const k of Object.keys(MDEG)) $('m' + k).setAttribute('fill-opacity', lit.includes(k) ? 1 : .18);
+  const what = {off:'stand still', dir:'walk towards the spinning side', cw:'chase clockwise: yaw right', ccw:'chase anticlockwise: yaw left', all:'criss-cross: height only'}[m.pattern] || m.pattern;
+  $('mcue').textContent = `motor cue: ${what}, ${ {low:'slow (height down)', mid:'medium (keep height)', high:'fast (height up)'}[m.level] || ''}` + (motorsOn ? '' : '  (motors off: shown here only)');
+}
+
+function drawMap(s) {
+  const svg = $('map'); svg.innerHTML = '';
+  const pts = (s.area || []).concat(s.lanes || []).concat(s.pose ? [[s.pose[0], s.pose[1]]] : []);
+  if (!pts.length) { $('areainfo').textContent = 'no QR area: capture 4 corners or use the geofence'; return; }
+  const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+  const x0 = Math.min(...xs) - 2, x1 = Math.max(...xs) + 2, y0 = Math.min(...ys) - 2, y1 = Math.max(...ys) + 2;
+  svg.setAttribute('viewBox', `${x0} ${-y1} ${x1 - x0} ${y1 - y0}`);
+  const P = p => `${p[0]},${-p[1]}`, w = (x1 - x0) / 300;
+  let h = '';
+  if (s.area) h += `<polygon points="${s.area.map(P).join(' ')}" fill="var(--accent)" fill-opacity=.08 stroke="var(--accent)" stroke-width=${2 * w} />`;
+  if (s.lanes && s.lanes.length) h += `<polyline points="${s.lanes.map(P).join(' ')}" fill=none stroke="currentColor" stroke-opacity=.35 stroke-width=${w} />`;
+  if (s.lanes && s.lane_i < s.lanes.length) h += `<circle cx=${s.lanes[s.lane_i][0]} cy=${-s.lanes[s.lane_i][1]} r=${5 * w} fill="var(--ok)" />`;
+  for (const d of s.done || []) if (d.xy) h += `<circle cx=${d.xy[0]} cy=${-d.xy[1]} r=${4 * w} fill="${d.verdict === 'match' ? 'var(--ok)' : 'var(--muted)'}"><title>${d.payload ?? ''} ${d.verdict}</title></circle>`;
+  if (s.pose) { const [x, y, hd] = s.pose;
+    h += `<g transform="translate(${x},${-y}) rotate(${hd})"><polygon points="0,${-9 * w} ${-5 * w},${6 * w} ${5 * w},${6 * w}" fill="var(--accent)" /></g>`; }
+  svg.innerHTML = h;
+  $('areainfo').textContent = s.area ? `${(s.lanes || []).length / 2} lanes` + (s.pose ? '' : ' - no GPS position') : 'corners: ' + (s.corners || []).map(c => c ? '✓' : '·').join(' ');
+}
+
+function pill(id, text, cls) { const e = $(id); e.textContent = text; e.className = 'pill ' + (cls || ''); }
+
+async function poll() {
+  try {
+    const s = await (await fetch('api/state')).json();
+    link = s.link || 'cable';
+    document.querySelectorAll('.cable').forEach(e => show(e, link !== 'radio'));
+    show($('radionote'), link === 'radio');
+    if (link === 'radio') {
+      const a = s.ages || {};
+      pill('link', s.radio_err ? 'radio: ' + s.radio_err : `radio  agent ${a.agent ?? '-'} s  field ${a.field ?? '-'} s`,
+           s.radio_err ? 'bad' : (a.field != null && a.field < 4) ? 'ok' : 'warn');
+      pill('cams', 'cameras: on the Jetson (no video)', '');
+    } else {
+      pill('link', s.up === false ? 'Jetson: ' + (s.error || 'down') + ' - press Start' : 'cable: Jetson up', s.up === false ? 'bad' : 'ok');
+      if (s.cams) pill('cams', `Arducam ${s.cams.arducam.startsWith('ok') ? 'ok' : s.cams.arducam} | D435 ${s.cams.d435}`,
+                       s.cams.arducam.startsWith('ok') && s.cams.d435 === 'ok' ? 'ok' : 'warn');
+    }
+    const f = s.fc || {};
+    if (f.link && f.link !== 'ok') pill('fcp', 'Pixhawk: ' + f.link, 'bad');
+    else pill('fcp', `Pixhawk ${f.armed ? 'ARMED' : 'disarmed'}  GPS fix ${f.fix ?? '-'} (${f.sats ?? '-'} sats)  height ${f.alt_rel ?? '-'} m  hdg ${f.hdg ?? '-'}°` + (f.range != null ? `  range ${f.range} m` : ''),
+              f.armed ? 'bad' : (f.fix >= 3 ? 'ok' : 'warn'));
+    pill('mot', 'motor cues ' + (s.motors_on ? 'ON' : 'off') + (f.motor_msg ? ' - ' + f.motor_msg : ''), s.motors_on ? 'warn' : '');
+    drawGuide(s.guide, s.motors_on);
+    if (link !== 'radio') { drawMap(s);
+      if (s.levels && document.activeElement.tagName !== 'INPUT') for (const k of ['low','mid','high']) $('lvl_' + k).value = s.levels[k];
+      if (s.settings && document.activeElement.tagName !== 'INPUT') { $('carry').value = s.settings.carry_height; $('lane').value = s.settings.lane_spacing; $('valt').value = s.settings.search_alt; }
+      $('sqnow').textContent = s.start_qr ? 'now: ' + s.start_qr : ''; }
+    const ev = (s.events || []).slice().reverse();
+    const key = ev.length ? ev[0].t + ev[0].text : '';
+    if (key !== lastEv) { lastEv = key; $('log').innerHTML = ev.map(e => `<div>${e.t}  ${e.text.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</div>`).join(''); }
+  } catch (e) { pill('link', 'this page\'s server: ' + e, 'bad'); }
+  setTimeout(poll, link === 'radio' ? 700 : 400);
+}
+function feed(name) {
+  const el = $('v_' + name);
+  const next = () => setTimeout(() => feed(name), link === 'radio' ? 3000 : (name === 'arducam' ? 150 : 250));
+  if (link === 'radio') { next(); return; }
+  const im = new Image(); im.onload = () => { el.src = im.src; next(); }; im.onerror = next;
+  im.src = `cam/${name}.jpg?${Date.now()}`;
+}
+poll(); feed('arducam'); feed('color'); feed('depth');
+</script></body></html>

@@ -59,6 +59,12 @@ Mode = Server
 Address = 0.0.0.0
 Port = 14551
 
+# gcs/field_test/field_link.py (the field test, props off: GPS / heading in, motor cues out)
+[UdpEndpoint field_test]
+Mode = Normal
+Address = 127.0.0.1
+Port = 14662
+
 # a stand-in for the radio, to test the Radio GCS on the Jetson itself: radio_gcs.py --radio udpin:0.0.0.0:14670
 [UdpEndpoint radio_test]
 Mode = Normal

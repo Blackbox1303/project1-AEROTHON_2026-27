@@ -36,7 +36,8 @@ parallel to the back wall (the drone is carried into the QR area). Routes never 
 DEEP READ (QR boards): a candidate still unread after the hover -> --verify-rounds frames of undistorted views (3 FOV)
 x the filter settings of aerothon_nav.qr_match, then its image vs the start QR's (stored at the start read; a start
 QR without data = qr_match.IMAGE_ONLY): match = the target, different = another board, unsure / not seen -> 0.5 m
-lower (not below --verify-floor) and again; the search height comes back afterwards.
+lower (not below --verify-floor, 5.5 m: 5 m is reached only to lower the payload) and again; the search height comes
+back afterwards.
 Usage:  vrx_explore.py --video /dev/video2 --link udpout:127.0.0.1:14551 [--alt 1.0] [--port 8094]
         (scripts/vrx_explore.sh starts it with the PX4 SIH SITL)
 """
@@ -334,7 +335,8 @@ class VrxExplore(base.VrxDeliverySystem):
         self.go_home = False
         self.in_flight = False
         self.drop = a.drop
-        self.deliver_alt = min(a.drop_alt, a.alt)
+        # QR area: 5 m (the drop height) is the lowest the drone goes, and only to lower the payload (user, 2026-10-30)
+        self.deliver_alt = a.drop_alt if a.marker == 'qr' else min(a.drop_alt, a.alt)
         self.start_qr = a.start_qr or None
         self.open_batch, self.batch_t = 0, None   # batch new candidates join; when the last one was started
         self.rejects, self.spins, self.spin_due = set(), [], None   # reject payloads; scan spots; a scan to do
@@ -1168,14 +1170,15 @@ def make_app(sc):
                 delta = float(body.get('delta'))
             except (TypeError, ValueError):
                 return ok(False, 'delta: metres, e.g. -0.5')
-            new = round(min(sc.a.alt + 3.0, max(sc.a.alt_min, sc.alt + delta)), 2)
+            lo = sc.a.alt_min if sc.a.marker == 'aruco' else max(sc.a.alt_min, sc.a.verify_floor)   # QR: above the drop
+            new = round(min(sc.a.alt + 3.0, max(lo, sc.alt + delta)), 2)
             with sc.lock:
                 sc.alt = new
                 if sc.mission_running and sc.offboard_active and sc.setpoint:
                     x, y, _, yaw = sc.setpoint
                     sc.setpoint = (x, y, new, yaw)        # hovering / scanning too, not only the next leg
             sc.log_mission('EXPLORE', event=f'search height {new:.1f} m (trim {new - sc.a.alt:+.1f} m)')
-            return ok(True, f'search height {new:.1f} m (trim {new - sc.a.alt:+.1f} m, min {sc.a.alt_min:.1f} m)')
+            return ok(True, f'search height {new:.1f} m (trim {new - sc.a.alt:+.1f} m, min {lo:.1f} m)')
         if what == 'zone':
             z = [float(v) for v in body.get('zone', [])]
             if len(z) != 4 or z[0] >= z[1] or z[2] >= z[3]:
@@ -1275,7 +1278,8 @@ def main():
                     help='QR: no deep read / image match / step down at an unread candidate')
     ap.add_argument('--verify-rounds', type=int, default=5, help='frames of the deep read')
     ap.add_argument('--verify-step', type=float, default=0.5, help='m lower per unsure deep read')
-    ap.add_argument('--verify-floor', type=float, default=5.0, help='m: the deep read never steps below this')
+    ap.add_argument('--verify-floor', type=float, default=5.5, help='m: the deep read never steps below this (QR: '
+                    'nor the height trim) - 5 m is the drop height, reached only to lower the payload')
     ap.add_argument('--match-hi', type=float, default=0.80, help='image match: >= this the start QR')
     ap.add_argument('--match-lo', type=float, default=0.50, help='image match: <= this another board')
     ap.add_argument('--qgc', default='127.0.0.1:14550')

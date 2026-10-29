@@ -83,7 +83,8 @@ class FrontierExplorer(Node):
         p = self.declare_parameter
         p('altitude', 10.0)          # m: = the supervisor's search_altitude
         p('alt_offset', 0.0)         # m: the operator's in-flight trim (dashboard / radio), + up / - down
-        p('alt_min', 1.5)            # m: the trimmed search height never goes below this
+        p('alt_min', 5.5)            # m: the trimmed search height never goes below this. QR area: 5 m is the DROP
+        #                              height only - scanning (search, trim, deep read) stays above it (user, 2026-10-30)
         p('clearance', 1.0)          # m from red / boundary cells (the map already has a 1.5 m red margin)
         p('edge_ignore', 1.0)        # m: unexplored cells this close to a red / boundary cell don't count - the drone
         #                              can't get there, so they never get explored and the frontiers beside them never
@@ -105,12 +106,13 @@ class FrontierExplorer(Node):
         p('cand_hover', 1.5)         # s over a candidate for qr_locator to decode it (3 Hz: ~4 tries)
         # DEEP READ (user, 2026-10-28): a candidate still unread after the hover -> qr_locator's deep read (decoder
         # settings x verify_rounds frames, then the image vs the start QR's); 'unsure' / 'unseen' -> verify_step m
-        # lower (the height trim, at once) and again, not below verify_floor (the drop height); the trim is undone
+        # lower (the height trim, at once) and again, not below verify_floor (just above the drop height: 5 m is
+        # reached only to lower the payload, user 2026-10-30); the trim is undone
         # when the candidate is settled. Only when that is exhausted: the look-round square below
         p('deep_read', True)
         p('verify_timeout', 30.0)    # s (wall) for one deep read answer
         p('verify_step', 0.5)        # m down per try
-        p('verify_floor', 5.0)       # m: no lower than this (= the supervisor's deliver_altitude)
+        p('verify_floor', 5.5)       # m: no lower than this (the supervisor's deliver_altitude 5 m is for the drop only)
         p('cand_reach', 1.2)         # m: a candidate this close counts as reached
         p('cand_verify_max', 12.0)   # s (sim / ROS time) from arriving over a candidate: hover + look-round, then it
         #                              is dropped - one false board (tunnel banner) cost 65 s of a 330 s search (2026-10-27)

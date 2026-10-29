@@ -63,6 +63,23 @@ KILL**. The onboard dashboard's preflight and geofence rules apply (set the geof
    preflight all green -> **▶ Start** (segment). Keep the RC transmitter in hand.
 6. **Stop stack** when done. Logs: `runs/real_drone_<date>/`.
 
+## Field test (props OFF, no course material)
+
+`field_test/`: the real sensors and the mission's decisions, with the drone carried by hand. On the Lenovo:
+`aerothon fieldtest cable` (Ethernet: live views) or `aerothon fieldtest radio` (the telemetry radio alone: text), page
+http://127.0.0.1:8096; **Start on the Jetson** runs `field_test/field_test.sh start` (cable: over ssh; radio: through
+`mav_agent`, action 11). By hand on the Jetson: `field_test/field_test.sh start | stop | status | log`, page :8097.
+
+| | |
+|---|---|
+| `field_vision.py` | dev container: Arducam (GStreamer) + D435 (the RealSense node, ROS topics) + the detectors (WeChat / zbar, the deep read and image match vs the start QR, the delivery_mapper red rule, banner_detector's rule, a depth grid) + the walk-throughs: QR area search (lanes over the 4 corners, over each board, read, match -> down to 5 m + payload, unsure -> 0.5 m lower, never below 5.5 m - a VIRTUAL height) and obstacle nav. HTTP :8097 |
+| `field_link.py` | Jetson host: the Pixhawk via the router's `field_test` endpoint (UDP 14662): GPS / heading / height in, MAV_CMD_DO_MOTOR_TEST out (one motor at a time; never armed): the spinning side = walk there, a chase = yaw, speed = height |
+| `field_ground.py` + `field_test.html` | the Lenovo's page (cable: proxies the Jetson; radio: COMMAND_LONG 31010 / 11 to the agent, TUNNEL 32820 + STATUSTEXT 'FT ...' back, QGC relayed) |
+| `field_proto.py` | the command codes / radio packet shared by all of them |
+
+Logs and saved state: `runs/field_test/` (events.log, start_qr.json, corners.json, vision / realsense / link logs).
+Not while a mission stack runs (the cameras); stop gives the Arducam back to the calibration page.
+
 ## Gazebo GUI on the Lenovo
 
 The Jetson runs Gazebo headless; the GUI runs on the Lenovo only (never on the Jetson: the helper refuses to run there).
