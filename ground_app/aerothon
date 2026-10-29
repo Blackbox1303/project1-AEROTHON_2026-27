@@ -89,16 +89,30 @@ launch() {   # launch <name> <url> <cmd...>: in the background, logged, remember
     [ -n "$NO_BROWSER" ] || (xdg-open "$url" >/dev/null 2>&1 &)
 }
 
-radio_check() { [ -e "${1%%:*}" ] || say "WARNING: ${1%%:*} not found - plug the ground radio in (ls /dev/ttyUSB* /dev/serial/by-id/)"; }
+# the ground SiK radio: the port given if it is there, else the one radio plugged in - SiK / FTDI / CP210x by its USB
+# id, else the only ttyUSB* / ttyACM* (a SiK shows as either). Prints DEV:BAUD (the given one if none found).
+find_radio() {
+    local dev=${1%%:*} baud=${1##*:} c
+    [ "$baud" = "$1" ] && baud=57600
+    if [ ! -e "$dev" ]; then
+        c=$(ls /dev/serial/by-id/ 2>/dev/null | grep -iE 'sik|3dr|rfd|radio|telem|ftdi|ft231|silicon_labs|cp210' \
+            | grep -viE 'ardupilot|pixhawk|px4|cube' | head -1)
+        if [ -n "$c" ]; then c=$(readlink -f "/dev/serial/by-id/$c")
+        else c=$(ls /dev/ttyUSB* /dev/ttyACM* 2>/dev/null); [ "$(echo "$c" | grep -c .)" = 1 ] || c=""; fi
+        [ -n "$c" ] && dev=$c
+    fi
+    echo "$dev:$baud"
+}
+radio_check() { [ -e "${1%%:*}" ] || say "WARNING: ${1%%:*} not found - plug the ground radio in (ls /dev/ttyUSB* /dev/ttyACM* /dev/serial/by-id/)"; }
 
 case "${1:-}" in
   onboard)
-    M=${2:-aruco}; DEV=${3:-/dev/ttyUSB0:57600}
+    M=${2:-aruco}; DEV=$(find_radio "${3:-/dev/ttyUSB0:57600}")
     pyenv; stop_ours; free_port 8080 || exit 1; radio_check "$DEV"
     say "onboard ($M boards): the dashboard on the radio $DEV - QGC: SiK auto-connect OFF, UDP 14550 ON"
     launch "onboard-$M" http://127.0.0.1:8080 python3 -s "$HERE/apps/dashboard/gcs_server.py" --radio "$DEV" --port 8080 --marker "$M" ;;
   offboard)
-    M=${2:-aruco}; DROP=${3:-drop}; DEV=${4:-/dev/ttyUSB0:57600}; VIDEO=${5:-}; TARGET=${6:-}
+    M=${2:-aruco}; DROP=${3:-drop}; DEV=$(find_radio "${4:-/dev/ttyUSB0:57600}"); VIDEO=${5:-}; TARGET=${6:-}
     ALT=1.0; [ "$M" = qr ] && ALT=10.0
     A=(--link "$DEV" --alt "$ALT" --marker "$M" --qgc 127.0.0.1:14550 --port 8094)
     [ "$DROP" = drop ] && A+=(--drop); [ -n "$VIDEO" ] && A+=(--video "$VIDEO"); [ -n "$TARGET" ] && A+=(--start-qr "$TARGET")
@@ -126,7 +140,7 @@ case "${1:-}" in
     L=${2:-cable}
     pyenv; stop_ours; free_port 8096 || exit 1
     if [ "$L" = radio ]; then
-        DEV=${3:-/dev/ttyUSB0:57600}; radio_check "$DEV"
+        DEV=$(find_radio "${3:-/dev/ttyUSB0:57600}"); radio_check "$DEV"
         say "field test over the radio $DEV (no video) - QGC: SiK auto-connect OFF, UDP 14550 ON. PROPS OFF."
         launch fieldtest-radio http://127.0.0.1:8096 python3 -s "$HERE/apps/fieldtest/field_ground.py" --radio "$DEV"
     else

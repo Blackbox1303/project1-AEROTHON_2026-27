@@ -67,7 +67,7 @@
   <span class="offonly"><select id="offlink" title="the command link: the bench ArduCopter SITL, or the SiK radio to the real drone">
     <option value="sitl">bench SITL</option><option value="/dev/ttyUSB0:57600">SiK radio /dev/ttyUSB0:57600</option></select>
     <input id="video" value="" placeholder="VRX /dev/videoN" size="13" title="the VRX receiver's USB video device; empty = pick it on the 8094 page (it never opens the D435 / CSI cameras - on this Jetson /dev/video1-5 are the RealSense)"></span>
-  <span class="realonly"><input id="link" value="/dev/ttyACM0:921600" size="20" title="the Pixhawk on the onboard Jetson: /dev/ttyACM0:921600 (USB), /dev/ttyTHS1:921600 (TELEM2 on the Jetson UART), udp:14555 (a MAVLink UDP stream)"></span>
+  <span class="realonly"><input id="link" value="/dev/ttyACM0:921600" size="20" title="the Pixhawk on the onboard Jetson: /dev/ttyACM0:921600 (USB), udp:14555 (a MAVLink UDP stream). The SiK radio is on the Pixhawk's GPS2 port"></span>
   <select id="world" class="simonly" title="sim world"><option>competition</option><option>comp_far1</option></select>
   <span class="pill radioonly" title="the final flight: this PC on the SiK radio; QGC gets every packet too">📻 RADIO - onboard Jetson flies</span>
   <label class="pill noradio"><input type="checkbox" id="usegf"> use my geofence</label>

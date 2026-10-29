@@ -85,10 +85,12 @@ class Radio:
                 self.conn = self.mavutil.mavlink_connection(self.dev, source_system=255, source_component=190)
             else:
                 path, _, baud = self.dev.partition(':')
+                path = fp.find_radio(path) or path               # not there: the one radio plugged in
                 if not Path(path).exists():
-                    raise OSError(f'{path} not found (radio plugged in? ls /dev/serial/by-id/)')
+                    raise OSError(f'{path} not found (radio plugged in? ls /dev/ttyUSB* /dev/ttyACM* /dev/serial/by-id/)')
                 self.conn = self.mavutil.mavlink_connection(path, baud=int(baud or 57600), source_system=255,
                                                             source_component=190)
+                self.dev = f'{path}:{baud or 57600}'
             self.err = None
         except Exception as e:
             self.conn = None
@@ -321,7 +323,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument('--jetson', help='cable: the Jetson field test, e.g. http://10.42.0.247:8097')
-    g.add_argument('--radio', help='radio: the SiK radio, e.g. /dev/ttyUSB0:57600')
+    g.add_argument('--radio', help='radio: the SiK radio, e.g. /dev/ttyUSB0:57600 (not there: the one radio plugged in)')
     ap.add_argument('--jetson-user', default=os.environ.get('JETSON_USER', 'szyfrowac'))
     ap.add_argument('--qgc', default='127.0.0.1:14550', help="--radio: QGroundControl's UDP port")
     ap.add_argument('--port', type=int, default=fp.PORT_GROUND)

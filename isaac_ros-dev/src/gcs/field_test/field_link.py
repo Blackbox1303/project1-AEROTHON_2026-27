@@ -12,7 +12,8 @@
        the throttle % says the height: slow = down (lowering the payload too), medium = keep, fast = up.
        Never while armed (ArduCopter refuses it then anyway); stops when field_vision stops answering.
 Link: mavlink-router's field_test endpoint (UDP 14662, added by field_test.sh / onboard/install_onboard.sh) - the
-Pixhawk's USB port 1: its commands reach the Pixhawk, nothing of it goes to the radio. As MAVLink 1/195.
+Pixhawk's USB port 1: its commands are addressed to the Pixhawk (1/1), so ArduPilot keeps them off the radio (GPS2).
+As MAVLink 1/195.
 """
 import argparse
 import json

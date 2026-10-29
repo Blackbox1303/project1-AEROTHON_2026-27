@@ -5,6 +5,7 @@ Over the radio a command is COMMAND_LONG MAV_CMD_USER_1 (31010) to 1/194 (onboar
 param2 = the code below, param3 = its argument, param4 = a press number (a resent command runs once).
 Standard library only: the container, the Jetson host and the laptop all import it.
 """
+import os
 
 PORT_VISION = 8097               # field_vision.py on the Jetson (container, host network)
 PORT_GROUND = 8096               # field_ground.py on the laptop
@@ -47,3 +48,19 @@ MOTOR_PATTERNS = ('off', 'dir', 'cw', 'ccw', 'all')
 LEVELS = ('low', 'mid', 'high')
 PATTERN_CODE = {'off': 'o', 'dir': 'd', 'cw': 'r', 'ccw': 'l', 'all': 'a'}   # the radio's 'mc': this + the level's
 CODE_PATTERN = {v: k for k, v in PATTERN_CODE.items()}                       # first letter (l / m / h)
+
+
+def find_radio(path):
+    """The ground SiK radio: `path` if it is there, else the one radio plugged in - by its USB id (SiK / FTDI / CP210x),
+    else the only /dev/ttyUSB* or /dev/ttyACM* (a SiK shows as either). None: nothing found."""
+    import glob
+    import re
+    if os.path.exists(path):
+        return path
+    ids = [p for p in sorted(glob.glob('/dev/serial/by-id/*'))
+           if re.search(r'sik|3dr|rfd|radio|telem|ftdi|ft231|silicon_labs|cp210', p, re.I)
+           and not re.search(r'ardupilot|pixhawk|px4|cube', p, re.I)]
+    if ids:
+        return os.path.realpath(ids[0])
+    ports = sorted(glob.glob('/dev/ttyUSB*') + glob.glob('/dev/ttyACM*'))
+    return ports[0] if len(ports) == 1 else None

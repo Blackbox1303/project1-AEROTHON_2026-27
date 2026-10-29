@@ -3,7 +3,7 @@
 Normally started from the ground station dashboard (Real mode -> Launch stack); the mission itself is started there
 too, after the preflight (no auto-start on the real drone).
 Steps: scripts/container_up.sh (the dev container, if not running) -> mavlink-router on the Pixhawk 6C Mini (`link`:
-USB /dev/ttyACM0:921600, TELEM2 on the Jetson UART /dev/ttyTHS1:921600, or udp:<port>) splitting MAVLink to MAVROS
+USB /dev/ttyACM0:921600, or udp:<port>; the SiK radio is on the Pixhawk's GPS2, not here) splitting MAVLink to MAVROS
 (14640), the dashboard (14650) and QGroundControl (gcs_ip:14550) + MAVROS on the host -> after container_delay s
 scripts/container_real.sh in the container (aerothon_nav container_real.launch.py: RealSense, Arducam, navigation,
 supervisor) + scripts/save_run.sh loop (the container's ~/.ros mission files every 60 s).
@@ -126,8 +126,7 @@ def setup(context):
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('link', default_value='/dev/ttyACM0:921600',
-                              description='Pixhawk: /dev/ttyACM0:921600 (USB), /dev/ttyTHS1:921600 (TELEM2 on the '
-                                          'Jetson UART), udp:<port>'),
+                              description='Pixhawk: /dev/ttyACM0:921600 (USB), udp:<port>'),
         DeclareLaunchArgument('gcs_ip', default_value=os.environ.get('GCS_IP', '10.42.0.1'),
                               description='the ground laptop, for QGroundControl on UDP 14550'),
         DeclareLaunchArgument('world_json', default_value=str(WS / 'runs/gcs/mission_geofence.json'),

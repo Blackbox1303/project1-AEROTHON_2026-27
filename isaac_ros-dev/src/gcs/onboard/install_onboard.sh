@@ -1,16 +1,14 @@
 #!/bin/bash
 # ON THE JETSON, once (and again to change the Pixhawk link): the radio-only ground station's onboard half.
-#   bash install_onboard.sh [link]     link: /dev/ttyACM0:921600 (USB port 1, the default - this drone's TELEM2
-#                                            is the RC receiver), /dev/ttyTHS1:921600 (a Jetson UART)
+#   bash install_onboard.sh [link]     link: /dev/ttyACM0:921600 (the Pixhawk's USB port 1, the default)
 # Installs two systemd --user services (they start at boot, like the dashboard - linger is on):
-#   aerothon-router     mavlink-router on the Pixhawk link AND the sim's PX4 (UDP 14540), ALWAYS on (so a radio
-#                       command reaches the Jetson before any stack runs): MAVROS 14640, onboard dashboard 14650,
-#                       mav_agent 14660, QGC 10.42.0.1:14550 + any QGC on UDP 14551. sim_mission / real_mission then
-#                       start no router of their own (two routers would split PX4's link).
-#   aerothon-mav-agent  onboard/mav_agent.py: radio commands -> the onboard dashboard, status -> the radio
-# PX4 (QGC -> Parameters): MAV_0_CONFIG TELEM 1 (the radio, SER_TEL1_BAUD 57600), MAV_1_CONFIG TELEM 2 (the Jetson,
-# SER_TEL2_BAUD 921600, MAV_1_MODE Onboard), MAV_0_FORWARD 1, MAV_1_FORWARD 1 - forwarding carries the radio's
-# commands to the Jetson and the agent's status back down. Reboot the Pixhawk after.
+#   aerothon-router     mavlink-router on the Pixhawk link AND the sim's PX4 (UDP 14540), ALWAYS on: MAVROS 14640,
+#                       onboard dashboard 14650, mav_agent 14660 (its fallback), field_link 14662, QGC 10.42.0.1:14550
+#                       + any QGC on UDP 14551. sim_mission / real_mission then start no router of their own.
+#   aerothon-mav-agent  onboard/mav_agent.py on the Pixhawk's USB port 2 (-if02): radio commands -> the onboard
+#                       dashboard, status -> the radio
+# The radio is on the PIXHAWK (GPS2 = SERIAL4, MAVLink 2, 57600), not the Jetson: ArduPilot routes between its ports
+# (TELEM1 ESC telemetry, TELEM2 ELRS, GPS1 GPS). Nothing to set on the Pixhawk for it.
 set -e
 LINK=${1:-/dev/ttyACM0:921600}
 DEV=${LINK%%:*}; BAUD=${LINK##*:}

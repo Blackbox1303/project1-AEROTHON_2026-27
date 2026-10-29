@@ -100,15 +100,14 @@ Commands and status over the telemetry radio alone, from the Lenovo: **Radio GCS
 Lenovo itself). QGC keeps working beside it (relayed on UDP 14550).
 
 ```
-Lenovo ── SiK radio ──> Pixhawk TELEM1 ─(MAVLink forwarding)─> TELEM2 ──> Jetson /dev/ttyTHS1
-Radio GCS :8081 ─ relays to QGC                                  aerothon-router (always on) ─ MAVROS, dashboard,
-                                                                 aerothon-mav-agent: commands -> this dashboard's API
+Lenovo ── SiK radio ──> Pixhawk GPS2 (SERIAL4) ─(ArduPilot routing)─> USB port 2 (SERIAL7, -if02) ──> aerothon-mav-agent
+Radio GCS :8081 ─ relays to QGC                   USB port 1 (SERIAL0, -if00) ──> aerothon-router ─ MAVROS, dashboard
 ```
-* Jetson, once: `bash ~/workspaces/isaac_ros-dev/src/gcs/onboard/install_onboard.sh /dev/ttyTHS1:921600` (done
-  2026-10-25): services `aerothon-router` (mavlink-router on the Pixhawk AND the sim's PX4, so neither stack starts
-  its own) + `aerothon-mav-agent` (onboard/mav_agent.py, MAVLink component 1/194).
-* PX4, once (QGC -> Parameters, reboot after): MAV_0_CONFIG = TELEM 1 (radio, SER_TEL1_BAUD 57600),
-  MAV_1_CONFIG = TELEM 2 (Jetson, SER_TEL2_BAUD 921600, MAV_1_MODE = Onboard), MAV_0_FORWARD = 1, MAV_1_FORWARD = 1.
+* Pixhawk ports (ArduCopter): TELEM1 ESC telemetry, TELEM2 ELRS, GPS1 GPS, **GPS2 the SiK radio** (SERIAL4, MAVLink 2,
+  57600). The radio is on the Pixhawk, never on the Jetson; ArduPilot routes between its ports, nothing to set.
+* Jetson, once: `bash ~/workspaces/isaac_ros-dev/src/gcs/onboard/install_onboard.sh` (USB /dev/ttyACM0:921600):
+  services `aerothon-router` (mavlink-router on the Pixhawk's USB port 1 AND the sim's PX4, so neither stack starts
+  its own) + `aerothon-mav-agent` (onboard/mav_agent.py, MAVLink component 1/194, on USB port 2).
 * Lenovo, once (Ethernet cable connected): `scp szyfrowac@10.42.0.247:~/workspaces/isaac_ros-dev/src/gcs/radio_gcs/install_radio_gcs.sh ~/ && bash ~/install_radio_gcs.sh /dev/ttyUSB0:57600`
   -> service `radio-gcs` (starts at login). In QGC: Application Settings -> General -> AutoConnect: untick
   SiK Radio and Pixhawk (the Radio GCS owns the radio), keep UDP. Optional QGC buttons:

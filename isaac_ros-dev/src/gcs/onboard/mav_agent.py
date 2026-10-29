@@ -29,8 +29,10 @@ MAVROS is 191) on mavlink-router's agent endpoint (UDP 14660: router/sim.conf, o
   events    STATUSTEXT on a change of stack phase / FSM state, a new QR, the target, a new alert (QGC shows them too)
   heartbeat 1 Hz, MAV_TYPE_ONBOARD_CONTROLLER
 A radio at 57600 baud carries ~5 KB/s: the status adds ~70 B/s, VIO ~70 B/s at 1 Hz, the boards ~13 B/s at one per
-5 s (MAVLink 2 drops TUNNEL's trailing zero bytes: a packet is ~12 B + its JSON). Tune the periods on the radio. PX4 must forward between its MAVLink ports
-(MAV_0_FORWARD = MAV_1_FORWARD = 1) for the radio on TELEM1 to reach the Jetson on TELEM2.
+5 s (MAVLink 2 drops TUNNEL's trailing zero bytes: a packet is ~12 B + its JSON). Tune the periods on the radio.
+Wiring (ArduCopter, Pixhawk 6C): the SiK radio on GPS2 (SERIAL4, MAVLink 2, 57600), the Jetson on the Pixhawk's
+USB - port 1 (SERIAL0, -if00) mavlink-router, port 2 (SERIAL7, -if02) mav_agent. ArduPilot's MAVLink routing
+carries the radio's commands to 1/194 and the agent's packets down the radio. Nothing on the Jetson opens the radio.
 """
 import argparse
 import asyncio
@@ -62,9 +64,8 @@ ROUTER = 'udpin:127.0.0.1:14660'  # mavlink-router's agent endpoint (aerothon-ro
 
 
 def pick_link(spec):
-    """--mavlink auto: the Pixhawk's SECOND USB port (SERIAL7, relayed to the radio) when it is there - USB port 1
-    (MAVROS + the VIO feed) is MAV1_OPTIONS = 2, not relayed (vio_bringup/config/ardupilot_usb_split.parm) - else the
-    router endpoint as before (the split not set up yet, or the Pixhawk unplugged)."""
+    """--mavlink auto: the Pixhawk's SECOND USB port (SERIAL7: ArduPilot relays it to and from the radio on GPS2)
+    when it is there, else the router endpoint (USB port 1 through aerothon-router; the Pixhawk unplugged / one port)."""
     if spec != 'auto':
         return spec
     ports = sorted(glob.glob('/dev/serial/by-id/*ArduPilot*-if02') + glob.glob('/dev/serial/by-id/*Pixhawk*-if02') +

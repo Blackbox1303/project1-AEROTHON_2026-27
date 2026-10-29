@@ -157,6 +157,22 @@ S = State()
 
 
 # ---------------------------------------------------------------- MAVLink (a mavlink-router sink)
+def find_radio(path):
+    """The ground SiK radio: `path` if it is there, else the one radio plugged in - by its USB id (SiK / FTDI / CP210x),
+    else the only /dev/ttyUSB* or /dev/ttyACM* (a SiK shows as either). None: nothing found."""
+    import glob
+    import re
+    if os.path.exists(path):
+        return path
+    ids = [p for p in sorted(glob.glob('/dev/serial/by-id/*'))
+           if re.search(r'sik|3dr|rfd|radio|telem|ftdi|ft231|silicon_labs|cp210', p, re.I)
+           and not re.search(r'ardupilot|pixhawk|px4|cube', p, re.I)]
+    if ids:
+        return os.path.realpath(ids[0])
+    ports = sorted(glob.glob('/dev/ttyUSB*') + glob.glob('/dev/ttyACM*'))
+    return ports[0] if len(ports) == 1 else None
+
+
 class Mavlink(threading.Thread):
     def __init__(self, port, radio=None, qgc='127.0.0.1:14550'):
         super().__init__(daemon=True)
@@ -193,8 +209,9 @@ class Mavlink(threading.Thread):
                 self.conn = self.mavutil.mavlink_connection(dev, source_system=255, source_component=190)
             else:
                 path, _, baud = dev.partition(':')
+                path = find_radio(path) or path                  # not there: the one radio plugged in
                 if not Path(path).exists():
-                    raise OSError(f'{path} not found (radio plugged in? ls /dev/serial/by-id/)')
+                    raise OSError(f'{path} not found (radio plugged in? ls /dev/ttyUSB* /dev/ttyACM* /dev/serial/by-id/)')
                 self.conn = self.mavutil.mavlink_connection(path, baud=int(baud or 57600), source_system=255,
                                                             source_component=190)
             self.radio_err = None
@@ -735,8 +752,8 @@ class Stack:
         return bool(pids)
 
     def write_real_conf(self, link):
-        """router/real.conf with the dashboard's telemetry link: '/dev/ttyUSB0:57600' (radio), '/dev/ttyACM0:921600'
-        (USB), or 'udp:14555' (a UDP stream sent to this port)."""
+        """router/real.conf with the dashboard's Pixhawk link: '/dev/ttyACM0:921600' (USB), or 'udp:14555' (a UDP
+        stream sent to this port). The SiK radio is on the Pixhawk (GPS2), not on the Jetson."""
         text = (HERE / 'router/real.conf').read_text()
         head, _, rest = text.partition('[UartEndpoint fcu]')
         rest = rest.split('\n\n', 1)[1] if '\n\n' in rest else ''
@@ -771,7 +788,7 @@ class Stack:
             dev = link.partition(':')[0]
             onboard = subprocess.run(['systemctl', '--user', 'is-active', '--quiet', 'aerothon-router']).returncode == 0
             if not onboard and not link.startswith('udp:') and not Path(dev).exists():
-                return False, f'telemetry link {link!r}: {dev} does not exist (USB /dev/ttyACM0, TELEM2 /dev/ttyTHS1)'
+                return False, f'telemetry link {link!r}: {dev} does not exist (the Pixhawk USB: /dev/ttyACM0)'
         if mode == 'sim' and self.marker == 'aruco':
             world, err = aruco_world(world)
             if err:
