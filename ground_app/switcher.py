@@ -48,6 +48,8 @@ input,select{font:14px ui-monospace,monospace;padding:5px 7px;border:1px solid v
   <div class=row><button class=go onclick="go('onboard','aruco')">ArUco</button><button class=go onclick="go('onboard','qr')">QR</button></div></div>
  <div class=card><h2>Offboard: this laptop</h2><p>VRX receiver + SiK radio on this laptop. QR area only. ArUco at 1 m, QR at 10 m.</p>
   <div class=row><button class=go onclick="go('offboard','aruco')">ArUco</button><button class=go onclick="go('offboard','qr')">QR</button></div></div>
+ <div class=card><h2>Field test: props OFF</h2><p>Cameras, QR / red / banner / obstacle scans and the walk-through with motor cues. Cable: with video. Radio: text only.</p>
+  <div class=row><button class=go onclick="go('fieldtest','cable')">By cable</button><button class=go onclick="go('fieldtest','radio')">Over the radio</button></div></div>
  <div class=card><h2>Sim testing: the Jetson</h2><p>Needs an Ethernet cable. The Jetson's full dashboard: Sim, Offboard Jetson, Real, Open Gazebo.</p>
   <div class=row><button class=go onclick="go('sim','aruco')">ArUco (8084)</button><button class=go onclick="go('sim','qr')">QR (8080)</button></div></div>
 </div>
@@ -110,6 +112,9 @@ class H(BaseHTTPRequestHandler):
             elif mode == 'offboard':
                 cmd = [LAUNCHER, 'offboard', m, q.get('drop') or 'drop', q.get('radio') or '/dev/ttyUSB0:57600',
                        q.get('video', ''), q.get('target', '')]
+            elif mode == 'fieldtest':
+                cmd = [LAUNCHER, 'fieldtest', 'radio' if q.get('marker') == 'radio' else 'cable'] + \
+                      ([q.get('radio') or '/dev/ttyUSB0:57600'] if q.get('marker') == 'radio' else [])
             elif mode == 'sim':
                 cmd = [LAUNCHER, 'sim', m]
             elif mode in ('stop', 'status'):

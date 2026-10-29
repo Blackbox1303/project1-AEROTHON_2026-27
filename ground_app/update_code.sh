@@ -11,6 +11,8 @@ mkdir -p "$D/static" "$O/src/gcs/vrx_explore" "$O/src/gcs/laptop_vrx" "$O/src/ae
 cp "$SRC/gcs/gcs_server.py" "$D/"; cp "$SRC/gcs/static/index.html" "$D/static/"
 cp "$SRC/gcs/vrx_explore/vrx_explore.py" "$SRC/gcs/vrx_explore/vrx_explore.html" "$O/src/gcs/vrx_explore/"
 cp "$SRC/gcs/laptop_vrx/laptop_vrx_mission.py" "$O/src/gcs/laptop_vrx/"
+F=$HERE/apps/fieldtest; mkdir -p "$F"                       # the field test's laptop half (+ the page)
+cp "$SRC/gcs/field_test/field_ground.py" "$SRC/gcs/field_test/field_proto.py" "$SRC/gcs/field_test/field_test.html" "$F/"
 cp "$SRC/aerothon_nav/aerothon_nav/__init__.py" "$SRC/aerothon_nav/aerothon_nav/aruco_tools.py" \
    "$SRC/aerothon_nav/aerothon_nav/fisheye.py" "$SRC/aerothon_nav/aerothon_nav/qr_area.py" \
    "$SRC/aerothon_nav/aerothon_nav/qr_match.py" "$O/src/aerothon_nav/aerothon_nav/"

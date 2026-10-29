@@ -5,6 +5,8 @@
 #                                                             this laptop = the offboard ground station (VRX + SiK)
 #   aerothon sim      [aruco|qr]                              TESTING by Ethernet: the Jetson's full dashboard
 #                                                             (Sim / Offboard Jetson / Real / Open Gazebo)
+#   aerothon fieldtest cable [jetson-ip] | radio [radio]      FIELD TEST, props OFF: the Jetson's cameras / detectors /
+#                                                             walk-through guidance + motor cues (http://127.0.0.1:8096)
 #   aerothon stop | status | log | switcher                   switcher = the one-page app switcher, http://127.0.0.1:8079
 # Defaults: aruco, drop, radio /dev/ttyUSB0:57600, video '' (pick on the page), target '' (read the start board).
 # A busy port (8080 / 8094): our own earlier app (this workspace, an older ~/aerothon_radio_gcs, the old radio GCS) is
@@ -31,7 +33,7 @@ ours() {   # ours <pid>: one of our ground apps (any copy), run by this user
     # only the ground-app COPIES (this workspace, the earlier ~/aerothon_radio_gcs bundle, the old installs) - never the
     # Jetson dashboard's own vrx_explore / gcs_server under ~/workspaces (a running offboard stack there)
     case "$cmd" in *"$HERE"/*|*aerothon_radio_gcs/*|*.local/share/aerothon_gcs/*|*.local/share/vrx_delivery/*|*radio_gcs.py*) ;; *) return 1 ;; esac
-    case "$cmd" in *gcs_server.py*|*vrx_explore.py*|*laptop_vrx_mission.py*|*radio_gcs.py*) return 0 ;; esac
+    case "$cmd" in *gcs_server.py*|*vrx_explore.py*|*laptop_vrx_mission.py*|*radio_gcs.py*|*field_ground.py*) return 0 ;; esac
     return 1
 }
 
@@ -53,7 +55,7 @@ stop_ours() {   # the app this launcher started, then any of ours still running
         if kill -0 "$p" 2>/dev/null && ours "$p"; then say "closing $(cat "$RUN/app.name" 2>/dev/null) (pid $p)"; stop_pid "$p"; fi
         rm -f "$RUN/app.pid" "$RUN/app.name" "$RUN/app.url"
     fi
-    for p in $(pgrep -u "$USER" -f 'gcs_server.py|vrx_explore.py|laptop_vrx_mission.py|radio_gcs.py'); do
+    for p in $(pgrep -u "$USER" -f 'gcs_server.py|vrx_explore.py|laptop_vrx_mission.py|radio_gcs.py|field_ground.py'); do
         [ "$p" = "$$" ] && continue
         ours "$p" && { say "closing an earlier app (pid $p)"; stop_pid "$p"; }
     done
@@ -120,6 +122,19 @@ case "${1:-}" in
         say "no link to the Jetson ($JETSON_IP): sim testing needs an Ethernet cable. The final mission does not (aerothon onboard)."
         exit 1
     fi ;;
+  fieldtest)
+    L=${2:-cable}
+    pyenv; stop_ours; free_port 8096 || exit 1
+    if [ "$L" = radio ]; then
+        DEV=${3:-/dev/ttyUSB0:57600}; radio_check "$DEV"
+        say "field test over the radio $DEV (no video) - QGC: SiK auto-connect OFF, UDP 14550 ON. PROPS OFF."
+        launch fieldtest-radio http://127.0.0.1:8096 python3 -s "$HERE/apps/fieldtest/field_ground.py" --radio "$DEV"
+    else
+        IP=${3:-$JETSON_IP}
+        ping -c 1 -W 2 "$IP" >/dev/null 2>&1 || say "WARNING: no answer from the Jetson ($IP): Ethernet cable?"
+        say "field test by cable, Jetson $IP (press Start on the page). PROPS OFF."
+        launch fieldtest-cable http://127.0.0.1:8096 python3 -s "$HERE/apps/fieldtest/field_ground.py" --jetson "http://$IP:8097"
+    fi ;;
   stop)
     stop_ours; rm -f "$RUN/app.name" "$RUN/app.url"; say "stopped" ;;
   status)
@@ -127,15 +142,18 @@ case "${1:-}" in
         say "running: $(cat "$RUN/app.name") (pid $(cat "$RUN/app.pid")) $(cat "$RUN/app.url")"
     elif [ -f "$RUN/app.name" ]; then say "$(cat "$RUN/app.name"): $(cat "$RUN/app.url") (on the Jetson)"
     else say "no app running"; fi
-    for port in 8080 8094 8079; do for p in $(holders $port); do say "  port $port: pid $p $(tr '\0' ' ' < /proc/$p/cmdline 2>/dev/null | cut -c1-80)"; done; done ;;
+    for port in 8080 8094 8096 8079; do for p in $(holders $port); do say "  port $port: pid $p $(tr '\0' ' ' < /proc/$p/cmdline 2>/dev/null | cut -c1-80)"; done; done ;;
   log)
     n=$(cat "$RUN/app.name" 2>/dev/null); [ -n "$n" ] && [ -f "$LOGDIR/$n.log" ] && tail -n 40 -f "$LOGDIR/$n.log" || say "no app log" ;;
   switcher)
     pyenv
-    if ! curl -s -m 1 -o /dev/null http://127.0.0.1:8079/; then
-        setsid python3 -s "$HERE/switcher.py" > "$LOGDIR/switcher.log" 2>&1 < /dev/null &
-        for _ in $(seq 20); do curl -s -m 1 -o /dev/null http://127.0.0.1:8079/ && break; sleep 0.3; done
-    fi
+    # always a fresh one: a switcher left running from an older install kept showing its old page (no field test)
+    for p in $( { holders 8079; pgrep -u "$USER" -f '[s]witcher.py'; } | sort -u); do
+        case "$( { tr '\0' ' ' < /proc/$p/cmdline; } 2>/dev/null)" in python3*switcher.py*) stop_pid "$p" ;; esac
+    done
+    setsid python3 -s "$HERE/switcher.py" > "$LOGDIR/switcher.log" 2>&1 < /dev/null &
+    for _ in $(seq 20); do curl -s -m 1 -o /dev/null http://127.0.0.1:8079/ && break; sleep 0.3; done
+    curl -s -m 1 -o /dev/null http://127.0.0.1:8079/ || { say "switcher did not start:"; tail -n 5 "$LOGDIR/switcher.log"; exit 1; }
     say "switcher: http://127.0.0.1:8079"
     [ -n "$NO_BROWSER" ] || (xdg-open http://127.0.0.1:8079 >/dev/null 2>&1 &) ;;
   *)

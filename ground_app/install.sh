@@ -45,8 +45,10 @@ icon offboard-aruco  "AeroTHON offboard laptop, ArUco"        "offboard aruco"  
 icon offboard-qr     "AeroTHON offboard laptop, QR"           "offboard qr"      "VRX + SiK radio on this laptop, search at 10 m"
 icon sim-aruco       "AeroTHON sim testing, ArUco (Jetson 8084)" "sim aruco"     "The Jetson's dashboard by Ethernet"
 icon sim-qr          "AeroTHON sim testing, QR (Jetson 8080)"    "sim qr"        "The Jetson's dashboard by Ethernet"
+icon fieldtest-cable "AeroTHON field test (cable, props off)"  "fieldtest cable"  "Jetson cameras + guidance by Ethernet"
+icon fieldtest-radio "AeroTHON field test (radio, props off)"  "fieldtest radio"  "Jetson scans + guidance over the SiK radio"
 icon stop            "AeroTHON stop the running app"          "stop"             "Close whichever AeroTHON app is running"
-echo "app icons: switcher, onboard / offboard / sim testing x ArUco / QR, stop"
+echo "app icons: switcher, onboard / offboard / sim testing x ArUco / QR, field test cable / radio, stop"
 case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) echo "note: ~/.local/bin is not on PATH yet - log out and in, or use $HERE/aerothon";; esac
 if id -nG | tr ' ' '\n' | grep -qx dialout; then
     echo "radio permission: OK (in the dialout group)"
