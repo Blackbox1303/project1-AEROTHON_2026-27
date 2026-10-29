@@ -63,6 +63,7 @@
 
 <div class="bar">
   <button class="go" onclick="post('start')">Start explore</button>
+  <button onclick="if (confirm('Hop test: take off, hover, land at home?')) post('hop')" title="pre-mission check: take off to the hop height, hover, land - no exploring">Hop test</button>
   <button onclick="post('home')">Return home</button>
   <button onclick="post('abort')">Hold</button>
   <button class="stop" onclick="post('land')">Land</button>
@@ -104,6 +105,11 @@
       <select id="videosel"></select>
       <button onclick="post('video', {device: el('videosel').value})">Use</button>
     </div>
+    <div class="row" style="margin-top:6px;flex-wrap:wrap" id="gfrow">
+      <span class="dim" title="the organisers' 6 points: 4 are the arena OR the QR area, 2 extra. Arena only: the QR area's front wall = the line through the take-off point, parallel to the back wall">GPS (lat, lon)</span>
+    </div>
+    <div class="row"><button onclick="setZoneGps()">Apply GPS QR area</button>
+      <span class="dim">QR area given, or arena only (front wall through the take-off point); extra = shown only</span></div>
   </div>
 
   <div>
@@ -144,6 +150,17 @@ async function post(what, body={}) {
     return j;
   } catch (e) { el('msg').textContent = 'error: ' + e; el('msg').style.color = 'var(--bad)'; }
 }
+const GF = [['arena', 4, 'A'], ['qr', 4, 'Q'], ['extra', 2, 'E']];
+GF.forEach(([k, n, t]) => { for (let i = 0; i < n; i++) el('gfrow').insertAdjacentHTML('beforeend',
+  `<input id="gf_${k}_${i}" placeholder="${t}${i + 1} lat, lon" style="width:12em" oninput="zoneEdited = true">`); });
+function readGf() {
+  const out = {};
+  GF.forEach(([k, n]) => { out[k] = []; for (let i = 0; i < n; i++) {
+    const v = el(`gf_${k}_${i}`).value.split(/[ ,;]+/).map(parseFloat).filter(isFinite);
+    if (v.length === 2) out[k].push(v); } });
+  return out;
+}
+function setZoneGps() { zoneEdited = false; post('zone_gps', readGf()); }
 function setZone() {
   zoneEdited = false;
   post('zone', {zone: ['zx0', 'zx1', 'zy0', 'zy1'].map(id => parseFloat(el(id).value))});
@@ -278,6 +295,9 @@ function render(d) {
 
   if (!zoneEdited && d.zone && document.activeElement.tagName !== 'INPUT')
     ['zx0', 'zx1', 'zy0', 'zy1'].forEach((id, i) => { el(id).value = d.zone[i]; });
+  if (!zoneEdited && d.gf && document.activeElement.tagName !== 'INPUT')
+    GF.forEach(([k, n]) => { for (let i = 0; i < n; i++) { const p = (d.gf[k] || [])[i];
+      el(`gf_${k}_${i}`).value = p ? `${p[0]}, ${p[1]}` : ''; } });
   const devs = d.video_devices || [];
   const opts = ['<option value="">off</option>'].concat(devs.map(([p, n]) => `<option value="${p}">${p}  ${n}</option>`)).join('');
   if (!videoEdited && el('videosel').dataset.opts !== opts) {

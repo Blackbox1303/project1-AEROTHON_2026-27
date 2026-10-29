@@ -30,6 +30,9 @@ blue inside (zone side), exit tunnel blue outside / green zone side - the tunnel
 QR boards 1 x 1 m with no white quiet zone, start QR 1 m from take-off, no landing pad; one red zone 10 x 10 ft;
 QR zone 30 x 40 m.
     python3 sim/make_competition_world.py --course v3 -o sim/worlds/competition.sdf
+Course v4 (user clarifications, 2026-10-28): v3 with tunnels 3.5 m wide x 10 m long (10 ft high, flown < 8 ft), the
+other tunnel's banners RED (not blue), banners 11.5 x 1.5 ft, the floor banner right at the mouth like a doormat:
+    python3 sim/make_competition_world.py --course v4 --name competition_v4 -o sim/worlds/competition_v4.sdf
 
 The QR codes are real (segno, installed to sim/.pylib: pip install --target sim/.pylib segno)
 and decode with pyzbar / cv2.QRCodeDetector.
@@ -263,7 +266,7 @@ def main():
                                                                      'else 1.5)')
     ap.add_argument('--corridor-x', type=float, default=5.0, help='corridor entrances, m from spawn')
     ap.add_argument('--corridor-length', type=float, default=None, help='m (v3 6.71 = 22 ft, else 10)')
-    ap.add_argument('--course', choices=('v3', 'v2', 'v1'), default='v2',
+    ap.add_argument('--course', choices=('v4', 'v3', 'v2', 'v1'), default='v2',
                     help='v2 (organisers, 2026-10-19 evening): corridors 1.52-1.83 m wide, walls 2.74 m + 0.30 m '
                          'top banner, mixed exit-corridor obstacles passed over / under / beside; v1: the first '
                          'layout (3.5 m wide, 5 m walls, full-height blocks)')
@@ -294,9 +297,12 @@ def main():
     ap.add_argument('--target', default='2',
                     help='index of the delivery QR that matches the start QR (0-4), or "random"')
     args = ap.parse_args()
-    v3 = args.course == 'v3'
+    v4 = args.course == 'v4'                                    # v4 = v3 + the 2026-10-28 changes below
+    v3 = args.course in ('v3', 'v4')
+    other = 'red' if v4 else 'blue'                             # the banners of the tunnel NOT to fly into
+    banner_h = 0.4572 if v4 else 0.3048                         # 1.5 ft (v4) / 1 ft (v3)
     args.start_qr_x = args.start_qr_x if args.start_qr_x is not None else (1.0 if v3 else 1.5)
-    args.corridor_length = args.corridor_length or (6.706 if v3 else 10.0)
+    args.corridor_length = args.corridor_length or (10.0 if v4 else 6.706 if v3 else 10.0)
     args.qr_size = args.qr_size or (1.0 if v3 else 1.5)
     if v3 and args.ret_obstacles == 4:
         args.ret_obstacles = 3
@@ -311,7 +317,7 @@ def main():
         tex[kind] = str(tex_dir / f'{out.stem}_{kind}.png')
         make_texture(tex[kind], args.seed * 10 + i, tint)
     for lap, colour in (('forward', (20, 140, 50)), ('return', (240, 120, 20)),     # green / orange (v1, v2)
-                        ('green', (20, 140, 50)), ('blue', (25, 60, 200))):           # v3
+                        ('green', (20, 140, 50)), ('blue', (25, 60, 200)), ('red', (200, 30, 30))):  # v3 / v4
         tex[f'banner_{lap}'] = str(tex_dir / f'{out.stem}_banner_{lap}.png')
         banner_texture(tex[f'banner_{lap}'], colour)
 
@@ -339,7 +345,7 @@ def main():
     # ---- corridors
     v2 = args.course == 'v2'
     wall_h = args.wall_height or (3.0480 if v3 else 2.74 if v2 else 5.0)
-    widths = {lap: args.corridor_width or (3.353 if v3 else round(rng.uniform(1.52, 1.83), 2) if v2 else 3.5)
+    widths = {lap: args.corridor_width or (3.5 if v4 else 3.353 if v3 else round(rng.uniform(1.52, 1.83), 2) if v2 else 3.5)
               for lap in ('forward', 'return')}
     wall_t = 0.15
     x0, length = args.corridor_x, args.corridor_length
@@ -390,7 +396,7 @@ def main():
         # only (green entry / orange exit). v3: both ends - entry green outside (start side) / blue zone side, exit
         # blue outside / green zone side: the tunnel to fly into always shows green
         if v3:
-            colours = {'forward': ('green', 'blue'), 'return': ('blue', 'green')}[lap]
+            colours = {'forward': ('green', other), 'return': (other, 'green')}[lap]
             ends = [(x0, -1, colours[0]), (x0 + length, 1, colours[1])]
         else:
             ends = [(x0, -1, lap) if lap == 'forward' else (x0 + length, 1, lap)]
@@ -400,7 +406,7 @@ def main():
             yaw = 0 if outward < 0 else 3.14159
             for mount in mounts:
                 if mount == 'top':                          # across the top of the entrance
-                    bw, bh = (3.505, 0.3048) if v3 else (width + 2 * wall_t, (0.30 if v2 else 1.0))
+                    bw, bh = (3.505, banner_h) if v3 else (width + 2 * wall_t, (0.30 if v2 else 1.0))
                     # v2 / v3: 1 ft banner ON TOP of the walls (v3: on the roof edge); v1: the top metre
                     b = (ex + outward * 0.05, c, wall_h + 0.1 + bh / 2 if v3 else
                          wall_h + bh / 2 if v2 else wall_h - bh / 2)
@@ -415,8 +421,8 @@ def main():
                         parts.append(visual(f'banner_pole_{e}_{k}', b[0], b[1] + dy, 1.0, 0.05, 0.05, 2.0,
                                             (0.3, 0.3, 0.3)))
                 else:                                       # flat on the ground in front
-                    bw, bh = (3.505, 0.3048) if v3 else (round(width + 0.3, 2), 0.6) if v2 else (3.0, 1.0)
-                    b = (ex + outward * 1.5, c, 0.008)
+                    bw, bh = (3.505, banner_h) if v3 else (round(width + 0.3, 2), 0.6) if v2 else (3.0, 1.0)
+                    b = (ex + outward * (bh / 2 + 0.05 if v4 else 1.5), c, 0.008)   # v4: a doormat at the mouth
                     normal = (0, 0, 1)
                     geom = f'{bh} {bw} 0.01'
                 parts.append(f'<visual name="banner_{mount}_{e}"><pose>{b[0]} {b[1]} {b[2]} 0 0 {yaw}</pose>'

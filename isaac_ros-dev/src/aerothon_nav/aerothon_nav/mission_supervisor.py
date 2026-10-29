@@ -4,6 +4,14 @@
                   takeoff_altitude; then OFFBOARD / GUIDED (/nav/offboard); home = the take-off point
                   (autopilot: default $AEROTHON_AUTOPILOT, else ardupilot - flight mode names of px4 | ardupilot)
   READ_START_QR   1 m forward, /mission/read_qr (qr_reader stores the payload)
+  OVERHEAD_GREEN  (user, 2026-10-28) still at takeoff_altitude 5 m: the downward Arducam (drone_qr_detector banner_node
+                  as overhead_banner) finds the GREEN banner - floor 'doormat' at the mouth / top banner, 11.5 x 1.5 ft
+                  across the tunnel; RED = the other tunnel, ignored (its position excludes that tunnel from the wall
+                  fit). Look points every overhead_step m towards the QR area (unknown: the take-off heading), then
+                  lines overhead_lateral m to the sides. The banner's long edge on the ground -> the tunnel axis (away
+                  from home); fly to standoff before the mouth at 5 m - never over the roof - then down to align_altitude
+                  (< 8 ft) and ALIGN_GREEN in entry_align's geofence mode = the D435 wall fit refines the axis.
+                  No green banner / no wall fit: the D435 banner search below, as before
   ALIGN_GREEN     /nav/entry/align, colour green: banner search at align_altitude, corridor axis from the walls
                   (/nav/entry/result)
   GEOFENCE        save the entrance geofence: entrance pose + width, GPS fix, local position, an Arducam snapshot
@@ -99,6 +107,7 @@ from rcl_interfaces.srv import SetParameters
 from std_msgs.msg import String
 from std_srvs.srv import SetBool, Trigger
 
+from aerothon_nav import qr_area
 from aerothon_nav.direct_flight import DirectFlight, yaw_of
 from aerothon_nav.grid_path import PathFlight, plan, route_clear
 
@@ -137,6 +146,15 @@ class MissionSupervisor(Node):
         p('entry_speed', 1.0)        # m/s along the entry tunnel (no obstacles)
         p('return_speed', 0.5)       # m/s along the exit tunnel (the blocks: lateral plan + sidesteps)
         p('exit_colour', 'green')    # banner of the tunnel to fly into from the zone (v3: green; v2: orange)
+        p('overhead_banner', True)   # OVERHEAD_GREEN: the Arducam banner fix from takeoff_altitude before ALIGN_GREEN
+        p('overhead_step', 2.0)      # m between look points
+        p('overhead_search_dist', 10.0)  # m out from the start QR along the search heading
+        p('overhead_lateral', [0.0, 4.0, -4.0])  # m: search lines beside the first (start side only)
+        p('overhead_look', 1.5)      # s hovering per look (the detector runs at 4 Hz, a track needs 2 hits)
+        p('overhead_banner_len', [2.0, 5.5])  # m: the floor banner (11.5 ft = 3.5 m) projected on the ground; the
+        #                              top banner projected on the ground from 5 m comes out ~2.5 x longer
+        p('overhead_hold_back', 1.5) # m on the start side of the banner where the drone looks from (never over the roof)
+        p('overhead_lateral_max', 1.5)  # m: the wall fit's corridor must pass this close to the banner centre
         p('search_altitude', 10.0)   # delivery zone (sim: nadir_hd 60 deg reads ~4 m round the drone from here)
         p('deliver_altitude', 5.0)   # m: the drop height
         p('deliver_tol', 0.15)       # m: arrival tolerance over the target (both levels)
@@ -279,6 +297,10 @@ class MissionSupervisor(Node):
         self.create_subscription(NavSatFix, '/mavros/global_position/global', lambda m: setattr(self, 'gps', m),
                                  qos_profile_sensor_data)
         self.geofence_pub = self.create_publisher(String, '/mission/geofence', LATCHED)
+        # the QR area (qr_area.py): given by the ground station, or the arena cut at the entry tunnel's exit line
+        self.qr_pub = self.create_publisher(String, qr_area.TOPIC, qr_area.QOS)
+        self.qr_poly, self.qr_final, self.qr_src = None, False, None
+        self.course, self.arena, self.qr_back = None, [], []
         cli = self.create_client
         self.srv = {name: cli(Trigger, name) for name in (
             '/mission/read_qr', '/nav/entry/align', '/nav/entry/cancel', '/nav/corridor/run', '/nav/corridor/cancel',
@@ -292,6 +314,9 @@ class MissionSupervisor(Node):
         reentrant = ReentrantCallbackGroup()
         self.px4_command = cli(CommandLong, '/mavros/cmd/command', callback_group=reentrant)
         self.entry_params = cli(SetParameters, '/entry_align/set_parameters')
+        self.overhead_params = cli(SetParameters, '/overhead_banner/set_parameters')
+        self.overhead_dets = []
+        self.create_subscription(String, '/nav/banner/overhead', self.on_overhead, 10)
         self.corridor_params = cli(SetParameters, '/corridor_nav/set_parameters')
         self.explorer_params = cli(SetParameters, '/frontier_explorer/set_parameters')
         # the Nav2 not in use is paused (lifecycle deactivate): two full Nav2 stacks plus the sim overloaded the
@@ -887,6 +912,8 @@ class MissionSupervisor(Node):
 
     def axis_into_zone(self, entrance, yaw):
         """s along the corridor axis (from the entrance) where it enters the delivery zone rectangle, or None."""
+        if self.qr_poly is not None:                 # the QR area polygon (None: not cut at the tunnel exit yet)
+            return qr_area.ray_entry(entrance, yaw, self.qr_poly) if self.qr_final else None
         z = self.zone_rect()
         if z is None:
             return None
@@ -920,15 +947,65 @@ class MissionSupervisor(Node):
                 self.get_logger().warn(f'corridor length: measured {length:.1f} m, zone boundary {s_zone:.1f} m - '
                                        f'using the zone boundary')
             length = s_zone
+        elif self.qr_src == 'tunnel_exit' and self.course and abs(length - self.course['tunnel_length']) > 2.0:
+            # the front wall of the QR area is cut here: a short measure (walls missing from the SLAM map) would move it
+            # into the tunnel - the course length (dashboard) instead
+            self.get_logger().warn(f'corridor length: measured {length:.1f} m, course {self.course["tunnel_length"]:g} m'
+                                   f' - using the course length')
+            length = float(self.course['tunnel_length'])
         gf['length_m'] = round(length, 2)
         gf['corridor_end'] = [round(gf['entrance'][0] + length * math.cos(yaw), 3),
                               round(gf['entrance'][1] + length * math.sin(yaw), 3)]
         gf['gps_end'] = self.gps_fix()
+        if self.qr_src == 'tunnel_exit' and not self.qr_final:
+            self.cut_qr_area(gf['corridor_end'], yaw)
+            gf['qr_polygon'] = [[round(x, 2), round(y, 2)] for x, y in self.qr_poly] if self.qr_final else None
         self.save_geofence()
         try:                                         # the explorer makes no candidate detours next to it
             self.set_params(self.explorer_params, tunnel_end=[float(gf['corridor_end'][0]), float(gf['corridor_end'][1])])
         except Abort as e:
             self.get_logger().warn(f'explorer tunnel_end not set ({e})')
+
+    def load_qr_area(self):
+        """The QR area of the ground station's geofence: given (delivery_polygon) or to be cut from the arena at the
+        entry tunnel's exit (qr_source tunnel_exit). Sim world files have neither: the zone rectangle as before."""
+        self.qr_poly, self.qr_final, self.qr_src, self.arena, self.qr_back = None, False, None, [], []
+        try:
+            w = json.load(open(self.g('world_json')))
+        except (OSError, ValueError):
+            return
+        if len(w.get('delivery_polygon') or []) < 3:
+            return
+        self.qr_src = w.get('qr_source') or 'given'
+        self.qr_poly = [tuple(map(float, p)) for p in w['delivery_polygon']]
+        self.qr_final = self.qr_src == 'given'
+        self.arena = [tuple(map(float, p)) for p in w.get('arena_polygon') or []]
+        self.qr_back = [tuple(map(float, p)) for p in w.get('qr_back') or []]
+        self.publish_qr_area(False)
+
+    def publish_qr_area(self, lock):
+        """/mission/qr_area: lock = offboard_bridge keeps the drone inside it (search .. exit-tunnel sequence; user
+        2026-10-28: once in the QR area it may not leave before that). Not locked before the area is final."""
+        if self.qr_poly is None:
+            return
+        lock = bool(lock and self.qr_final)
+        self.qr_pub.publish(String(data=json.dumps({'polygon': [[round(x, 3), round(y, 3)] for x, y in self.qr_poly],
+                                                    'lock': lock, 'source': self.qr_src, 'final': self.qr_final})))
+        self.get_logger().info(f'QR area {"LOCKED" if lock else "published"} ({self.qr_src})')
+
+    def cut_qr_area(self, exit_pt, yaw):
+        """Arena only: the QR area = the arena's back + side walls and the line across the entry tunnel's exit."""
+        poly = qr_area.front_from_tunnel_exit(self.arena, self.qr_back, exit_pt, yaw)
+        if poly is None:
+            self.get_logger().error(f'QR area: no closed area from the arena {self.arena}, back {self.qr_back} and the '
+                                    f'tunnel exit {exit_pt}: searching the whole arena (no lock)')
+            return
+        self.qr_poly, self.qr_final = poly, True
+        width = math.dist(*self.qr_back)
+        self.set_state(self.state, qr_area=[[round(x, 2), round(y, 2)] for x, y in poly], back_wall_m=round(width, 1))
+        if self.course and abs(width - self.course['qr_width']) > 2.0:
+            self.get_logger().warn(f'QR area back wall {width:.1f} m, course says {self.course["qr_width"]:g} m wide')
+        self.publish_qr_area(False)
 
     def into_zone(self):
         """Fly straight along the entry corridor's heading until 2 m past its end, at the tunnel height (v3: the roof
@@ -950,7 +1027,10 @@ class MissionSupervisor(Node):
         self.fly(tx, ty, min(self.pose()[2], self.g('align_altitude')), self.limit('search'), yaw=yaw, vmax=0.8)
 
     def zone_rect(self):
-        """The delivery zone (x0, x1, y0, y1) in odom, from the ground station's / sim world's json (= the nodes')."""
+        """The delivery zone (x0, x1, y0, y1) in odom, from the ground station's / sim world's json (= the nodes').
+        The QR area still to be cut at the entry tunnel's exit (arena only): None."""
+        if self.qr_poly is not None:
+            return qr_area.bbox(self.qr_poly) if self.qr_final else None
         try:
             z = json.load(open(self.g('world_json')))['delivery_zone']
             return z['x_from'], z['x_to'], z['y_from'], z['y_to']
@@ -968,6 +1048,7 @@ class MissionSupervisor(Node):
     def zone_home(self, home, t_in_zone):
         """Delivery only: Nav2 (red zones avoided) to the zone edge nearest home, then straight home."""
         self.set_state('ZONE_EXIT', qr_area_s=round(t_in_zone, 1))
+        self.publish_qr_area(False)
         deadline = self.limit('home')
         edge = self.zone_point(home, inset=1.0)
         for attempt in range(1, 3):
@@ -1033,6 +1114,7 @@ class MissionSupervisor(Node):
 
     def find_exit(self):
         """The return corridor: the exit banner (exit_colour), checked against the entrance geofence; else the geofence."""
+        self.publish_qr_area(False)                  # the exit-tunnel sequence: the QR area may be left now
         # the corridors are parallel: with the entrance geofence, only wall pairs parallel to the entry corridor
         gf = self.geofence
         axis_yaw = math.radians(gf['yaw_deg']) if gf else float('nan')
@@ -1061,16 +1143,173 @@ class MissionSupervisor(Node):
         found = self.align('ALIGN_GEOFENCE', mode='geofence',
                            predict_x=gf['corridor_end'][0], predict_y=gf['corridor_end'][1], predict_yaw=yaw + math.pi,
                            exclude_x=gf['entrance'][0], exclude_y=gf['entrance'][1], exclude_yaw=yaw,
-                           exclude_radius=self.g('exclude_radius'))
+                           exclude_radius=self.g('exclude_radius'), geofence_max_lateral=5.0)
         if not found:
             raise Abort(f'ALIGN_GEOFENCE: {self.entry_state}')
         return found
+
+    def on_overhead(self, m):
+        d = json.loads(m.data)
+        if d.get('colour') in ('green', 'red'):
+            self.overhead_dets = (self.overhead_dets + [d])[-200:]
+
+    @staticmethod
+    def ground(origin, ray, z=0.0):
+        """Where a ray from the camera meets the horizontal plane at height z (odom), or None."""
+        if ray[2] > -0.05 or origin[2] <= z:
+            return None
+        t = (z - origin[2]) / ray[2]
+        return np.array([origin[0] + t * ray[0], origin[1] + t * ray[1]])
+
+    def overhead_look(self):
+        """Hover overhead_look s -> (green fix or None, red centres). A green fix: the floor banner's centre and the
+        direction of its long edge (mod 180 deg) on the ground, from its corner rays."""
+        self.overhead_dets = []
+        end = time.monotonic() + self.g('overhead_look')
+        while time.monotonic() < end:
+            if self.abort_reason:
+                raise Abort(self.abort_reason)
+            time.sleep(0.05)
+        lo, hi = self.g('overhead_banner_len')
+        greens, reds = [], []
+        for d in self.overhead_dets:
+            c = self.ground(d['origin'], d['ray'])
+            if c is None:
+                continue
+            if d['colour'] == 'red':
+                reds.append(c)
+                continue
+            q = [self.ground(d['origin'], r) for r in d.get('corner_rays') or []]
+            if len(q) != 4 or any(v is None for v in q):
+                continue
+            edges = [q[(i + 1) % 4] - q[i] for i in range(4)]
+            k = 0 if np.linalg.norm(edges[0]) + np.linalg.norm(edges[2]) >= \
+                np.linalg.norm(edges[1]) + np.linalg.norm(edges[3]) else 1
+            e = edges[k] - edges[k + 2]                   # the two long edges run opposite ways round the quad
+            length = np.linalg.norm(e) / 2
+            if lo <= length <= hi:
+                greens.append((d['score'], c, math.atan2(e[1], e[0]), length))
+        if not greens:
+            return None, reds
+        best = max(greens, key=lambda g: g[0])
+        near = [g for g in greens if np.linalg.norm(g[1] - best[1]) < 1.0]
+        a2 = sum(math.cos(2 * g[2]) for g in near), sum(math.sin(2 * g[2]) for g in near)
+        return {'centre': np.mean([g[1] for g in near], axis=0), 'across': math.atan2(a2[1], a2[0]) / 2,
+                'length': float(np.mean([g[3] for g in near])), 'n': len(near)}, reds
+
+    def overhead_green(self, home, yaw0):
+        """OVERHEAD_GREEN (see the docstring) -> an entry_align result (the D435 wall fit from the overhead fix), or
+        None: then the D435 banner search as before."""
+        alt = self.g('takeoff_altitude')
+        deadline = self.limit('align')
+        self.set_state('OVERHEAD_GREEN')
+        try:
+            self.set_params(self.overhead_params, active=True)
+        except Abort as e:
+            self.get_logger().warn(f'OVERHEAD_GREEN: overhead_banner not reachable ({e})')
+            return None
+        try:
+            if self.qr_poly is not None:              # towards the QR area (the tunnels lie between)
+                cx, cy = np.mean(self.qr_poly, axis=0)
+                head = math.atan2(cy - home[1], cx - home[0])
+            else:
+                head = yaw0
+            u, n = np.array([math.cos(head), math.sin(head)]), np.array([-math.sin(head), math.cos(head)])
+            x0, y0, _, _ = self.pose()
+            fix, reds = None, []
+            for lat in self.g('overhead_lateral'):
+                s = 0.0
+                while fix is None and s <= self.g('overhead_search_dist') + 1e-6:
+                    tx, ty = np.array([x0, y0]) + s * u + lat * n
+                    self.fly(tx, ty, alt, deadline, yaw=head)
+                    fix, r = self.overhead_look()
+                    reds += r
+                    s += self.g('overhead_step')
+                if fix is not None:
+                    break
+            if fix is None:
+                self.set_state('OVERHEAD_GREEN', result='no green banner seen from above')
+                return None
+            # the tunnel axis: across the banner's long edge, pointing away from home
+            for _ in range(3):
+                axis = fix['across'] + math.pi / 2
+                if math.cos(axis) * (fix['centre'][0] - home[0]) + math.sin(axis) * (fix['centre'][1] - home[1]) < 0:
+                    axis += math.pi
+                a = np.array([math.cos(axis), math.sin(axis)])
+                look = fix['centre'] - self.g('overhead_hold_back') * a     # start side: never over the roof
+                self.fly(*look, alt, deadline, yaw=axis)
+                again, r = self.overhead_look()
+                reds += r
+                if again is None:
+                    break
+                moved = float(np.linalg.norm(again['centre'] - fix['centre']))
+                fix = again
+                if moved < 0.3:
+                    break
+            axis = fix['across'] + math.pi / 2
+            if math.cos(axis) * (fix['centre'][0] - home[0]) + math.sin(axis) * (fix['centre'][1] - home[1]) < 0:
+                axis += math.pi
+            a = np.array([math.cos(axis), math.sin(axis)])
+            c = fix['centre']
+            red = [q for q in reds if np.linalg.norm(q - c) > 1.5]
+            red_c = np.mean(red, axis=0) if red else None
+            self.set_state('OVERHEAD_GREEN', banner=[round(float(v), 2) for v in c], yaw_deg=round(math.degrees(axis), 1),
+                           banner_len_m=round(fix['length'], 2), looks=fix['n'],
+                           red=[round(float(v), 2) for v in red_c] if red_c is not None else None)
+        finally:
+            try:
+                self.set_params(self.overhead_params, active=False)
+            except Abort:
+                pass
+        # standoff before the mouth at 5 m, THEN down below 8 ft (outside the tunnel), then the D435 wall fit
+        so = c - 3.0 * a
+        self.fly(*so, alt, deadline, yaw=axis)
+        self.fly(*so, self.g('align_altitude'), deadline, yaw=axis)
+        ex = red_c if red_c is not None else c - 1000.0 * a          # far away: nothing excluded
+        found = self.align('ALIGN_GREEN', mode='geofence', predict_x=float(c[0]), predict_y=float(c[1]),
+                           predict_yaw=axis, exclude_x=float(ex[0]), exclude_y=float(ex[1]), exclude_yaw=axis,
+                           exclude_radius=self.g('exclude_radius'), geofence_max_lateral=self.g('overhead_lateral_max'))
+        if found:
+            found.setdefault('banner', [round(float(c[0]), 3), round(float(c[1]), 3), 0.0])
+            found['overhead'] = True
+        return found
+
+    def apply_course(self):
+        """The course dimensions of the ground station's geofence (dashboard Course: the organisers' defaults, editable -
+        user 2026-10-28) -> the heights near / in the tunnels, exit detection, the neighbour-tunnel test and the
+        entry_align / corridor_nav widths. No course in the json (sim worlds): the parameters as they are."""
+        try:
+            c = json.load(open(self.g('world_json'))).get('course')
+        except (OSError, ValueError):
+            c = None
+        if not isinstance(c, dict):                  # sim world files: 'course' is the course name ('v3')
+            c = None
+        self.course = c
+        if not c:
+            return
+        cap = float(c['tunnel_ceiling']) - 0.14      # 8 ft (2.44 m) -> 2.3 m, as flown so far
+        width, length = float(c['tunnel_width']), float(c['tunnel_length'])
+        mine = {'align_altitude': min(self.g('align_altitude'), cap), 'home_altitude': min(self.g('home_altitude'), cap),
+                'tunnel_altitude': min(self.g('tunnel_altitude'), cap - 0.3),
+                'min_corridor_length': round(0.6 * length, 2),            # v3: 4.0 of 6.7 m
+                'exclude_radius': round(0.6 * (width + float(c['tunnel_gap'])), 2)}   # < the centre-line spacing
+        self.set_parameters([rclpy.parameter.Parameter(k, value=float(v)) for k, v in mine.items()])
+        for name, client, kv in (('entry_align', self.entry_params, {'corridor_width': width}),
+                                 ('corridor_nav', self.corridor_params, {'half_width': width / 2,
+                                                                         'max_length': length + 5.0})):
+            try:
+                self.set_params(client, **kv)
+            except Abort as e:
+                self.get_logger().warn(f'course: {name} {kv} not set ({e})')
+        self.get_logger().info(f'course {c}: {mine}')
 
     def run(self):
         self.t_start = self.clock_s()
         self.t0_clock = self.get_clock().now()
         home = None
         try:
+            self.apply_course()
+            self.load_qr_area()
             # TAKEOFF
             self.set_state('TAKEOFF')
             deadline = self.limit('takeoff')
@@ -1116,7 +1355,8 @@ class MissionSupervisor(Node):
             else:                                    # test runs away from the pad: qr_reader's stored read
                 self.set_state('READ_START_QR', skipped='using the stored start QR')
             mode = self.g('start_from')
-            if mode not in ('search', 'delivery'):   # to the banner-search height where we are (the start area is open)
+            overhead = mode not in ('search', 'delivery') and self.g('overhead_banner')
+            if mode not in ('search', 'delivery') and not overhead:   # to the banner-search height where we are
                 x, y, _, _ = self.pose()
                 self.fly(x, y, self.g('align_altitude'), self.limit('align'))
 
@@ -1143,8 +1383,16 @@ class MissionSupervisor(Node):
                 self.fly(*self.g('search_start'), sa, deadline)
             else:
                 # ENTRY CORRIDOR (green) + entrance geofence
-                entrance = self.align('ALIGN_GREEN', colour='green', mode='banner', axis_yaw=float('nan'),
-                                      banner_exclude=False)
+                entrance = self.overhead_green(home, yaw0) if overhead else None
+                if not entrance:
+                    if overhead:                     # the D435 banner search, as before, from the banner-search height:
+                        # back over the start QR first (the search may have ended over a tunnel roof), then down
+                        z = self.pose()[2]
+                        self.fly(home[0] + math.cos(yaw0), home[1] + math.sin(yaw0), z, self.limit('align'))
+                        self.fly(home[0] + math.cos(yaw0), home[1] + math.sin(yaw0), self.g('align_altitude'),
+                                 self.limit('align'))
+                    entrance = self.align('ALIGN_GREEN', colour='green', mode='banner', axis_yaw=float('nan'),
+                                          banner_exclude=False)
                 if not entrance:
                     raise Abort(f'ALIGN_GREEN: {self.entry_state}')
                 self.record_entrance(entrance)
@@ -1174,6 +1422,7 @@ class MissionSupervisor(Node):
                         self.get_logger().warn(f'explorer route end not set ({e})')
                 drop = self.g('drop')
                 self.qr_read, self.target_seen = [], False
+                self.publish_qr_area(True)               # in the QR area now: no leaving it before the exit sequence
                 self.trigger('/delivery/map/reset')
                 self.trigger('/delivery/search/start')
                 self.trigger('/delivery/explore/start')

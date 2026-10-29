@@ -9,7 +9,7 @@ MAVROS is 191) on mavlink-router's agent endpoint (UDP 14660: router/sim.conf, o
               7 start a segment (param2: 1 full 2 qr 3 tunnel 4 qr_drop)   8 operator took over (after the ground's
               LAND / RTH / RTL / KILL: the supervisor stops without a failsafe flight)
               9 geofence (param2 chunks, param3 CRC-32 & 0xFFFFFF, param4 transfer id): the corners captured on the
-                radio page came up as TUNNEL 32810 [tid lo, tid hi, chunk, chunks] + JSON {f: field, d: delivery};
+                radio page came up as TUNNEL 32810 [tid lo, tid hi, chunk, chunks] + JSON {a: arena, q: QR area, e: extra, c: course};
                 saved + applied on the onboard dashboard (no cable / Wi-Fi to the Jetson, user 2026-10-28)
               10 search height trim (param2: the step in m, e.g. -0.5): in flight too - the explorer flies its search
                  height + the trim at once, never below its alt_min (user, 2026-10-28)
@@ -166,7 +166,9 @@ class Agent:
         except ValueError:
             return False, 'garbled corners: Save + Apply again'
         self.gf_chunks = {}
-        ok, msg = await self.api('geofence', {'field': gf.get('f', []), 'delivery': gf.get('d', [])})
+        # {a: arena, q: QR area, e: extra, c: course dimensions}
+        ok, msg = await self.api('geofence', {'arena': gf.get('a', []), 'qr': gf.get('q', []), 'extra': gf.get('e', []),
+                                              'course': gf.get('c', {})})
         if not ok:
             return ok, msg
         return await self.api('apply', {'mode': 'real'})

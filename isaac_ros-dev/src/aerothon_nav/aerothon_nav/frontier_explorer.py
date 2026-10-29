@@ -69,6 +69,7 @@ from nav_msgs.msg import OccupancyGrid, Odometry
 from std_msgs.msg import Float32, String
 from std_srvs.srv import Trigger
 
+from aerothon_nav import qr_area
 from aerothon_nav.direct_flight import DirectFlight, wrap, yaw_of
 from aerothon_nav.grid_path import PathFlight, path_length, plan, route_clear
 from vio_bringup.spin import spin_node
@@ -102,6 +103,14 @@ class FrontierExplorer(Node):
         p('mode', 'candidates')      # candidates: seen boards first, frontiers otherwise | sweep: coverage lanes first,
         #                              then frontiers | frontier: frontiers only
         p('cand_hover', 1.5)         # s over a candidate for qr_locator to decode it (3 Hz: ~4 tries)
+        # DEEP READ (user, 2026-10-28): a candidate still unread after the hover -> qr_locator's deep read (decoder
+        # settings x verify_rounds frames, then the image vs the start QR's); 'unsure' / 'unseen' -> verify_step m
+        # lower (the height trim, at once) and again, not below verify_floor (the drop height); the trim is undone
+        # when the candidate is settled. Only when that is exhausted: the look-round square below
+        p('deep_read', True)
+        p('verify_timeout', 30.0)    # s (wall) for one deep read answer
+        p('verify_step', 0.5)        # m down per try
+        p('verify_floor', 5.0)       # m: no lower than this (= the supervisor's deliver_altitude)
         p('cand_reach', 1.2)         # m: a candidate this close counts as reached
         p('cand_verify_max', 12.0)   # s (sim / ROS time) from arriving over a candidate: hover + look-round, then it
         #                              is dropped - one false board (tunnel banner) cost 65 s of a 330 s search (2026-10-27)
@@ -197,6 +206,16 @@ class FrontierExplorer(Node):
         self.create_subscription(Odometry, '/nav/odom', lambda m: setattr(self, 'odom', m), 10)
         self.create_subscription(PoseStamped, '/delivery/target', self.on_target, LATCHED)
         self.create_subscription(String, '/delivery/qrs', self.on_qrs, 10)
+        # the QR area cut at the entry tunnel's exit (supervisor): the lanes span its bounding box; the cells outside the
+        # polygon are delivery_mapper's (no unexplored ground there, so no lane runs out of it)
+        self.create_subscription(String, qr_area.TOPIC, lambda m: len(json.loads(m.data).get('polygon') or []) >= 3 and
+                                 self.set_parameters([rclpy.parameter.Parameter('zone', value=[
+                                     float(v) for v in qr_area.bbox(json.loads(m.data)['polygon'])])]), qr_area.QOS)
+        self.verify_pub = self.create_publisher(String, '/delivery/verify/request', 10)
+        self.verify_res = {}         # deep read id -> qr_locator's answer
+        self.create_subscription(String, '/delivery/verify/result', lambda m: self.verify_res.__setitem__(
+            json.loads(m.data)['id'], json.loads(m.data)), 10)
+        self.verify_id, self.verify_n, self.verify_t, self.verify_hold, self.trim_before = None, 0, 0.0, 0.0, None
         self.create_service(Trigger, '/delivery/explore/start', self.on_start)
         self.create_service(Trigger, '/delivery/explore/stop', self.on_stop)
         self.create_timer(1.0, self.tick)
@@ -217,6 +236,7 @@ class FrontierExplorer(Node):
             self.set_parameters([rclpy.parameter.Parameter('alt_offset', value=0.0)])   # a new search: no trim
         self.cand_done, self.cand_goal, self.cand_t, self.cand_look = [], None, None, None
         self.cand_ev, self.open_batch, self.batch_t = [], 0, None
+        self.verify_id, self.verify_hold, self.trim_before = None, 0.0, None
         self.spin, self.spins = None, []
         self.rejects, self.spin_due = set(), None
         self.scout, self.scout_goal, self.t_start = None, False, self.now_s()
@@ -406,10 +426,51 @@ class FrontierExplorer(Node):
         self.send(*self.scout[0], snap=self.g('snap_radius'))
         return True
 
+    def deep_read(self, gx, gy):
+        """The deep read over an unread candidate (see the deep_read parameter) -> True while it is in hand, False when
+        it is exhausted (at verify_floor without an answer): then the look-round as before."""
+        now = time.monotonic()
+        if now < self.verify_hold:
+            return True                               # settled: wait for qr_locator's board to clear the candidate
+        if self.verify_id is None:
+            self.verify_n += 1
+            self.verify_id, self.verify_t = f'{gx:.1f},{gy:.1f}#{self.verify_n}', now
+            self.verify_pub.publish(String(data=json.dumps({'id': self.verify_id, 'x': gx, 'y': gy})))
+            self.get_logger().info(f'candidate at ({gx:.1f}, {gy:.1f}): unread - deep read at {self.search_alt():.1f} m')
+            return True
+        r = self.verify_res.pop(self.verify_id, None)
+        if r is None:
+            if now - self.verify_t < self.g('verify_timeout'):
+                return True
+            r = {'result': 'timeout'}
+        self.verify_id = None
+        if r['result'] in ('read', 'match', 'different'):
+            self.get_logger().info(f'candidate at ({gx:.1f}, {gy:.1f}): deep read {r["result"]} '
+                                   f'{r.get("payload") or r.get("score", "")}')
+            self.verify_hold = now + 4.0
+            return True
+        alt = self.search_alt()
+        if alt - self.g('verify_step') < self.g('verify_floor') - 1e-6:
+            self.get_logger().info(f'candidate at ({gx:.1f}, {gy:.1f}): deep read {r["result"]} down to '
+                                   f'{alt:.1f} m - giving up on it')
+            return False
+        if self.trim_before is None:
+            self.trim_before = float(self.g('alt_offset'))
+        self.set_parameters([rclpy.parameter.Parameter('alt_offset', value=float(self.g('alt_offset')) -
+                                                       self.g('verify_step'))])
+        self.get_logger().info(f'candidate at ({gx:.1f}, {gy:.1f}): deep read {r["result"]} '
+                               f'{r.get("score", r.get("why", ""))} - {self.g("verify_step"):g} m lower')
+        self.cand_t, self.cand_arrive = time.monotonic(), self.now_s()   # hover at the new height, then again
+        return True
+
     def candidate_step(self):
         """Fly to / hover over the nearest candidate; False when there is none (frontiers then)."""
         if self.g('mode') != 'candidates':
             return False
+        if self.cand_goal is None and (self.trim_before is not None or self.verify_id is not None):
+            if self.trim_before is not None:          # the deep read's steps down: back to the search height
+                self.set_parameters([rclpy.parameter.Parameter('alt_offset', value=self.trim_before)])
+            self.trim_before, self.verify_id, self.verify_hold = None, None, 0.0
         p = self.odom.pose.pose.position
         if self.cand_goal is not None:
             gx, gy = self.cand_goal
@@ -436,7 +497,9 @@ class FrontierExplorer(Node):
                 self.cand_done.append((gx, gy))
                 self.cand_goal, self.cand_t, self.cand_look, self.cand_arrive = None, None, None, None
                 return True
-            elif self.cand_arrive is not None and self.now_s() - self.cand_arrive > self.g('cand_verify_max'):
+            elif (self.cand_arrive is not None and self.now_s() - self.cand_arrive > self.g('cand_verify_max')
+                  and not (self.g('deep_read') and (self.verify_id is not None or self.trim_before is not None
+                                                    or time.monotonic() < self.verify_hold))):
                 self.get_logger().info(f'candidate at ({gx:.1f}, {gy:.1f}): no decode in '
                                        f'{self.g("cand_verify_max"):.0f} s - next')
                 self.cancel()
@@ -457,6 +520,8 @@ class FrontierExplorer(Node):
                 self.cand_t = self.cand_t or time.monotonic()
                 self.cand_arrive = self.cand_arrive or self.now_s()
                 if time.monotonic() - self.cand_t > self.g('cand_hover'):
+                    if self.g('deep_read') and self.deep_read(gx, gy):
+                        return True
                     r = self.g('look_radius')
                     if r > 0:
                         # a square round the fix, starting from the drone's side: each leg turns the heading 90 deg

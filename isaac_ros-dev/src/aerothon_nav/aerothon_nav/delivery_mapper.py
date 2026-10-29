@@ -43,6 +43,7 @@ from std_msgs.msg import String
 from std_srvs.srv import Trigger
 from tf2_ros import Buffer, TransformListener
 
+from aerothon_nav import qr_area
 from aerothon_nav.banner_detector import quat_to_rot
 from aerothon_nav.fisheye import Fisheye
 from vio_bringup.spin import spin_node
@@ -78,10 +79,14 @@ class DeliveryMapper(Node):
         p('load_memory', True)       # False: start clean (e.g. a new world in sim)
         p('save_period', 5.0)        # s
         self.g = lambda n: self.get_parameter(n).value  # noqa: E731
+        self.poly = None             # the QR area polygon (ground station / /mission/qr_area); None: the zone rectangle
         if self.g('world_json'):
-            z = json.load(open(self.g('world_json')))['delivery_zone']
+            w = json.load(open(self.g('world_json')))
+            z = w['delivery_zone']
             self.set_parameters([rclpy.parameter.Parameter('zone', value=[float(z['x_from']), float(z['x_to']),
                                                                            float(z['y_from']), float(z['y_to'])])])
+            if len(w.get('delivery_polygon') or []) >= 3:
+                self.poly = [tuple(map(float, p)) for p in w['delivery_polygon']]
         self.cam = None
         self.last = 0.0
         self.frames = 0
@@ -96,6 +101,7 @@ class DeliveryMapper(Node):
         self.create_subscription(String, '/delivery/qrs', self.on_qrs, 10)
         self.create_service(Trigger, '/delivery/map/reset', self.on_reset)
         self.create_service(Trigger, '/delivery/memory/clear', self.on_clear)
+        self.create_subscription(String, qr_area.TOPIC, self.on_qr_area, qr_area.QOS)
         self.reset(memory=True)
         if self.g('load_memory'):
             self.load_memory()
@@ -117,9 +123,28 @@ class DeliveryMapper(Node):
         xs = self.ox + (np.arange(self.nx) + 0.5) * r
         ys = self.oy + (np.arange(self.ny) + 0.5) * r
         inside = ((xs[None, :] >= x0) & (xs[None, :] <= x1) & (ys[:, None] >= y0) & (ys[:, None] <= y1))
+        if self.poly:                                # a turned / cut QR area: its polygon, not the bounding box
+            mask = np.zeros((self.ny, self.nx), np.uint8)
+            cv2.fillPoly(mask, [np.round([((px - self.ox) / r - 0.5, (py - self.oy) / r - 0.5)
+                                          for px, py in self.poly]).astype(np.int32)], 1)
+            inside &= mask.astype(bool)
         ring = inside & ~cv2.erode(inside.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
         self.inside, self.ring = inside, ring
         self.frames = 0
+
+    def on_qr_area(self, m):
+        """The supervisor's QR area (cut at the entry tunnel's exit in flight): a new grid; the red votes and rejected
+        QRs are kept when the grid keeps its size (else forgotten: they were seen outside the QR area anyway)."""
+        poly = [tuple(map(float, p)) for p in json.loads(m.data).get('polygon') or []]
+        if len(poly) < 3 or poly == self.poly:
+            return
+        shape = (self.ny, self.nx)
+        self.poly = poly
+        self.set_parameters([rclpy.parameter.Parameter('zone', value=[float(v) for v in qr_area.bbox(poly)])])
+        self.reset()
+        if (self.ny, self.nx) != shape:
+            self.reset(memory=True)
+        self.get_logger().info(f'QR area: {len(poly)} corners, grid {self.nx} x {self.ny}')
 
     def on_reset(self, req, res):
         self.reset()

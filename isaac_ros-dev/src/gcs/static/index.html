@@ -44,7 +44,7 @@
   #cam { width:100%; border-radius:6px; background:#000; min-height:200px; display:block; }
   .checks div { display:flex; gap:6px; padding:2px 0; } .checks .k { flex:1; } .checks .d { color:var(--dim); font-size:11px; }
   .ok { color:var(--ok); } .bad { color:var(--bad); } .warn { color:var(--warn); }
-  table { width:100%; border-collapse:collapse; } td { padding:2px 3px; } td input { width:100%; }
+  table { width:100%; border-collapse:collapse; } td { padding:2px 3px; } td input { width:100%; } #tcourse td input { width:4.5em; }
   #log { height:220px; overflow:auto; font:12px/1.4 ui-monospace, monospace; background:#0b0f13; padding:6px; border-radius:6px; }
   #msg { color:var(--dim); min-height:18px; }
   button:disabled { opacity:.35; cursor:not-allowed; }
@@ -98,7 +98,7 @@
     <h2>Region · costmap · track</h2>
     <canvas id="map"></canvas>
     <div class="legend">
-      <span><i style="background:var(--field)"></i>field geofence</span><span><i style="background:var(--zone)"></i>delivery region</span>
+      <span><i style="background:var(--field)"></i>arena / keep-in</span><span><i style="background:var(--zone)"></i>QR area</span><span><i style="background:#c58cff"></i>extra</span>
       <span><i style="background:rgb(235,0,0)"></i>red zone</span><span><i style="background:rgba(230,90,90,.45)"></i>no-fly margin / boundary</span><span><i style="background:rgba(40,160,70,.5)"></i>searched</span>
       <span><i style="background:rgba(255,150,0,.9)"></i>rejected QR</span><span><i style="background:#3fbf6f"></i>target</span>
       <span><i style="background:#fff"></i>drone + track</span>
@@ -163,18 +163,29 @@
   </div>
   <div class="card">
     <h2>Geofence (GPS)</h2>
-    <div class="row"><b>Field boundary</b> <span class="d" id="nfield"></span>
-      <button onclick="capture('field')">⊕ Capture drone GPS</button><button onclick="addRow('field')">+ row</button></div>
-    <table id="tfield"></table>
-    <div class="row"><b>Delivery region</b> <span class="d" id="ndel"></span>
-      <button onclick="capture('delivery')">⊕ Capture drone GPS</button><button onclick="addRow('delivery')">+ row</button></div>
-    <table id="tdelivery"></table>
+    <div class="d">The organisers' 6 points: fill the arena OR the QR area (whichever their 4 corners are), the other 2 in
+      Extra. Arena only: the QR area's back + side walls are the arena's, its front wall = the entry tunnel's exit line (found in flight).</div>
+    <div class="row"><b>Arena</b> <span class="d" id="narena"></span>
+      <button onclick="capture('arena')">⊕ Capture drone GPS</button><button onclick="addRow('arena')">+ row</button></div>
+    <table id="tarena"></table>
+    <div class="row"><b>QR area</b> <span class="d" id="nqr"></span>
+      <button onclick="capture('qr')">⊕ Capture drone GPS</button><button onclick="addRow('qr')">+ row</button></div>
+    <table id="tqr"></table>
+    <div class="row"><b>Extra</b> <span class="d" id="nextra"></span>
+      <button onclick="capture('extra')">⊕ Capture drone GPS</button><button onclick="addRow('extra')">+ row</button></div>
+    <table id="textra"></table>
+    <div class="row"><b>Course</b> <span class="d">defaults = the organisers' numbers; edit if they change</span></div>
+    <table id="tcourse">
+      <tr><td>Tunnel width</td><td><input data-c="tunnel_width"> m</td><td>Tunnel length</td><td><input data-c="tunnel_length"> m</td></tr>
+      <tr><td>Tunnel height</td><td><input data-c="tunnel_height_ft"> ft</td><td>Max height inside</td><td><input data-c="tunnel_ceiling_ft"> ft</td></tr>
+      <tr><td>Gap between tunnels</td><td><input data-c="tunnel_gap"> m</td><td>QR area width</td><td><input data-c="qr_width"> m</td></tr>
+    </table>
     <div class="row">
       <button onclick="saveGf()">Save</button>
       <button class="go" onclick="saveGf().then(() => post('apply', {mode: val('mode')}))">Save + Apply</button>
-      <button class="noradio" onclick="ask('Replace with the sim world\'s field + zone?').then(y => y && post('from_world', {world: val('world')}).then(() => gfDirty=false))">Fill from sim world</button>
+      <button class="noradio" onclick="ask('Replace with the sim world\'s arena + QR area?').then(y => y && post('from_world', {world: val('world')}).then(() => gfDirty=false))">Fill from sim world</button>
     </div>
-    <div class="d">Tunnels are not recorded. Apply converts to map coordinates (the autopilot's GPS origin) for the drone; relaunch the stack with "use my geofence".</div>
+    <div class="d">Apply converts to map coordinates (the autopilot's GPS origin) for the drone; relaunch the stack with "use my geofence".</div>
   </div>
 </div>
 <div class="bottom" style="grid-template-columns: 1fr;">
@@ -258,14 +269,16 @@ function readRows(list) {
   return Object.values(rows).filter(p => isFinite(p[0]) && isFinite(p[1]));
 }
 function addRow(list) {
-  const pts = readRows(list), max = list === 'field' ? 8 : 4;
+  const pts = readRows(list), max = list === 'extra' ? 2 : 4;
   if (pts.length >= max) return alert(`${list}: at most ${max} corners`);
   const t = snap && snap.tel;
   pts.push([t && t.lat ? +t.lat.toFixed(7) : 0, t && t.lon ? +t.lon.toFixed(7) : 0]);
   gfRows(list, pts); gfDirty = true;
 }
 function delRow(list, i) { const pts = readRows(list); pts.splice(i, 1); gfRows(list, pts); gfDirty = true; }
-async function saveGf() { const j = await post('geofence', {field: readRows('field'), delivery: readRows('delivery'), world: val('world')}); if (j.ok) gfDirty = false; return j; }
+document.querySelectorAll('#tcourse input').forEach(e => e.oninput = () => gfDirty = true);
+function readCourse() { const c = {}; $('tcourse').querySelectorAll('input').forEach(e => { if (isFinite(parseFloat(e.value))) c[e.dataset.c] = parseFloat(e.value); }); return c; }
+async function saveGf() { const j = await post('geofence', {arena: readRows('arena'), qr: readRows('qr'), extra: readRows('extra'), course: readCourse(), world: val('world')}); if (j.ok) gfDirty = false; return j; }
 
 // ---- map
 function drawMap(s) {
@@ -274,7 +287,7 @@ function drawMap(s) {
   ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0); ctx.clearRect(0, 0, W, H);
   const loc = s.geofence_local, cm = s.costmap, pose = s.ros.pose;
   const pts = [];
-  if (loc) { pts.push(...loc.field, ...loc.delivery); }
+  if (loc) { pts.push(...loc.field, ...loc.delivery, ...loc.extra); }
   if (cm) { pts.push([cm.x0, cm.y0], [cm.x0 + cm.w, cm.y0 + cm.h]); }
   if (pose) pts.push([pose[0], pose[1]]);
   s.ros.track.forEach(p => pts.push(p));
@@ -293,7 +306,9 @@ function drawMap(s) {
   const poly = (p, col, dash) => { if (!p || p.length < 2) return; ctx.setLineDash(dash || []); ctx.strokeStyle = col; ctx.lineWidth = 2;
     ctx.beginPath(); p.forEach((q, i) => i ? ctx.lineTo(X(q[0]), Y(q[1])) : ctx.moveTo(X(q[0]), Y(q[1]))); ctx.closePath(); ctx.stroke(); ctx.setLineDash([]);
     p.forEach((q, i) => { ctx.fillStyle = col; ctx.fillText(i + 1, X(q[0]) + 3, Y(q[1]) - 3); }); };
-  if (loc) { poly(loc.field, '#3fd0d0'); poly(loc.delivery, '#e8c547', [6, 4]); }
+  if (loc) { poly(loc.field, '#3fd0d0'); poly(loc.delivery, '#e8c547', [6, 4]);
+    loc.extra.forEach((q, i) => { ctx.strokeStyle = '#c58cff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(X(q[0]), Y(q[1]), 5, 0, 7); ctx.stroke();
+      ctx.fillStyle = '#c58cff'; ctx.fillText('E' + (i + 1), X(q[0]) + 6, Y(q[1]) - 6); }); }
   // QRs
   (s.ros.qrs || []).forEach(q => { const c = q.status === 'target' ? '#3fbf6f' : q.status === 'rejected' ? '#ff9600' : '#e8c547';
     ctx.fillStyle = c; ctx.fillRect(X(q.x) - 4, Y(q.y) - 4, 8, 8); ctx.fillText(String(q.payload).split('-')[1] || '', X(q.x) + 6, Y(q.y) + 4); });
@@ -371,8 +386,11 @@ function render(s) {
   $('checks').innerHTML = s.preflight.map(c => `<div><span class="${c.ok ? 'ok' : c.critical ? 'bad' : 'warn'}">${c.ok ? '✓' : '✗'}</span>` +
     `<span class="k">${esc(c.name)}<br><span class="d">${esc(c.detail)}</span></span></div>`).join('');
   // geofence (not while editing)
-  if (!gfDirty && document.activeElement.tagName !== 'INPUT') { gfRows('field', s.geofence.field || []); gfRows('delivery', s.geofence.delivery || []); }
-  $('nfield').textContent = `${(s.geofence.field || []).length}/8`; $('ndel').textContent = `${(s.geofence.delivery || []).length}/4`;
+  if (!gfDirty && document.activeElement.tagName !== 'INPUT') {
+    ['arena', 'qr', 'extra'].forEach(k => gfRows(k, s.geofence[k] || []));
+    $('tcourse').querySelectorAll('input').forEach(e => e.value = (s.geofence.course || {})[e.dataset.c] ?? ''); }
+  $('narena').textContent = `${(s.geofence.arena || []).length}/4`; $('nqr').textContent = `${(s.geofence.qr || []).length}/4`;
+  $('nextra').textContent = `${(s.geofence.extra || []).length}/2`;
   // costmap image
   if (s.costmap && s.costmap.ver !== costVer) { costVer = s.costmap.ver; const im = new Image(); im.onload = () => costImg = im; im.src = '/costmap.png?v=' + costVer; }
   if ($('camsel').value !== s.camera && document.activeElement !== $('camsel')) $('camsel').value = s.camera;

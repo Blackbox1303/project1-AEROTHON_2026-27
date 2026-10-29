@@ -8,6 +8,10 @@ new Arducam frame is decoded using:
      (`aligned_mean`) + border-padded WeChat super-resolution / zbar.
   3. Direct full-frame WeChat + zbar fallback.
 The payload decoded most often wins. Payloads are plain strings - never opened or followed.
+The board's IMAGE is kept too (qr_match.signature of the central view, the frame with the biggest QrNet box):
+<store_file>.sig.npy + .png - qr_locator compares the zone boards that don't decode with it (user, 2026-10-28: the
+QRs may hold random text or nothing). A QR seen (box + signature in min_hits frames) that never decodes - no data -
+is a read too: payload qr_match.IMAGE_ONLY, the zone boards are then matched by image only.
 marker 'aruco' (default: the AEROTHON_MARKER environment variable, else 'qr'): the start board is an ArUco marker
 3x3 .. 6x6 instead, read on the undistorted image (aruco_tools.detect_fisheye); the payload is e.g. '4X4#23'.
   service: /mission/read_qr (std_srvs/Trigger) -> success + payload in `message`
@@ -33,6 +37,7 @@ from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
+from aerothon_nav import qr_match
 from aerothon_nav.fisheye import Fisheye
 
 
@@ -62,6 +67,7 @@ class QrReader(Node):
         g = lambda n: self.get_parameter(n).value  # noqa: E731
         self.g = g
         self.cam = None
+        self.templates, self.reading = [], False
         self.frames = {}
         self.chase = {}
         self.aruco = None
@@ -140,6 +146,22 @@ class QrReader(Node):
             return set(self.aruco_tools.detect_fisheye(self.aruco, gray, self.cam))
         return {p for p, _ in self.aruco.detect(gray)}
 
+    def template(self, view):
+        """The board's image signature in an undistorted view: around the best QrNet box (else the whole view) ->
+        (signature, box size px, crop) or None."""
+        crop, size = view, 0.0
+        if self.qnet is not None:
+            boxes = self.qnet.scan(view, conf=float(self.g('net_conf')), multi_scale=True)
+            if boxes:
+                _, poly = max(boxes, key=lambda b: b[0])
+                (x0, y0), (x1, y1) = poly.min(axis=0), poly.max(axis=0)
+                size = float(max(x1 - x0, y1 - y0))
+                pad = 0.35 * size
+                X0, Y0 = int(max(0, x0 - pad)), int(max(0, y0 - pad))
+                crop = view[Y0:int(min(view.shape[0], y1 + pad)), X0:int(min(view.shape[1], x1 + pad))]
+        sig = qr_match.signature(crop)
+        return None if sig is None else (sig, size, crop)
+
     def read(self, gray):
         """Multi-stage start QR decode: central gnomonic rectification -> candidate/QrNet bounding box search +
         virtual camera steering + aligned multi-frame averaging -> direct full-frame fallback."""
@@ -148,6 +170,10 @@ class QrReader(Node):
         if self.cam is not None:
             try:
                 c_view, _ = self.cam.rectify_patch(gray, ray_d=None, fov_deg=75.0, zoom_scale=1.0, max_size=1400)
+                if self.reading:
+                    t = self.template(c_view)
+                    if t is not None:
+                        self.templates.append(t)
                 found = self._decode_crop(c_view)
                 if found:
                     return found
@@ -188,8 +214,31 @@ class QrReader(Node):
         # 3. Direct full-frame WeChat + zbar fallback
         return self._decode_crop(gray)
 
+    def save_template(self):
+        """The start board's image (the biggest box seen) -> <store_file>.sig.npy / .png; False if none."""
+        if not self.templates:
+            return False
+        sig, size, crop = max(self.templates, key=lambda t: t[1])
+        base = Path(self.g('store_file'))
+        try:
+            base.parent.mkdir(parents=True, exist_ok=True)
+            np.save(base.with_suffix('.sig.npy'), sig)
+            cv2.imwrite(str(base.with_suffix('.png')), crop)
+        except OSError as e:
+            self.get_logger().error(f'could not store the start QR image: {e}')
+            return False
+        self.get_logger().info(f'start QR image stored ({len(self.templates)} views, box {size:.0f} px)')
+        return True
+
     def on_read(self, req, res):
         self.chase.clear()
+        self.templates, self.reading = [], True
+        try:
+            return self.scan(res)
+        finally:
+            self.reading = False
+
+    def scan(self, res):
         votes = {'topic': Counter(), 'fallback_topic': Counter()}
         seen, last = Counter(), {}
         end = time.monotonic() + self.g('scan_time')
@@ -211,6 +260,11 @@ class QrReader(Node):
         source = 'topic' if votes['topic'] else 'fallback_topic' if votes['fallback_topic'] else None
         counts = votes[source] if source else Counter()
         payload, hits = counts.most_common(1)[0] if counts else (None, 0)
+        stored = self.save_template()
+        if payload is None and stored and len(self.templates) >= self.g('min_hits'):
+            # a board in view, never decoded: no data on it - match the zone boards by image
+            payload, hits, source = qr_match.IMAGE_ONLY, len(self.templates), 'topic'
+            self.get_logger().warn(f'start QR seen in {hits} frames but no data decoded: matching by image only')
         if payload is None or hits < self.g('min_hits'):
             res.success = False
             res.message = (f'no QR read ({hits} hits; frames {dict(seen)})' if not seen or payload is None

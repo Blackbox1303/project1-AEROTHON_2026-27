@@ -30,6 +30,13 @@ coverage) and ArUco markers are found on undistorted gnomonic views of the frame
 --fov-deg pinhole projection. A checkerboard calibration of the real unit should replace the rated FOV.
 ArUco delivery (--marker aruco, default the AEROTHON_MARKER environment variable): the boards carry ArUco markers
 3x3 .. 6x6 (aerothon_nav.aruco_tools, payload e.g. '4X4#23') instead of QR codes; everything after the read is the same.
+QR AREA (user, 2026-10-28, as the 8080 dashboard): GPS slots arena 4 + QR area 4 + extra 2 (/api/zone_gps), through
+the autopilot's GPS origin; the QR area given, or the arena with its front wall = the line through the take-off point
+parallel to the back wall (the drone is carried into the QR area). Routes never leave it (A* keep-in; home +-2 m).
+DEEP READ (QR boards): a candidate still unread after the hover -> --verify-rounds frames of undistorted views (3 FOV)
+x the filter settings of aerothon_nav.qr_match, then its image vs the start QR's (stored at the start read; a start
+QR without data = qr_match.IMAGE_ONLY): match = the target, different = another board, unsure / not seen -> 0.5 m
+lower (not below --verify-floor) and again; the search height comes back afterwards.
 Usage:  vrx_explore.py --video /dev/video2 --link udpout:127.0.0.1:14551 [--alt 1.0] [--port 8094]
         (scripts/vrx_explore.sh starts it with the PX4 SIH SITL)
 """
@@ -52,12 +59,13 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / 'laptop_vrx'))
 import laptop_vrx_mission as base  # noqa: E402
 sys.path.insert(0, str(HERE.parents[1] / 'aerothon_nav'))
-from aerothon_nav import aruco_tools  # noqa: E402
+from aerothon_nav import aruco_tools, qr_area, qr_match  # noqa: E402
 from aerothon_nav.fisheye import Fisheye  # noqa: E402
 LENS_DFOV = {'b19': 130.0}   # rated diagonal FOV, deg
 
 FSM = ['IDLE', 'TAKEOFF', 'EXPLORE', 'RETURN_HOME', 'LAND', 'DONE']
 # the QR area with the payload drop (8080 offboard segment qr_drop): the start QR first, the drop on the match
+FSM_HOP = ['IDLE', 'TAKEOFF', 'HOVER', 'LAND', 'DONE']                # pre-mission take-off / land check
 FSM_DROP = ['IDLE', 'TAKEOFF', 'READ_START_QR', 'EXPLORE', 'DELIVER', 'DROP', 'RETURN_HOME', 'LAND', 'DONE']
 SKIP_VIDEO = ('realsense', 'vi-output', 'tegra')   # D435 nodes and the CSI camera: never opened here
 
@@ -120,8 +128,12 @@ class ExploreMap:
         self.min_red_votes, self.red_share = min_red_votes, red_share
         self.set_zone(zone, home)
 
-    def set_zone(self, zone, home):
-        self.zone = tuple(float(v) for v in zone)                  # x_min, x_max, y_min, y_max (ENU, m)
+    def set_zone(self, zone, home, poly=None):
+        """zone = x_min, x_max, y_min, y_max (ENU, m); poly: the QR area's corners (the zone = their bounding box)."""
+        if poly:
+            zone = qr_area.bbox(poly)
+        self.poly = [tuple(map(float, p)) for p in poly] if poly else None
+        self.zone = tuple(float(v) for v in zone)
         x0, x1, y0, y1 = self.zone
         hx, hy = home
         self.ox, self.oy = min(x0, hx) - 2.0, min(y0, hy) - 2.0
@@ -136,6 +148,15 @@ class ExploreMap:
         self.trail = np.zeros((self.h, self.w), bool)           # cells flown over (the retrace cost)
         (i0, j0), (i1, j1) = self.cell(x0, y0), self.cell(x1, y1)
         self.in_zone[max(j0, 0):min(j1, self.h - 1) + 1, max(i0, 0):min(i1, self.w - 1) + 1] = True
+        if self.poly:
+            m = np.zeros((self.h, self.w), np.uint8)
+            cv2.fillPoly(m, [np.round([((px - self.ox) / self.res - 0.5, (py - self.oy) / self.res - 0.5)
+                                       for px, py in self.poly]).astype(np.int32)], 1)
+            self.in_zone &= m.astype(bool)
+        # the keep-in: routes stay in the zone (user, 2026-10-28: no leaving the QR area), home +-2 m for the way in/out
+        hm = np.zeros((self.h, self.w), np.uint8)
+        cv2.circle(hm, self.cell(hx, hy), int(2.0 / self.res), 1, -1)
+        self.keep = self.in_zone | hm.astype(bool)
         self.ver = 0
 
     def cell(self, x, y):
@@ -180,7 +201,7 @@ class ExploreMap:
         red = self.red().astype(np.uint8)
         r = max(1, int(math.ceil((self.red_margin if margin is None else margin) / self.res)))
         k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
-        return cv2.dilate(red, k).astype(bool)
+        return cv2.dilate(red, k).astype(bool) | ~self.keep
 
     def coverage(self):
         n = int(self.in_zone.sum())
@@ -319,6 +340,8 @@ class VrxExplore(base.VrxDeliverySystem):
         self.rejects, self.spins, self.spin_due = set(), [], None   # reject payloads; scan spots; a scan to do
         self.scout = None                         # scout waypoints left, None = no scout
         self.aruco, self.cam = None, None
+        self.gf = {'arena': [], 'qr': [], 'extra': []}   # the GPS slots typed on the page
+        self.template, self.templates = None, []         # the start QR's image (qr_match.signature)
         if a.marker == 'aruco':
             self.aruco = aruco_tools.Detector(raw=False)   # a 4x4-6x6 grid off the dictionaries is a misread
             print('ArUco delivery: markers 3x3 .. 6x6', flush=True)
@@ -532,12 +555,158 @@ class VrxExplore(base.VrxDeliverySystem):
     def _update_qr_status(self, q):
         """(under self.lock) also: a reject read for the first time near the drone in the search -> a yaw scan."""
         super()._update_qr_status(q)
+        q['in_zone'] = self.in_zone(q['x'], q['y'])          # the QR area polygon, not its bounding box
         q['status'] = 'found' if q['confirmed'] else 'reading'
         if (self.start_qr and q['payload'] != self.start_qr and q['payload'] not in self.rejects
                 and q.get('in_zone') and self.mission_running and self.in_flight):
             self.rejects.add(q['payload'])
             if self.pose and math.dist(self.pose[:2], (q['x'], q['y'])) < self.a.spin_near:
                 self.spin_due = (q['x'], q['y'])
+
+    # ---- the start QR's image + the deep read (QR boards; see the docstring)
+    def view_at(self, gray, x, y, pose, rpy, fovs=((12.0, 3.0), (18.0, 2.2), (26.0, 1.6))):
+        """Undistorted views (one per FOV / zoom) along the ray to the ground point (x, y), or None."""
+        h, w = gray.shape[:2]
+        cam = self.lens(w, h)
+        if pose is None or cam is None:
+            return None if cam is not None else [('centre', gray[h // 4:3 * h // 4, w // 4:3 * w // 4])]
+        z = pose[2] if pose[2] > 0.4 else float(self.search_alt)
+        ray = np.array([x - pose[0], y - pose[1], -z])
+        flu = (ray / np.linalg.norm(ray)) @ base.rpy_to_rot_enu(*rpy)     # rays_enu = rays_flu @ R.T, inverted
+        opt = np.array([-flu[1], -flu[0], -flu[2]])                       # FLU -> optical (camera straight down)
+        if opt[2] < math.cos(math.radians(60.0)):
+            return None
+        return [(f'fov{f:g}', cam.rectify_patch(gray, ray_d=opt, fov_deg=f, zoom_scale=k, max_size=400)[0])
+                for f, k in fovs]
+
+    def scan_start_qr_here(self, duration=5.0):
+        """The base's read + the board's image for the deep read; a board seen but never decoded (no data) ->
+        qr_match.IMAGE_ONLY."""
+        if self.aruco is not None:
+            return super().scan_start_qr_here(duration)
+        self.templates, stop = [], threading.Event()
+
+        def grab():
+            while not stop.is_set():
+                with self.lock:
+                    gray, pose, rpy = self.latest_gray, self.pose, self.rpy_ned
+                views = self.view_at(gray, pose[0], pose[1], pose, rpy, fovs=((40.0, 1.0),)) \
+                    if gray is not None and pose is not None else None
+                sig = qr_match.signature(views[0][1]) if views else None
+                if sig is not None:
+                    self.templates.append(sig)
+                time.sleep(0.3)
+        t = threading.Thread(target=grab, daemon=True)
+        t.start()
+        try:
+            got = super().scan_start_qr_here(max(duration, 3.0))
+        finally:
+            stop.set()
+            t.join(1.0)
+        if self.templates:
+            self.template = self.templates[len(self.templates) // 2]
+        if not got and len(self.templates) >= 2:
+            with self.lock:
+                self.start_qr = qr_match.IMAGE_ONLY
+                for q in self.qrs:
+                    self._update_qr_status(q)
+            self.log_mission('READ_START_QR', event='a board but no data decoded: matching by image only')
+            return qr_match.IMAGE_ONLY
+        return got
+
+    def deep_read(self, x, y):
+        """Over an unread candidate: -> 'read' | 'match' | 'different' | 'unsure' | 'unseen'."""
+        scores, frames, last = [], 0, None
+        while frames < self.a.verify_rounds:
+            if self.abort_reason:
+                raise RuntimeError(self.abort_reason)
+            with self.lock:
+                gray, pose, rpy = self.latest_gray, self.pose, self.rpy_ned
+            if gray is None or gray is last:
+                time.sleep(0.05)
+                continue
+            last, frames = gray, frames + 1
+            views = self.view_at(gray, x, y, pose, rpy)
+            if not views:
+                continue
+            for name, patch in views:
+                for fname, img in qr_match.variants(patch):
+                    hit = self._decode_patch(img)
+                    if hit:
+                        payload = next(iter(hit))
+                        if self.start_qr == qr_match.IMAGE_ONLY and \
+                                (qr_match.similarity(self.template, qr_match.signature(views[1][1])) or -1) >= self.a.match_hi:
+                            payload = qr_match.IMAGE_ONLY
+                        self.add_board(payload, x, y, pose)
+                        self.log_mission('EXPLORE', event=f'deep read at ({x:.1f}, {y:.1f}): {payload!r} ({name}/{fname})')
+                        return 'read'
+            s = qr_match.similarity(self.template, qr_match.signature(views[1][1]))
+            if s is not None:
+                scores.append(s)
+        if self.template is None or len(scores) < 3:
+            return 'unsure' if self.template is None else 'unseen'
+        s = float(np.median(sorted(scores)[-3:]))
+        res = 'match' if s >= self.a.match_hi else 'different' if s <= self.a.match_lo else 'unsure'
+        if res == 'match':
+            self.add_board(self.start_qr, x, y, pose)
+        elif res == 'different':
+            self.add_board(f'<board {x:.1f},{y:.1f}>', x, y, pose)
+        self.log_mission('EXPLORE', event=f'deep read at ({x:.1f}, {y:.1f}): image {res} ({s:.2f})')
+        return res
+
+    def add_board(self, payload, x, y, pose):
+        for _ in range(2):                                   # confirmed (n >= 2)
+            self.add_qr_detection(payload, (x, y), [x - 0.5, y - 0.5, x + 0.5, y + 0.5], 1.0, time.monotonic(), pose)
+
+    def verify_candidate(self, x, y):
+        """The deep read, then 0.5 m lower and again while unsure (not below --verify-floor); height restored."""
+        alt0 = self.alt
+        try:
+            while True:
+                with self.lock:
+                    read = any(math.dist((q['x'], q['y']), (x, y)) < 1.5 for q in self.qrs)
+                if read or self.aruco is not None:
+                    return
+                res = self.deep_read(x, y)
+                if res in ('read', 'match', 'different'):
+                    return
+                if self.alt - self.a.verify_step < self.a.verify_floor - 1e-6:
+                    self.log_mission('EXPLORE', event=f'deep read at ({x:.1f}, {y:.1f}): {res} down to '
+                                                      f'{self.alt:.1f} m - giving up on it')
+                    return
+                self.set_alt(self.alt - self.a.verify_step)
+                self.log_mission('EXPLORE', event=f'deep read at ({x:.1f}, {y:.1f}): {res} - down to {self.alt:.1f} m')
+                time.sleep(self.a.verify_step / 0.5 + self.a.cand_hover)   # descend, settle, the normal decode
+        finally:
+            if self.alt != alt0:
+                self.set_alt(alt0)
+
+    def set_alt(self, alt):
+        with self.lock:
+            self.alt = round(alt, 2)
+            if self.offboard_active and self.setpoint:
+                x, y, _, yaw = self.setpoint
+                self.setpoint = (x, y, self.alt, yaw)
+
+    def zone_from_gps(self, gf):
+        """GPS slots -> (QR area corners ENU, message) or (None, error)."""
+        if self.origin is None:
+            return None, 'no GPS origin from the autopilot yet'
+        lat0, lon0 = self.origin[0], self.origin[1]
+        loc = {k: [base.gps_to_local(float(p[0]), float(p[1]), lat0, lon0) for p in gf.get(k) or []]
+               for k in ('arena', 'qr', 'extra')}
+        if len(loc['qr']) == 4:
+            return qr_area.ccw(loc['qr']), 'QR area given'
+        if len(loc['arena']) != 4:
+            return None, 'need 4 QR-area corners or 4 arena corners'
+        with self.lock:
+            home = (self.pose[0], self.pose[1]) if self.pose else (0.0, 0.0)
+        back = sorted(loc['arena'], key=lambda p: -math.dist(p, home))[:2]
+        mid = ((back[0][0] + back[1][0]) / 2, (back[0][1] + back[1][1]) / 2)
+        poly = qr_area.front_from_tunnel_exit(loc['arena'], back, home, math.atan2(mid[1] - home[1], mid[0] - home[0]))
+        if poly is None:
+            return None, 'the arena and the take-off point give no closed QR area'
+        return poly, 'arena: front wall through the take-off point'
 
     # ---- planning
     def pending(self):
@@ -775,6 +944,8 @@ class VrxExplore(base.VrxDeliverySystem):
                         self.log_mission('EXPLORE', event='scout line done')
                 if res == 'arrived' and goal['kind'] == 'QR candidate':
                     time.sleep(self.a.cand_hover)                    # hover for the decode
+                    if self.a.deep_read:
+                        self.verify_candidate(goal['x'], goal['y'])
                     self.visited.append((goal['x'], goal['y']))
                     with self.lock:
                         q = min(self.qrs, key=lambda q: math.dist((q['x'], q['y']), (goal['x'], goal['y'])), default=None)
@@ -819,6 +990,47 @@ class VrxExplore(base.VrxDeliverySystem):
             with self.lock:
                 self.goal, self.path = None, []
 
+    def run_hop(self):
+        """Pre-mission check (user, 2026-10-28): take off over home, hover, land - no exploring. The fly-away guard
+        runs against the hop height (self.alt is swapped for the hop and put back after)."""
+        self.mission_running = True
+        self.abort_reason = None
+        self.mission_t0 = time.time()
+        self.fsm = FSM_HOP
+        search_alt, hop_alt = self.alt, self.a.hop_alt
+        with self.lock:
+            home_pose = self.pose or (0.0, 0.0, 0.0, 0.0)
+            self.alt = hop_alt
+        try:
+            self.log_mission('TAKEOFF', altitude_m=hop_alt, event='hop test')
+            self.arm_takeoff(home_pose[0], home_pose[1], hop_alt, home_pose[3], timeout=30.0)
+            self.in_flight = True
+            self.log_mission('HOVER', seconds=self.a.hop_hold)
+            end = time.monotonic() + self.a.hop_hold
+            while time.monotonic() < end:
+                if self.abort_reason:
+                    raise RuntimeError(self.abort_reason)
+                time.sleep(0.2)
+            self.log_mission('LAND')
+            self.in_flight = False
+            self.offboard_active = False
+            self.set_px4_mode('AUTO.LAND')
+            t_end = time.monotonic() + 40
+            while time.monotonic() < t_end and self.tel.get('armed'):
+                time.sleep(0.5)
+            self.log_mission('DONE', event='hop test: landed' if not self.tel.get('armed') else 'hop test: still armed',
+                             total_s=round(time.time() - self.mission_t0, 1))
+        except Exception as e:
+            self.log_mission('FAILSAFE', reason=str(e))
+            self.offboard_active = False
+            if 'operator took over' not in str(e):
+                self.set_px4_mode('AUTO.LOITER' if 'abort' in str(e).lower() and 'height' not in str(e) else 'AUTO.LAND')
+        finally:
+            with self.lock:
+                self.alt = search_alt
+            self.mission_running = False
+            self.in_flight = False
+
     def deliver_here(self, target):
         """A* to the matched QR (round the red zones), down to the drop height, release, back up."""
         tx, ty = target
@@ -859,6 +1071,7 @@ class VrxExplore(base.VrxDeliverySystem):
                 coverage=round(cov, 3), rects=m.rects, goal=self.goal, path=self.path,
                 setpoint=self.setpoint if self.offboard_active else None, mission_running=self.mission_running,
                 red_cells=int(m.red().sum()), blacklist=self.blacklist[-30:],
+                gf=self.gf, zone=list(m.zone),
             )
         return s
 
@@ -910,7 +1123,7 @@ def make_app(sc):
     async def api(request):
         what = request.match_info['what']
         body = await request.json() if request.can_read_body else {}
-        if sc.a.read_only and what in ('start', 'home', 'abort', 'land'):
+        if sc.a.read_only and what in ('start', 'hop', 'home', 'abort', 'land'):
             return ok(False, 'read-only mode: no commands to the autopilot (restart without --read-only to fly)')
         if what == 'start':
             if sc.mission_running:
@@ -923,6 +1136,15 @@ def make_app(sc):
                 sc.start_qr = str(body['start_qr']).strip()
             threading.Thread(target=sc.run_explore, daemon=True).start()
             return ok(True, f'{"QR area + drop" if sc.drop else "QR area"} mission started at {sc.alt} m')
+        if what == 'hop':
+            if sc.mission_running:
+                return ok(False, 'mission already running')
+            if 'HEARTBEAT' not in sc.tel_time or time.monotonic() - sc.tel_time['HEARTBEAT'] > 3:
+                return ok(False, f'no autopilot heartbeat on {sc.args.radio}')
+            if sc.tel.get('armed'):
+                return ok(False, 'already armed: the hop test starts on the ground')
+            threading.Thread(target=sc.run_hop, daemon=True).start()
+            return ok(True, f'hop test: take off to {sc.a.hop_alt} m, hover {sc.a.hop_hold:.0f} s, land')
         if what == 'abort':
             sc.abort_reason = 'Operator abort'
             sc.offboard_active = False
@@ -965,6 +1187,20 @@ def make_app(sc):
                 sc.zone_enu = tuple(z)
                 sc.map.set_zone(z, home)
             return ok(True, f'zone {z} (map cleared)')
+        if what == 'zone_gps':
+            if sc.mission_running:
+                return ok(False, 'stop the mission first')
+            gf = {k: [p for p in body.get(k) or [] if len(p) == 2][:n] for k, n in (('arena', 4), ('qr', 4), ('extra', 2))}
+            poly, msg = sc.zone_from_gps(gf)
+            if poly is None:
+                return ok(False, msg)
+            with sc.lock:
+                home = (sc.pose[0], sc.pose[1]) if sc.pose else (0.0, 0.0)
+                sc.gf = gf
+                sc.map.set_zone(None, home, poly)
+                sc.zone_enu = sc.map.zone
+            return ok(True, f'{msg}: {len(poly)} corners, box x {sc.zone_enu[0]:.1f}..{sc.zone_enu[1]:.1f}, '
+                            f'y {sc.zone_enu[2]:.1f}..{sc.zone_enu[3]:.1f} m (map cleared)')
         if what == 'red_rect':
             r = [float(v) for v in body.get('rect', [])]
             if len(r) == 4:
@@ -1009,6 +1245,8 @@ def main():
     ap.add_argument('--link', default='udpout:127.0.0.1:14551',
                     help='PX4 MAVLink: the SITL via the onboard router (default), or the radio /dev/ttyUSB0:57600')
     ap.add_argument('--alt', type=float, default=1.0, help='flight height, m')
+    ap.add_argument('--hop-alt', type=float, default=1.5, help='hop test (take off / hover / land) height, m')
+    ap.add_argument('--hop-hold', type=float, default=10.0, help='hop test hover time, s')
     ap.add_argument('--speed', type=float, default=0.5, help='cruise speed, m/s')
     ap.add_argument('--alt-min', type=float, default=0.8, help='m: the operator\'s height trim never goes below this')
     ap.add_argument('--zone', type=float, nargs=4, default=[1.0, 9.0, -4.0, 4.0], metavar=('X0', 'X1', 'Y0', 'Y1'),
@@ -1033,6 +1271,13 @@ def main():
     ap.add_argument('--trail-radius', type=float, default=0.5, help='m round the track counted as flown over')
     ap.add_argument('--done-coverage', type=float, default=0.95, help='explored share that ends the search')
     ap.add_argument('--time-budget', type=float, default=720.0, help='s before returning (15 min mission rule)')
+    ap.add_argument('--no-deep-read', dest='deep_read', action='store_false',
+                    help='QR: no deep read / image match / step down at an unread candidate')
+    ap.add_argument('--verify-rounds', type=int, default=5, help='frames of the deep read')
+    ap.add_argument('--verify-step', type=float, default=0.5, help='m lower per unsure deep read')
+    ap.add_argument('--verify-floor', type=float, default=5.0, help='m: the deep read never steps below this')
+    ap.add_argument('--match-hi', type=float, default=0.80, help='image match: >= this the start QR')
+    ap.add_argument('--match-lo', type=float, default=0.50, help='image match: <= this another board')
     ap.add_argument('--qgc', default='127.0.0.1:14550')
     ap.add_argument('--wechat-dir', default='')
     ap.add_argument('--port', type=int, default=8094)

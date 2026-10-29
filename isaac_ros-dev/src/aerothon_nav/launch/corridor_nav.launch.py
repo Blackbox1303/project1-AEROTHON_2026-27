@@ -72,6 +72,11 @@ def generate_launch_description():
         Node(package='drone_qr_detector', executable='banner_node', name='banner_detector', output='screen',
              condition=LaunchConfigurationEquals('corridor_impl', 'aerothon'),
              parameters=[{'use_sim_time': sim, 'with_letters': sim}]),
+        # the supervisor's 5 m overhead banner fix (user, 2026-10-28: the downward Arducam finds the green entry banner
+        # from 5 m, red = the other tunnel): both corridor implementations; idle until the supervisor sets active
+        Node(package='drone_qr_detector', executable='banner_node', name='overhead_banner', output='screen',
+             parameters=[{'use_sim_time': sim, 'with_letters': sim, 'out_topic': '/nav/banner/overhead',
+                          'active': False, 'rate_hz': 4.0}]),
         Node(package='aerothon_nav', executable='entry_align', output='screen', condition=ours,
              parameters=[{'use_sim_time': sim}, course_file]),
         # 2D SLAM of the corridors on the levelled D435 scan -> /map (corridor Nav2 global costmap static layer)

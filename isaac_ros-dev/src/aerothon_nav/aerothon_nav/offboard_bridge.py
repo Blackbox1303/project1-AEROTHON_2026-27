@@ -31,7 +31,7 @@ import os
 import rclpy.duration
 
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from geometry_msgs.msg import PoseStamped, Twist
 from sensor_msgs.msg import LaserScan
 from mavros_msgs.msg import PositionTarget, State
@@ -132,6 +132,11 @@ class OffboardBridge(Node):
         self.tunnels = []            # corridor boxes (geofence_json): the tunnel ceiling applies there
         self.poly = None             # field_polygon of the ground station's geofence json: THE keep-in when given
         self.fence = self.load_fence()
+        # the QR AREA LOCK (user, 2026-10-28: once in the QR area the drone must not leave it until the exit-tunnel
+        # sequence): /mission/qr_area {polygon, lock} from the supervisor - locked, the polygon is a keep-in too
+        self.lock = None
+        self.create_subscription(String, '/mission/qr_area', self.on_qr_area, QoSProfile(
+            depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         if self.fence:
             self.get_logger().info(f'geofence: {len(self.fence)} boxes ' +
                                    ' '.join(f'[{a:.1f},{b:.1f}]x[{c:.1f},{d:.1f}]' for a, b, c, d in self.fence))
@@ -142,6 +147,14 @@ class OffboardBridge(Node):
         self.set_mode = self.create_client(SetMode, '/mavros/set_mode')
         self.create_service(SetBool, '/nav/offboard', self.on_offboard)
         self.create_timer(1.0 / g('rate_hz'), self.tick)
+
+    def on_qr_area(self, m):
+        d = json.loads(m.data)
+        lock = [tuple(map(float, p)) for p in d['polygon']] if d.get('lock') and len(d.get('polygon') or []) >= 3 else None
+        if (lock is None) != (self.lock is None):
+            self.get_logger().info('QR area lock ' + ('ON: ' + ' '.join(f'({x:.1f},{y:.1f})' for x, y in lock)
+                                                      if lock else 'off'))
+        self.lock = lock
 
     def on_cmd(self, m):
         self.cmd, self.cmd_time = m, self.get_clock().now()
@@ -196,6 +209,10 @@ class OffboardBridge(Node):
             boxes += [tuple(flat[i:i + 4]) for i in range(0, len(flat) - 3, 4)]
         if g('geofence_json'):
             w = json.load(open(g('geofence_json')))
+            if isinstance(w.get('course'), dict):     # the dashboard's course (sim worlds: a name): the max height inside, 0.14 m below
+                cap = min(g('tunnel_max_altitude'), float(w['course']['tunnel_ceiling']) - 0.14)
+                self.set_parameters([rclpy.parameter.Parameter('tunnel_max_altitude', value=cap)])
+                self.get_logger().info(f'tunnel ceiling from the course: {cap:.2f} m')
             if len(w.get('field_polygon') or []) >= 3:
                 # the ground station's field boundary (6-8 GPS corners -> odom). The corridors can't be recorded on the
                 # day: the polygon alone is the keep-in; corridor boxes, if the json has any (sim), still cap the height
@@ -216,19 +233,21 @@ class OffboardBridge(Node):
             boxes.append((z['x_from'], z['x_to'], z['y_from'], z['y_to']))
         return boxes
 
-    def in_poly(self, x, y):
-        inside, n = False, len(self.poly)
+    def in_poly(self, x, y, poly=None):
+        poly = poly or self.poly
+        inside, n = False, len(poly)
         for i in range(n):
-            (x1, y1), (x2, y2) = self.poly[i], self.poly[(i + 1) % n]
+            (x1, y1), (x2, y2) = poly[i], poly[(i + 1) % n]
             if (y1 > y) != (y2 > y) and x < x1 + (y - y1) * (x2 - x1) / (y2 - y1):
                 inside = not inside
         return inside
 
-    def nearest_on_poly(self, x, y):
+    def nearest_on_poly(self, x, y, poly=None):
+        poly = poly or self.poly
         best, bd = None, 1e18
-        n = len(self.poly)
+        n = len(poly)
         for i in range(n):
-            (x1, y1), (x2, y2) = self.poly[i], self.poly[(i + 1) % n]
+            (x1, y1), (x2, y2) = poly[i], poly[(i + 1) % n]
             dx, dy = x2 - x1, y2 - y1
             t = max(0.0, min(1.0, ((x - x1) * dx + (y - y1) * dy) / max(dx * dx + dy * dy, 1e-9)))
             px, py = x1 + t * dx, y1 + t * dy
@@ -240,6 +259,10 @@ class OffboardBridge(Node):
     def inside(self, x, y, z=None):
         """In an allowed box (or the field polygon); a tunnel box only below tunnel_max_altitude (+0.3 m) when z is given."""
         ceiling = self.get_parameter('tunnel_max_altitude').value + 0.3
+        if self.lock is not None and not self.in_poly(x, y, self.lock):
+            return False
+        if not self.fence:
+            return True
         if self.poly is not None:
             return self.in_poly(x, y) and (z is None or z <= ceiling or not any(
                 a <= x <= b and c <= y <= d for a, b, c, d in self.tunnels))
@@ -252,7 +275,7 @@ class OffboardBridge(Node):
 
     def fenced(self, x, y, vx, vy, z=None):
         """World velocity limited to the geofence (tunnels only below their ceiling)."""
-        if not self.fence:
+        if not self.fence and self.lock is None:
             return vx, vy
         t = self.get_parameter('geofence_lookahead').value
         if self.inside(x, y):
@@ -266,7 +289,9 @@ class OffboardBridge(Node):
                 return 0.0, vy
             return 0.0, 0.0
         # outside: back to the nearest allowed point
-        if self.poly is not None:
+        if self.lock is not None and not self.in_poly(x, y, self.lock):
+            best = self.nearest_on_poly(x, y, self.lock)
+        elif self.poly is not None:
             best = self.nearest_on_poly(x, y)
         else:
             best = min(((min(max(x, a), b), min(max(y, c), d)) for a, b, c, d in self.fence),

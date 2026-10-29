@@ -17,10 +17,13 @@ Data in:
             /nav/odom (track), node states, /delivery/coverage, cameras (Gazebo) - and the supervisor's services:
             /mission/start, /mission/abort, /mission_supervisor/set_parameters, /mission/start_qr (payload)
   Camera    a ROS image topic (sim) or /dev/video2 (the Jetson's camera), as MJPEG
-Geofence: the field boundary polygon (<= 8 GPS corners) + the delivery region (4 corners), typed in or captured from
-the drone's GPS (move it there, press Capture). The corridors are not recorded (GPS-less tunnels). Apply converts it
-to odom around PX4's GPS origin and writes runs/gcs/mission_geofence.json - the nodes' world_json: delivery_zone
-(bounding box), field_polygon (offboard_bridge's keep-in), corridors (sim: the world's, for the tunnel ceiling).
+Geofence: GPS slots arena (4) + QR area (4) + extra (2) - the organisers' 6 points may be either set - typed in or
+captured from the drone's GPS (move it there, press Capture), and the course dimensions (tunnel width / height /
+max flight height / length / gap, QR-area width; defaults = the organisers' numbers). The corridors are not
+recorded (GPS-less tunnels). Apply converts it to odom around the autopilot's GPS origin and writes
+runs/gcs/mission_geofence.json - the nodes' world_json: delivery_zone (bounding box) + delivery_polygon (the QR
+area; arena only: cut at the entry tunnel's exit line in flight), field_polygon (offboard_bridge's keep-in), course,
+corridors (sim: the world's, for the tunnel ceiling).
 Stack: sim = sim_mission.launch.py (Gazebo headless + PX4 + router + MAVROS + container), held on the ground;
 real = mavlink-router (real.conf) + MAVROS on the flight controller's serial link (the drone's own sensor / mission
 stack is started on the drone).
@@ -61,12 +64,12 @@ EARTH_R = 6378137.0
 
 # the supervisor's FSM, in mission order (for the dashboard's pipeline)
 FSM = {
-    'full': ['TAKEOFF', 'READ_START_QR', 'ALIGN_GREEN', 'GEOFENCE', 'ENTRY_CORRIDOR', 'SEARCH_DELIVERY', 'DELIVER',
+    'full': ['TAKEOFF', 'READ_START_QR', 'OVERHEAD_GREEN', 'ALIGN_GREEN', 'GEOFENCE', 'ENTRY_CORRIDOR', 'SEARCH_DELIVERY', 'DELIVER',
              'DROP', 'TO_EXIT', 'ALIGN_EXIT', 'RETURN_CORRIDOR', 'RETURN_HOME', 'LAND', 'DONE'],
     'qr_drop': ['TAKEOFF', 'READ_START_QR', 'DIRECT_TO_ZONE', 'SEARCH_DELIVERY', 'DELIVER', 'DROP', 'ZONE_EXIT',
                 'RETURN_HOME', 'LAND', 'DONE'],
     'qr': ['TAKEOFF', 'READ_START_QR', 'DIRECT_TO_ZONE', 'SEARCH_DELIVERY', 'ZONE_EXIT', 'RETURN_HOME', 'LAND', 'DONE'],
-    'tunnel': ['TAKEOFF', 'READ_START_QR', 'ALIGN_GREEN', 'GEOFENCE', 'ENTRY_CORRIDOR', 'TO_EXIT', 'ALIGN_EXIT',
+    'tunnel': ['TAKEOFF', 'READ_START_QR', 'OVERHEAD_GREEN', 'ALIGN_GREEN', 'GEOFENCE', 'ENTRY_CORRIDOR', 'TO_EXIT', 'ALIGN_EXIT',
                'RETURN_CORRIDOR', 'RETURN_HOME', 'LAND', 'DONE'],
 }
 # the mission segments: supervisor parameters. 'delivery' = the old name of qr_drop (mav_agent, radio GCS)
@@ -880,13 +883,31 @@ STACK = Stack()
 
 # ---------------------------------------------------------------- geofence
 GF_FILE = DATA / 'geofence.json'
+# GPS slots (user, 2026-10-28): the organisers give 6 points and don't say whether 4 of them are the whole ARENA or
+# the QR AREA - fill whichever set it is; the 2 others go in EXTRA (meaning unknown: kept + drawn only)
+GF_CAPS = {'arena': 4, 'qr': 4, 'extra': 2}
+# the course dimensions: the organisers' defaults (user, 2026-10-28), editable when new info comes. Tunnel width /
+# length / gap in m, heights in ft (as given); the gap = wall to wall between the entry and the exit tunnel
+COURSE_DEFAULT = {'tunnel_width': 3.5, 'tunnel_height_ft': 10.0, 'tunnel_ceiling_ft': 8.0, 'tunnel_length': 10.0,
+                  'tunnel_gap': 0.0, 'qr_width': 30.0}
+FT = 0.3048
 
 
 def load_gf():
     try:
-        return json.loads(GF_FILE.read_text())
+        gf = json.loads(GF_FILE.read_text())
     except (OSError, ValueError):
-        return {'field': [], 'delivery': [], 'world': 'competition'}
+        gf = {}
+    if 'arena' not in gf and ('field' in gf or 'delivery' in gf):   # the old field (<= 8) + delivery (4) file
+        gf['arena'] = gf.get('field', []) if len(gf.get('field', [])) == 4 else []
+        gf['qr'] = gf.get('delivery', [])
+    gf.pop('field', None)
+    gf.pop('delivery', None)
+    for k in GF_CAPS:
+        gf.setdefault(k, [])
+    gf['course'] = {**COURSE_DEFAULT, **{k: float(v) for k, v in (gf.get('course') or {}).items() if k in COURSE_DEFAULT}}
+    gf.setdefault('world', 'competition')
+    return gf
 
 
 def save_gf(gf):
@@ -894,12 +915,47 @@ def save_gf(gf):
     GF_FILE.write_text(json.dumps(gf, indent=2))
 
 
+def ccw(pts):
+    """The corners in order round their centroid (typed or captured in any order)."""
+    if len(pts) < 3:
+        return list(pts)
+    cx, cy = sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts)
+    return sorted(pts, key=lambda p: math.atan2(p[1] - cy, p[0] - cx))
+
+
+def hull(pts):
+    pts = sorted(set(map(tuple, pts)))
+    if len(pts) < 3:
+        return pts
+    cross = lambda o, a, b: (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])  # noqa: E731
+    lo, hi = [], []
+    for p in pts:
+        while len(lo) >= 2 and cross(lo[-2], lo[-1], p) <= 0:
+            lo.pop()
+        lo.append(p)
+    for p in reversed(pts):
+        while len(hi) >= 2 and cross(hi[-2], hi[-1], p) <= 0:
+            hi.pop()
+        hi.append(p)
+    return lo[:-1] + hi[:-1]
+
+
 def gf_local(gf):
-    """Field / delivery polygons in odom (needs PX4's origin)."""
+    """The GPS slots in odom (needs the autopilot's GPS origin) + what the nodes use: `field` = the keep-in (the arena;
+    QR area only: its hull with the start area, home +-6 m), `delivery` = the QR area (given, or the arena until the
+    entry tunnel's exit line is known in flight: qr_source 'tunnel_exit'), `back` = its far two corners."""
     if S.origin is None:
         return None
     lat0, lon0, _ = S.origin
-    return {k: [gps_to_local(p[0], p[1], lat0, lon0) for p in gf.get(k, [])] for k in ('field', 'delivery')}
+    loc = {k: [gps_to_local(p[0], p[1], lat0, lon0) for p in gf.get(k, [])] for k in GF_CAPS}
+    arena, qr = ccw(loc['arena']), ccw(loc['qr'])
+    loc['field'] = arena if len(arena) == 4 else hull(qr + [(sx * 6.0, sy * 6.0) for sx in (-1, 1) for sy in (-1, 1)]) \
+        if len(qr) == 4 else []
+    loc['delivery'] = qr if len(qr) == 4 else arena
+    loc['qr_source'] = 'given' if len(qr) == 4 else 'tunnel_exit' if len(arena) == 4 else None
+    # the back wall = the two corners farthest from home (the take-off point ~ the origin)
+    loc['back'] = sorted(loc['delivery'], key=lambda p: -math.hypot(*p))[:2] if len(loc['delivery']) == 4 else []
+    return loc
 
 
 def aruco_world(world):
@@ -914,38 +970,48 @@ def aruco_world(world):
 
 
 def gf_from_world(world):
-    """Sim: the field outline (start area + corridors + zone, 8 corners) and the zone, in GPS around the origin."""
+    """Sim: the arena (start area + corridors + zone, 4 corners) and the QR area, in GPS around the origin."""
     w = json.load(open(WORLDS / f'{world}.json'))
     z = w['delivery_zone']
     ys = [c['centre_y'] + s * (c['width'] / 2 + 0.6) for c in w['corridors'] for s in (-1, 1)]
-    ymin, ymax = min(ys + [-4.0]), max(ys + [4.0])
-    cx, m = z['x_from'], 1.0                          # the field reaches 1 m beyond the zone
-    field = [(-4.0, ymin), (cx - m, ymin), (cx - m, z['y_from'] - m), (z['x_to'] + m, z['y_from'] - m),
-             (z['x_to'] + m, z['y_to'] + m), (cx - m, z['y_to'] + m), (cx - m, ymax), (-4.0, ymax)]
-    delivery = [(z['x_from'], z['y_from']), (z['x_to'], z['y_from']), (z['x_to'], z['y_to']), (z['x_from'], z['y_to'])]
+    m = 1.0                                           # the arena reaches 1 m beyond the zone
+    ymin, ymax = min(ys + [-4.0, z['y_from'] - m]), max(ys + [4.0, z['y_to'] + m])
+    arena = [(-4.0, ymin), (z['x_to'] + m, ymin), (z['x_to'] + m, ymax), (-4.0, ymax)]
+    qr = [(z['x_from'], z['y_from']), (z['x_to'], z['y_from']), (z['x_to'], z['y_to']), (z['x_from'], z['y_to'])]
     lat0, lon0, _ = S.origin
     to = lambda pts: [list(local_to_gps(x, y, lat0, lon0)) for x, y in pts]  # noqa: E731
-    return {'field': to(field), 'delivery': to(delivery), 'world': world}
+    gf = load_gf()
+    gf.update({'arena': to(arena), 'qr': to(qr), 'extra': [], 'world': world})
+    return gf
 
 
 def apply_gf(gf, mode):
     """-> (ok, message, path): mission_geofence.json for the nodes (world_json schema)."""
     loc = gf_local(gf)
     if loc is None:
-        return False, 'no GPS origin from PX4 yet (MAVLink link up?)', None
-    if not 3 <= len(loc['field']) <= 8:
-        return False, f'field boundary needs 3-8 corners (has {len(loc["field"])})', None
-    if len(loc['delivery']) != 4:
-        return False, f'delivery region needs 4 corners (has {len(loc["delivery"])})', None
-    if not all(inside_or_on(x, y, loc['field']) for x, y in loc['delivery']):
-        return False, 'delivery region is not inside the field boundary', None
+        return False, 'no GPS origin from the autopilot yet (MAVLink link up?)', None
+    na, nq = len(loc['arena']), len(loc['qr'])
+    if na not in (0, 4) or nq not in (0, 4) or not (na or nq):
+        return False, f'need 4 arena corners and/or 4 QR-area corners (have arena {na}, QR area {nq})', None
+    if na and nq and not all(inside_or_on(x, y, loc['field'], tol=1.0) for x, y in loc['qr']):
+        return False, 'the QR area is not inside the arena', None
+    c = gf['course']
+    course = {'tunnel_width': c['tunnel_width'], 'tunnel_height': round(c['tunnel_height_ft'] * FT, 3),
+              'tunnel_ceiling': round(c['tunnel_ceiling_ft'] * FT, 3), 'tunnel_length': c['tunnel_length'],
+              'tunnel_gap': c['tunnel_gap'], 'qr_width': c['qr_width']}
+    if course['tunnel_ceiling'] > course['tunnel_height']:
+        return False, 'the tunnel ceiling (max flight height inside) is above the tunnel height', None
+    r2 = lambda pts: [[round(x, 2), round(y, 2)] for x, y in pts]  # noqa: E731
     xs, ys = [p[0] for p in loc['delivery']], [p[1] for p in loc['delivery']]
-    out = {'frame': 'odom = PX4 local ENU around its GPS origin', 'origin_gps': list(S.origin),
+    out = {'frame': 'odom = the autopilot local ENU around its GPS origin', 'origin_gps': list(S.origin),
            'source': 'ground station geofence', 'time': time.ctime(),
+           # the QR area's bounding box; qr_source 'tunnel_exit': the arena's, until the supervisor cuts it at the
+           # entry tunnel's exit line in flight (the QR area's front wall = that line, user 2026-10-28)
            'delivery_zone': {'x_from': round(min(xs), 2), 'x_to': round(max(xs), 2),
                              'y_from': round(min(ys), 2), 'y_to': round(max(ys), 2)},
-           'delivery_polygon': [[round(x, 2), round(y, 2)] for x, y in loc['delivery']],
-           'field_polygon': [[round(x, 2), round(y, 2)] for x, y in loc['field']],
+           'delivery_polygon': r2(loc['delivery']), 'qr_source': loc['qr_source'], 'qr_back': r2(loc['back']),
+           'field_polygon': r2(loc['field']), 'arena_polygon': r2(loc['arena']) if na else [],
+           'extra_points': r2(loc['extra']), 'course': course,
            'corridors': [], 'red_zones': [], 'gps': gf}
     if mode == 'sim':                                 # the sim's tunnels are known: keep their ceiling boxes
         try:
@@ -958,8 +1024,11 @@ def apply_gf(gf, mode):
     DATA.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(out, indent=2))
     # the container mounts the workspace: the same file there
-    return True, f'geofence applied: zone x {out["delivery_zone"]["x_from"]}..{out["delivery_zone"]["x_to"]}, ' \
-                 f'y {out["delivery_zone"]["y_from"]}..{out["delivery_zone"]["y_to"]} m', path
+    back = loc['back']
+    width = f', back wall {math.dist(*back):.1f} m (QR width {c["qr_width"]:g})' if len(back) == 2 else ''
+    return True, (f'geofence applied: QR area {"given" if nq else "= arena, front from the tunnel exit in flight"}'
+                  f'{width}; tunnels {c["tunnel_width"]:g} x {c["tunnel_length"]:g} m, ceiling '
+                  f'{course["tunnel_ceiling"]:.2f} m'), path
 
 
 # ---------------------------------------------------------------- preflight + alerts
@@ -1047,9 +1116,11 @@ def preflight(mode):
          f'{tel.get("batt_pct")} %, {tel.get("batt_v")} V', True),
         ('Disarmed on the ground', tel.get('armed') is False and abs(tel.get('alt_rel') or 0) < 0.5,
          f'armed {tel.get("armed")}, alt {tel.get("alt_rel")}', True),
-        ('Field boundary 3-8 corners', 3 <= len(gf.get('field', [])) <= 8, f'{len(gf.get("field", []))} corners', True),
-        ('Delivery region 4 corners, inside the field', bool(loc) and len(loc['delivery']) == 4 and len(loc['field']) >= 3
-         and all(inside_or_on(x, y, loc['field']) for x, y in loc['delivery']), f'{len(gf.get("delivery", []))} corners', True),
+        ('Arena and/or QR area: 4 corners each', len(gf['arena']) in (0, 4) and len(gf['qr']) in (0, 4)
+         and bool(gf['arena'] or gf['qr']), f'arena {len(gf["arena"])}, QR area {len(gf["qr"])}, extra {len(gf["extra"])}', True),
+        ('QR area inside the arena', bool(loc) and len(loc['field']) >= 3 and len(loc['delivery']) == 4
+         and all(inside_or_on(x, y, loc['field'], tol=1.0) for x, y in loc['delivery']),
+         (loc or {}).get('qr_source') == 'tunnel_exit' and 'front wall from the tunnel exit in flight' or 'given', True),
         ('Geofence applied', applied, 'mission_geofence.json written', True),
         ('Drone inside the field boundary', bool(loc) and len(loc['field']) >= 3 and drone_pose()[0] is not None
          and in_poly(drone_pose()[0][0], drone_pose()[0][1], loc['field']), f'from {drone_pose()[2]}', True),
@@ -1320,21 +1391,26 @@ async def api(request):
         return ok(*(await loop.run_in_executor(None, radio_api, what, body)))
     if what == 'operator':                            # mav_agent action 8: the ground took over over the radio
         return ok(*(await loop.run_in_executor(None, lambda: ROS.call(ROS.cli_operator, ROS.Trigger.Request(), 3.0))))
-    if what == 'geofence':                            # save (lists of [lat, lon])
+    if what == 'geofence':                            # save (lists of [lat, lon]; course: the dimensions)
         gf = load_gf()
-        for k in ('field', 'delivery', 'world'):
+        for k in (*GF_CAPS, 'world'):
             if k in body:
-                gf[k] = body[k]
+                gf[k] = body[k][:GF_CAPS[k]] if k in GF_CAPS else body[k]
+        if isinstance(body.get('course'), dict):
+            try:
+                gf['course'].update({k: float(v) for k, v in body['course'].items() if k in COURSE_DEFAULT})
+            except (TypeError, ValueError):
+                return ok(False, 'course dimensions must be numbers')
         save_gf(gf)
         return ok(True, 'geofence saved')
-    if what == 'capture':                             # the drone's GPS -> a corner of field / delivery
+    if what == 'capture':                             # the drone's GPS -> a corner of arena / QR area / extra
         lst = body.get('list')
-        if lst not in ('field', 'delivery') or S.tel.get('lat') is None:
-            return ok(False, 'no GPS from the drone yet' if S.tel.get('lat') is None else 'list: field | delivery')
+        if lst not in GF_CAPS or S.tel.get('lat') is None:
+            return ok(False, 'no GPS from the drone yet' if S.tel.get('lat') is None else 'list: ' + ' | '.join(GF_CAPS))
         if (S.tel.get('gps_fix') or 0) < 3:
             return ok(False, f'GPS fix {S.tel.get("gps_fix")}: not capturing')
         gf = load_gf()
-        cap = {'field': 8, 'delivery': 4}[lst]
+        cap = GF_CAPS[lst]
         if len(gf[lst]) >= cap:
             return ok(False, f'{lst} already has {cap} corners')
         gf[lst].append([round(S.tel['lat'], 7), round(S.tel['lon'], 7)])
@@ -1466,12 +1542,10 @@ def radio_apply_gf():
     import random
     import zlib
     gf = load_gf()
-    f, d = gf.get('field', []), gf.get('delivery', [])
-    if not 3 <= len(f) <= 8:
-        return False, f'field boundary needs 3-8 corners (has {len(f)})'
-    if len(d) != 4:
-        return False, f'delivery region needs 4 corners (has {len(d)})'
-    raw = json.dumps({'f': f, 'd': d}, separators=(',', ':')).encode()
+    a, q = gf['arena'], gf['qr']
+    if len(a) not in (0, 4) or len(q) not in (0, 4) or not (a or q):
+        return False, f'need 4 arena corners and/or 4 QR-area corners (have arena {len(a)}, QR area {len(q)})'
+    raw = json.dumps({'a': a, 'q': q, 'e': gf['extra'], 'c': gf['course']}, separators=(',', ':')).encode()
     chunks = [raw[k:k + 124] for k in range(0, len(raw), 124)]
     tid, crc = random.randint(1, 65535), zlib.crc32(raw) & 0xFFFFFF     # 24 bits: exact in a float32 param
     for _ in range(2):

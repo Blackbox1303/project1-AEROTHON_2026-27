@@ -17,6 +17,14 @@ Upgraded with the complete `drone_qr_detector` pipeline:
      ArUco markers 3x3 .. 6x6 instead; they're found on undistorted gnomonic views of the fisheye
      (aruco_tools.detect_fisheye, straight on the sim's pinhole nadir camera) and the payload is e.g. '4X4#23' -
      everything after the read (ground position, averaging, zone / red checks, the start match) is the same.
+  7. DEEP READ of a board that won't decode (user, 2026-10-28; frontier_explorer asks while hovering over it:
+     /delivery/verify/request {id, x, y} -> /delivery/verify/result {id, result, payload, score, rounds}): for
+     verify_rounds frames, virtual cameras of 3 FOV / zooms along the ray to (x, y) x qr_match.variants filters (raw,
+     CLAHE, unsharp, gamma, median, 2x, local threshold), exposure boost on. A decode: 'read' (the payload is added
+     there). None: the board's image vs the start QR's (qr_reader's .sig.npy): median of the best 3 rounds >=
+     match_hi 'match' (added as the start payload -> the target), <= match_lo 'different' (added as a non-target
+     board), else 'unsure' / board not found 'unseen' -> the explorer steps down 0.5 m and asks again.
+     Start QR without data (payload qr_match.IMAGE_ONLY): decoded boards are image-matched too.
   6. Live HTTP QR HUD on port `8091` (`/`, `/annotated.jpg`, `/frame.jpg`, `/status.json`), integrated into the
      main mission dashboard at port `8080`.
 """
@@ -49,7 +57,7 @@ from tf2_ros import Buffer, TransformListener
 from aerothon_nav.banner_detector import quat_to_rot
 from aerothon_nav.fisheye import Fisheye
 from aerothon_nav.qr_reader import to_gray
-from aerothon_nav import qr_tools
+from aerothon_nav import qr_area, qr_match, qr_tools
 
 
 HUD_HTML = """<!doctype html>
@@ -133,6 +141,10 @@ class QrLocator(Node):
         p('cand_sat_max', 60.0)
         p('cand_red_slack', 1.5)
         p('nadir_hfov', 1.0472)
+        p('verify_rounds', 5)        # frames of the deep read (all camera x filter variants per frame)
+        p('match_hi', 0.80)          # image match (median of the best 3 rounds): >= this the start QR (offline: same
+        p('match_lo', 0.50)          # board >= 0.82, another <= 0.73 at 10 m); <= match_lo another board; between: unsure
+        p('verify_unseen', 12)       # frames without the board before giving up the deep read ('unseen')
         p('rate_hz', 3.5)
         p('scales', [1.0, 1.5, 0.75])
         p('ground_z', 0.0)
@@ -167,9 +179,13 @@ class QrLocator(Node):
 
         g = lambda n: self.get_parameter(n).value  # noqa: E731
         self.g = g
+        self.zone_poly = None        # the QR area polygon (ground station / /mission/qr_area): in_zone uses it
         if g('world_json') and os.path.isfile(g('world_json')):
-            z = json.load(open(g('world_json')))['delivery_zone']
+            w = json.load(open(g('world_json')))
+            z = w['delivery_zone']
             self.zone = (z['x_from'], z['x_to'], z['y_from'], z['y_to'])
+            if len(w.get('delivery_polygon') or []) >= 3:
+                self.zone_poly = [tuple(map(float, p)) for p in w['delivery_polygon']]
         else:
             self.zone = tuple(g('zone'))
         self.aruco = None
@@ -217,6 +233,10 @@ class QrLocator(Node):
         self.create_subscription(CameraInfo, '/arducam/camera_info', self.on_info, qos_profile_sensor_data)
         self.image_cb, self.image_subs = cb, []
         self.create_subscription(String, '/mission/start_qr', self.on_start_qr, latched)
+        self.create_subscription(String, qr_area.TOPIC, self.on_qr_area, qr_area.QOS)
+        self.verify, self.template = None, None
+        self.verify_pub = self.create_publisher(String, '/delivery/verify/result', 10)
+        self.create_subscription(String, '/delivery/verify/request', self.on_verify, 10)
         self.create_subscription(OccupancyGrid, '/delivery/red', lambda m: setattr(self, 'red', m), latched)
         self.state = 'IDLE'
         self.hud_lock = threading.Lock()
@@ -351,7 +371,128 @@ class QrLocator(Node):
             self.start_qr = json.loads(m.data)['payload']
         except (ValueError, KeyError):
             self.start_qr = m.data.strip() or None
+        self.template = None                         # the new start board's image: loaded when first needed
         self.get_logger().info(f'delivery target payload: {self.start_qr!r}')
+
+    # ---- deep read + image match (see the docstring, 7)
+    def start_template(self):
+        if self.template is None:
+            try:
+                self.template = np.load(Path(self.g('start_qr_file')).with_suffix('.sig.npy'))
+            except (OSError, ValueError):
+                pass
+        return self.template
+
+    def on_verify(self, m):
+        d = json.loads(m.data)
+        self.verify = {'id': d['id'], 'x': float(d['x']), 'y': float(d['y']), 'round': 0, 'scores': [], 'miss': 0}
+        self.boost_pub.publish(Bool(data=True))     # exposure up for the deep read (qr_boost: the Arducam node)
+        self.get_logger().info(f'deep read {d["id"]} at ({d["x"]:.1f}, {d["y"]:.1f})')
+
+    def board_patches(self, gray, m, source, x, y):
+        """Undistorted views of the ground point (x, y): [(name, patch)], 3 FOV / zooms; None if not in view."""
+        fish = source in ('fisheye', 'fisheye_hd')
+        try:
+            t = self.tf.lookup_transform(self.g('odom_frame'), m.header.frame_id if fish else 'base_link',
+                                         m.header.stamp, timeout=Duration(seconds=0.3))
+        except Exception:
+            return None
+        o = t.transform.translation
+        ray = np.array([x - o.x, y - o.y, self.g('ground_z') - o.z])
+        h = -ray[2]
+        if h < 0.5:
+            return None
+        r = quat_to_rot(t.transform.rotation).T @ (ray / np.linalg.norm(ray))
+        if fish:
+            if self.cam is None or r[2] < math.cos(math.radians(75.0)):
+                return None
+            return [(f'fov{fov:g}', self.cam.rectify_patch(gray, ray_d=r, fov_deg=fov, zoom_scale=z, max_size=400)[0])
+                    for fov, z in ((22.0, 2.5), (14.0, 4.0), (32.0, 1.8))]
+        # the sim's pinhole nadir: rays (-(v - H/2) / f, -(u - W/2) / f, -1) (ground_points), inverted
+        if r[2] > -0.2:
+            return None
+        f = (m.width / 2) / math.tan(self.g('nadir_hfov') / 2)
+        u, v = m.width / 2 + f * r[1] / r[2], m.height / 2 + f * r[0] / r[2]
+        board = f * 1.0 / h                           # px of a 1 m board
+        out = []
+        for k in (0.8, 1.2, 1.8):
+            a = int(max(12, k * board))
+            X0, Y0 = int(u) - a, int(v) - a
+            if X0 < 0 or Y0 < 0 or X0 + 2 * a > m.width or Y0 + 2 * a > m.height:
+                continue
+            out.append((f'crop{k:g}', cv2.resize(gray[Y0:Y0 + 2 * a, X0:X0 + 2 * a], (256, 256),
+                                                 interpolation=cv2.INTER_CUBIC)))
+        return out or None
+
+    def verify_frame(self, gray, m, source):
+        v = self.verify
+        patches = self.board_patches(gray, m, source, v['x'], v['y'])
+        if not patches:
+            v['miss'] += 1
+            if v['miss'] >= self.g('verify_unseen'):
+                self.verify_done('unseen')
+            return
+        tmpl = self.start_template()
+        for name, patch in patches:
+            for fname, img in qr_match.variants(patch):
+                hit = (qr_tools.wechat_decode(self.wc, img) if self.wc is not None else {}) or self.decode(img)
+                if hit:
+                    payload = next(iter(hit))
+                    sig = qr_match.signature(patches[0][1])
+                    if self.start_qr == qr_match.IMAGE_ONLY and \
+                            (qr_match.similarity(tmpl, sig) or -1.0) >= self.g('match_hi'):
+                        payload = qr_match.IMAGE_ONLY
+                    self.add_board(payload, 'deep_read')
+                    self.verify_done('read', payload=payload, how=f'{name}/{fname}')
+                    return
+        score = qr_match.similarity(tmpl, qr_match.signature(patches[0][1]))
+        if score is not None:
+            v['scores'].append(score)
+        v['round'] += 1
+        if v['round'] < self.g('verify_rounds'):
+            return
+        if tmpl is None:
+            self.verify_done('unsure', why='no start QR image stored')
+            return
+        if len(v['scores']) < 3:
+            self.verify_done('unseen', why=f'board square found in {len(v["scores"])} of {v["round"]} frames')
+            return
+        s = float(np.median(sorted(v['scores'])[-3:]))
+        if s >= self.g('match_hi'):
+            self.add_board(self.start_qr, 'image_match')
+            self.verify_done('match', score=round(s, 3))
+        elif s <= self.g('match_lo'):
+            self.add_board(f'<board {v["x"]:.1f},{v["y"]:.1f}>', 'image_match')
+            self.verify_done('different', score=round(s, 3))
+        else:
+            self.verify_done('unsure', score=round(s, 3))
+
+    def add_board(self, payload, source):
+        """A board settled by the deep read: added (confirmed at once) at the candidate's fix."""
+        x, y = self.verify['x'], self.verify['y']
+        for _ in range(int(self.g('confirm_hits'))):
+            self.add(payload, (x, y), [x - 0.5, y - 0.5, x + 0.5, y + 0.5], source)
+
+    def verify_done(self, result, **info):
+        v, self.verify = self.verify, None
+        if not self.boost:                           # back to what the unread-box logic wants
+            self.boost_pub.publish(Bool(data=False))
+        out = {'id': v['id'], 'result': result, 'rounds': v['round'], 'x': v['x'], 'y': v['y'], **info}
+        self.verify_pub.publish(String(data=json.dumps(out)))
+        self.get_logger().info(f'deep read {v["id"]}: {result} {info}')
+
+    def image_rekey(self, found, gray, m, source):
+        """Start QR without data: a decoded zone board whose image matches the start board is the target."""
+        tmpl = self.start_template()
+        if tmpl is None:
+            return found
+        out = {}
+        for payload, poly in found.items():
+            pts = self.ground_points(np.vstack([np.asarray(poly, float).mean(axis=0, keepdims=True)]), m, source)
+            patches = self.board_patches(gray, m, source, *pts[0]) if pts is not None else None
+            s = qr_match.similarity(tmpl, qr_match.signature(patches[0][1])) if patches else None
+            out[qr_match.IMAGE_ONLY if s is not None and s >= self.g('match_hi') else payload] = poly
+        return out
 
     # ---- decoding with WeChat CNN + quiet-zone padding + CLAHE + zbar
     def decode(self, gray):
@@ -519,7 +660,14 @@ class QrLocator(Node):
                 found = self.on_hd(gray, m, source, now)
             else:
                 found = self.decode(gray)
+            if self.start_qr == qr_match.IMAGE_ONLY and found:
+                found = self.image_rekey(found, gray, m, source)
             self.use_reads(found, m, source)
+            if self.verify is not None and source in ('fisheye', 'fisheye_hd', 'nadir_hd') and self.aruco is None:
+                try:
+                    self.verify_frame(gray, m, source)
+                except Exception as e:
+                    self.get_logger().warn(f'deep read: {e!r}', throttle_duration_sec=5.0)
             self._update_hud_image(gray, found)
         finally:
             self.proc_lock.release()
@@ -624,8 +772,7 @@ class QrLocator(Node):
             pts = self.ground_points(np.vstack([poly.mean(axis=0), poly]), m, source)
             if pts is not None:
                 cx, cy = float(pts[0][0]), float(pts[0][1])
-                zx0, zx1, zy0, zy1 = self.zone
-                if zx0 <= cx <= zx1 and zy0 <= cy <= zy1 and not self.deep_red(cx, cy) and not self.near_decoded(cx, cy):
+                if self.in_zone(cx, cy) and not self.deep_red(cx, cy) and not self.near_decoded(cx, cy):
                     self.add_cand(cx, cy, conf=round(c, 2))
 
         self.last_zoom_patches = zoom_patches
@@ -818,13 +965,21 @@ class QrLocator(Node):
         return all(self.in_red(x + r * math.cos(a), y + r * math.sin(a)) for a in np.linspace(0, 2 * math.pi, 8,
                                                                                               endpoint=False))
 
+    def in_zone(self, x, y):
+        x0, x1, y0, y1 = self.zone
+        return bool(x0 <= x <= x1 and y0 <= y <= y1 and (self.zone_poly is None or qr_area.inside(x, y, self.zone_poly)))
+
+    def on_qr_area(self, m):
+        poly = [tuple(map(float, p)) for p in json.loads(m.data).get('polygon') or []]
+        if len(poly) >= 3:
+            self.zone_poly, self.zone = poly, qr_area.bbox(poly)
+
     def publish(self):
         out = []
         for q in self.qrs:
             q['confirmed'] = q['n'] >= self.g('confirm_hits')
             q['in_red_zone'] = self.in_red(q['x'], q['y'])
-            x0, x1, y0, y1 = self.zone
-            q['in_zone'] = bool(x0 <= q['x'] <= x1 and y0 <= q['y'] <= y1)
+            q['in_zone'] = self.in_zone(q['x'], q['y'])
             if self.start_qr and q['payload'] == self.start_qr:
                 q['status'] = 'target'
             elif self.start_qr and q['confirmed'] and q['in_zone']:

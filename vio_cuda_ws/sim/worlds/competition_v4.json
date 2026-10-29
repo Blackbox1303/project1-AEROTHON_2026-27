@@ -1,0 +1,305 @@
+{
+  "frame": "world ENU, spawn at the origin facing +x",
+  "seed": 11,
+  "start_qr": {
+    "name": "qr_start",
+    "x": 1.0,
+    "y": 0.0,
+    "size": 1.0,
+    "payload": "AEROTHON26-LIMA-9387",
+    "modules": 21
+  },
+  "course": "v4",
+  "corridors": [
+    {
+      "lap": "forward",
+      "centre_y": 2.4,
+      "x_from": 5.0,
+      "x_to": 15.0,
+      "width": 3.5,
+      "wall_height": 3.048,
+      "cruise": 1.4,
+      "entrance_x": 5.0,
+      "banner_colour": "green",
+      "roof": true,
+      "banners": [
+        {
+          "mount": "top",
+          "end": "start",
+          "colour": "green",
+          "centre": [
+            4.95,
+            2.4,
+            3.377
+          ],
+          "normal": [
+            -1,
+            0,
+            0
+          ],
+          "width": 3.5,
+          "height": 0.457
+        },
+        {
+          "mount": "ground",
+          "end": "start",
+          "colour": "green",
+          "centre": [
+            4.721,
+            2.4,
+            0.008
+          ],
+          "normal": [
+            0,
+            0,
+            1
+          ],
+          "width": 3.5,
+          "height": 0.457
+        },
+        {
+          "mount": "top",
+          "end": "zone",
+          "colour": "red",
+          "centre": [
+            15.05,
+            2.4,
+            3.377
+          ],
+          "normal": [
+            1,
+            0,
+            0
+          ],
+          "width": 3.5,
+          "height": 0.457
+        },
+        {
+          "mount": "ground",
+          "end": "zone",
+          "colour": "red",
+          "centre": [
+            15.279,
+            2.4,
+            0.008
+          ],
+          "normal": [
+            0,
+            0,
+            1
+          ],
+          "width": 3.5,
+          "height": 0.457
+        }
+      ],
+      "obstacles": []
+    },
+    {
+      "lap": "return",
+      "centre_y": -2.4,
+      "x_from": 5.0,
+      "x_to": 15.0,
+      "width": 3.5,
+      "wall_height": 3.048,
+      "cruise": 1.4,
+      "entrance_x": 15.0,
+      "banner_colour": "green",
+      "roof": true,
+      "banners": [
+        {
+          "mount": "top",
+          "end": "start",
+          "colour": "red",
+          "centre": [
+            4.95,
+            -2.4,
+            3.377
+          ],
+          "normal": [
+            -1,
+            0,
+            0
+          ],
+          "width": 3.5,
+          "height": 0.457
+        },
+        {
+          "mount": "ground",
+          "end": "start",
+          "colour": "red",
+          "centre": [
+            4.721,
+            -2.4,
+            0.008
+          ],
+          "normal": [
+            0,
+            0,
+            1
+          ],
+          "width": 3.5,
+          "height": 0.457
+        },
+        {
+          "mount": "top",
+          "end": "zone",
+          "colour": "green",
+          "centre": [
+            15.05,
+            -2.4,
+            3.377
+          ],
+          "normal": [
+            1,
+            0,
+            0
+          ],
+          "width": 3.5,
+          "height": 0.457
+        },
+        {
+          "mount": "ground",
+          "end": "zone",
+          "colour": "green",
+          "centre": [
+            15.279,
+            -2.4,
+            0.008
+          ],
+          "normal": [
+            0,
+            0,
+            1
+          ],
+          "width": 3.5,
+          "height": 0.457
+        }
+      ],
+      "obstacles": [
+        {
+          "kind": "standing",
+          "x": 7.4,
+          "y": -3.62,
+          "z": 0.914,
+          "size_x": 0.5,
+          "size_y": 1.067,
+          "size_z": 1.829,
+          "parts": [
+            {
+              "x": 7.4,
+              "y": -3.617,
+              "z": 0.9144,
+              "size_x": 0.5,
+              "size_y": 1.0668,
+              "size_z": 1.8288
+            }
+          ]
+        },
+        {
+          "kind": "hanging",
+          "x": 9.8,
+          "y": -1.18,
+          "z": 2.134,
+          "size_x": 0.5,
+          "size_y": 1.067,
+          "size_z": 1.829,
+          "parts": [
+            {
+              "x": 9.8,
+              "y": -1.183,
+              "z": 2.1336,
+              "size_x": 0.5,
+              "size_y": 1.0668,
+              "size_z": 1.8288
+            }
+          ]
+        },
+        {
+          "kind": "standing",
+          "x": 12.65,
+          "y": -3.62,
+          "z": 0.914,
+          "size_x": 0.5,
+          "size_y": 1.067,
+          "size_z": 1.829,
+          "parts": [
+            {
+              "x": 12.65,
+              "y": -3.617,
+              "z": 0.9144,
+              "size_x": 0.5,
+              "size_y": 1.0668,
+              "size_z": 1.8288
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "delivery_zone": {
+    "x_from": 15.0,
+    "x_to": 55.0,
+    "y_from": -15.0,
+    "y_to": 15.0
+  },
+  "red_zones": [
+    {
+      "x": 21.0,
+      "y": 0.5,
+      "size_x": 3.048,
+      "size_y": 3.048,
+      "x_from": 19.476,
+      "x_to": 22.524,
+      "y_from": -1.024,
+      "y_to": 2.024
+    }
+  ],
+  "delivery_qrs": [
+    {
+      "name": "qr_0",
+      "x": 21.8,
+      "y": 10.9,
+      "size": 1.0,
+      "payload": "AEROTHON26-HOTEL-4111",
+      "modules": 25,
+      "target": false
+    },
+    {
+      "name": "qr_1",
+      "x": 49.4,
+      "y": 10.9,
+      "size": 1.0,
+      "payload": "AEROTHON26-KILO-4025",
+      "modules": 21,
+      "target": false
+    },
+    {
+      "name": "qr_2",
+      "x": 23.3,
+      "y": -3.0,
+      "size": 1.0,
+      "payload": "AEROTHON26-LIMA-9387",
+      "modules": 21,
+      "target": true
+    },
+    {
+      "name": "qr_3",
+      "x": 32.9,
+      "y": -11.6,
+      "size": 1.0,
+      "payload": "AEROTHON26-DELTA-8794",
+      "modules": 25,
+      "target": false
+    },
+    {
+      "name": "qr_4",
+      "x": 43.4,
+      "y": -8.0,
+      "size": 1.0,
+      "payload": "AEROTHON26-ECHO-4050",
+      "modules": 21,
+      "target": false
+    }
+  ],
+  "target": "qr_2"
+}
