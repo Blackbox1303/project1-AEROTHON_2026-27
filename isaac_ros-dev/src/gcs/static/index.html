@@ -63,6 +63,9 @@
   body.mode-real .offonly, body.mode-offboard .seg-full, body.mode-offboard .onlyros { display:none; }
   body.mode-radio .simonly, body.mode-radio .realonly, body.mode-radio .offonly, body.mode-radio .noradio { display:none; }
   body:not(.mode-radio) .radioonly { display:none; }
+  body.mode-radio .mainhide, body.mode-radio:not(.testapp) .altblock { display:none; }   /* the final mission: one Start, one Stop */
+  body.simple .simplehide { display:none !important; }   /* 8084: world, segment, one Start, one Stop */
+  #gfcard.top { margin:10px; } #autolog { width:100%; font:12px/1.4 ui-monospace, monospace; color:var(--dim); white-space:pre-wrap; }
   body.mode-radio.inflight .noflight { display:none !important; }   /* armed over the radio: MANUAL + LAND/RTL/KILL only */
   #vrxframe { width:100%; height:620px; border:0; border-radius:6px; background:#000; }
   @media (max-width: 1100px) { main, .bottom, .cvagrid, .benchgrid { grid-template-columns: 1fr; } }
@@ -72,29 +75,31 @@
 <header>
   <h1>AeroTHON GCS</h1>
   <input type="hidden" id="mode" value="sim">
-  <button id="m_real" class="modebtn noradio" onclick="setMode('real')" title="the real drone: this Jetson onboard runs the whole stack (Pixhawk 6C Mini, RealSense, Arducam); set the geofence from its GPS">📡 Real drone: telemetry + GPS geofence</button>
-  <button id="m_sim" class="modebtn noradio" onclick="setMode('sim')" title="Gazebo on the Jetson, its GUI forwarded to this PC">🖥 Sim (Gazebo)</button>
-  <button id="m_offboard" class="modebtn noradio" onclick="setMode('offboard')" title="the Jetson on the GROUND: VTX analog camera -> VRX on a Jetson USB port, commands over the SiK radio (or the bench SITL); QR area only (red zones, QR, A* + frontier, drop or not)">📺 Offboard Jetson (VRX + radio)</button>
+  <button id="m_real" class="modebtn noradio simplehide" onclick="setMode('real')" title="the real drone: this Jetson onboard runs the whole stack (Pixhawk 6C Mini, RealSense, Arducam); set the geofence from its GPS">📡 Real drone: telemetry + GPS geofence</button>
+  <button id="m_sim" class="modebtn noradio simplehide" onclick="setMode('sim')" title="Gazebo on the Jetson, its GUI forwarded to this PC">🖥 Sim (Gazebo)</button>
+  <button id="m_offboard" class="modebtn noradio simplehide" onclick="setMode('offboard')" title="the Jetson on the GROUND: VTX analog camera -> VRX on a Jetson USB port, commands over the SiK radio (or the bench SITL); QR area only (red zones, QR, A* + frontier, drop or not)">📺 Offboard Jetson (VRX + radio)</button>
   <span class="offonly"><select id="offlink" title="the command link: the bench ArduCopter SITL, or the SiK radio to the real drone">
     <option value="sitl">bench SITL</option><option value="/dev/ttyUSB0:57600">SiK radio /dev/ttyUSB0:57600</option></select>
     <input id="video" value="" placeholder="VRX /dev/videoN" size="13" title="the VRX receiver's USB video device; empty = pick it on the 8094 page (it never opens the D435 / CSI cameras - on this Jetson /dev/video1-5 are the RealSense)"></span>
   <span class="realonly"><input id="link" value="/dev/ttyACM0:921600" size="20" title="the Pixhawk on the onboard Jetson: /dev/ttyACM0:921600 (USB), udp:14555 (a MAVLink UDP stream). The SiK radio is on the Pixhawk's GPS2 port"></span>
   <select id="world" class="simonly" title="sim world"><option>competition</option><option>comp_far1</option></select>
   <span class="pill radioonly" title="the final flight: this PC on the SiK radio; QGC gets every packet too">📻 RADIO - onboard Jetson flies</span>
-  <label class="pill noradio"><input type="checkbox" id="usegf"> use my geofence</label>
-  <select class="noflight" id="segment" title="what to fly: sim - Launch starts it by itself once the stack is READY and the preflight is green; the real drone - press Start after the preflight">
+  <label class="pill noradio simplehide"><input type="checkbox" id="usegf"> use my geofence</label>
+  <select class="noflight mainhide" id="segment" title="what to fly: sim - Launch starts it by itself once the stack is READY and the preflight is green; the real drone - press Start after the preflight">
     <option value="full" class="seg-full">Whole mission</option>
     <option value="qr">QR area only (no drop)</option>
     <option value="tunnel" class="seg-full">Tunnels + banners only</option>
     <option value="qr_drop">QR area + payload drop</option>
   </select>
-  <select id="codever" class="noradio" title="which mission code flies (the supervisor, explorer and the other mission nodes): the working tree, or a committed version - a known-good one to fall back to without reverting files"><option value="">code: current (working tree)</option></select>
-  <select id="corridor" class="noradio onlyros" onchange="corridorUi()" title="who flies the tunnels. current: our corridor_nav / entry_align on the flight controller's estimate + 2D SLAM (D435 depth, emitter on). AeroTHON: the ~/AeroTHON_2026/vio_cuda_ws code in its own container - cuVSLAM VIO on the D435 IR pair + the Pixhawk IMU, its corridor_nav (gap follower, Nav2), entry_align, obstacle_scan; banners still by drone_qr_detector's detector on the Arducam">
+  <select id="codever" class="noradio simplehide" title="which mission code flies (the supervisor, explorer and the other mission nodes): the working tree, or a committed version - a known-good one to fall back to without reverting files"><option value="">code: current (working tree)</option></select>
+  <select id="corridor" class="noradio onlyros simplehide" onchange="corridorUi()" title="who flies the tunnels. current: our corridor_nav / entry_align on the flight controller's estimate + 2D SLAM (D435 depth, emitter on). AeroTHON: the ~/AeroTHON_2026/vio_cuda_ws code in its own container - cuVSLAM VIO on the D435 IR pair + the Pixhawk IMU, its corridor_nav (gap follower, Nav2), entry_align, obstacle_scan; banners still by drone_qr_detector's detector on the Arducam">
     <option value="current">corridor: current</option><option value="aerothon">corridor: AeroTHON (cuVSLAM stereo + IMU)</option></select>
-  <label class="pill noradio onlyros" id="viofcwrap" title="AeroTHON corridor only: send its VIO velocity to ArduPilot EKF3 and fly the tunnels on it (source set 2, switched at the entrance, back to GPS at the exit). The sim gets the params itself; the REAL flight controller needs EK3_SRC2_VELXY 6 + VISO_TYPE 1 set first (vio_bringup/config) - off: VIO is only computed and checked"><input type="checkbox" id="viofc"> VIO → EKF3</label>
-  <button class="go noflight" id="launchbtn" onclick="launchStack()" title="Gazebo + autopilot SITL + MAVROS + the mission nodes (sim), or the drone's whole stack (real); 1-3 min">▶ Launch stack</button>
+  <label class="pill noradio onlyros simplehide" id="viofcwrap" title="AeroTHON corridor only: send its VIO velocity to ArduPilot EKF3 and fly the tunnels on it (source set 2, switched at the entrance, back to GPS at the exit). The sim gets the params itself; the REAL flight controller needs EK3_SRC2_VELXY 6 + VISO_TYPE 1 set first (vio_bringup/config) - off: VIO is only computed and checked"><input type="checkbox" id="viofc"> VIO → EKF3</label>
+  <button class="go big radioonly noflight" id="autostart" onclick="startAuto()">▶ Start</button>
+  <button class="stop big radioonly noflight" onclick="post('auto_stop')">■ Stop</button>
+  <button class="go noflight mainhide" id="launchbtn" onclick="launchStack()" title="Gazebo + autopilot SITL + MAVROS + the mission nodes (sim), or the drone's whole stack (real); 1-3 min">▶ Launch stack</button>
   <button class="simonly" id="gzbtn" onclick="gz('start', 'sync=1')" title="sync the worlds / models from the Jetson, then open the Gazebo GUI on this PC (it waits for the sim if it is still starting)">🖥 Open Gazebo (sync)</button>
-  <button class="stop noflight" id="stopbtn" onclick="stopStack()" title="stop everything: Gazebo, the autopilot SITL / link, MAVROS, the mission nodes - and close the Gazebo GUI here. Nothing starts again until you press Launch">■ Stop stack</button>
+  <button class="stop noflight mainhide" id="stopbtn" onclick="stopStack()" title="stop everything: Gazebo, the autopilot SITL / link, MAVROS, the mission nodes - and close the Gazebo GUI here. Nothing starts again until you press Launch">■ Stop stack</button>
   <span class="pill simonly" id="gzgui" title="Gazebo GUI on this PC (needs the Lenovo helper: install_lenovo_agent.sh)">Gazebo GUI: ?</span>
   <span class="pill" id="stack">stack: -</span>
   <span class="pill" id="link">link: -</span>
@@ -102,6 +107,7 @@
   <span class="pill" id="tmission">mission -</span>
   <span class="pill" id="tzone">QR area -</span>
   <div id="alerts"></div>
+  <div id="autolog" class="radioonly"></div>
 </header>
 
 <main>
@@ -110,7 +116,7 @@
     <h2>Region · costmap · track</h2>
     <div class="maps">
       <div><h3>Discovered <span>what the drone has mapped so far</span></h3><canvas id="map" class="map"></canvas></div>
-      <div><h3>Actual <span id="truthnote"></span></h3><canvas id="truemap" class="map"></canvas></div>
+      <div class="noradio"><h3>Actual <span id="truthnote"></span></h3><canvas id="truemap" class="map"></canvas></div>
     </div>
     <div class="legend">
       <span><i style="background:var(--field)"></i>arena / keep-in</span><span><i style="background:var(--zone)"></i>QR area</span><span><i style="background:#c58cff"></i>extra</span>
@@ -137,14 +143,14 @@
     <div class="card" style="margin-top:10px">
       <h2>Mission (supervisor FSM)</h2>
       <div class="fsm" id="fsm"></div>
-      <div class="row noflight" style="margin-top:10px">
+      <div class="row noflight mainhide simplehide" style="margin-top:10px">
         <input id="payload" placeholder="target payload (optional, else read the start QR)" style="flex:1">
       </div>
-      <div class="row noflight">
+      <div class="row noflight mainhide simplehide">
         <label><input type="checkbox" id="readqr" checked> read start QR at take-off</label>
         <label><input type="checkbox" id="override"> ignore preflight</label>
       </div>
-      <div class="row noflight">
+      <div class="row noflight mainhide simplehide">
         <button class="go big mbtn" id="startbtn" onclick="startMission(val('segment'))" title="start the segment chosen at the top (the sim starts it by itself after Launch)">▶ Start</button>
         <button class="stop big noradio" onclick="ask('Abort the mission? (failsafe: hold, then land in place)').then(y => y && post('mission_abort'))">■ Abort</button>
         <button title="a clean start for the next attempt: clears the last mission's start marker, the marker-area memory (red zones, markers rejected as not the target), the tunnel entrance, this page's track and log. Stack stopped, drone disarmed. aerothon mission does it by itself before every launch." onclick="ask('Reset the mission? Clears the last run\'s start marker, marker memory, tunnel entrance and this page\'s track / log (stack stopped, disarmed only).').then(y => y && post('mission_reset'))">↺ Reset mission</button>
@@ -155,12 +161,12 @@
         <span id="trimv" class="pill">trim +0.0 m</span>
         <button onclick="post('alt_trim', {delta: 0.5})">▲ 0.5 m</button>
       </div>
-      <div class="noradio onlyros" style="margin:8px 0" title="the heights the mission flies. Start marker and tunnels apply the next time that phase begins; the QR area applies at once. Kept across restarts.">
+      <div class="altblock onlyros" style="margin:8px 0" title="the heights the mission flies. Start marker and tunnels apply the next time that phase begins; the QR area applies at once. Kept across restarts.">
         <b>Altitudes</b>
         <div class="altbar"><span>Start marker</span><input type="range" id="alt_takeoff" step="0.1" oninput="altShow()"><b id="altv_takeoff"></b></div>
-        <div class="altbar"><span>Tunnels</span><input type="range" id="alt_tunnel" step="0.1" oninput="altShow()"><b id="altv_tunnel"></b></div>
+        <div class="altbar"><span>Tunnels</span><input type="range" id="alt_tunnel" step="0.02" oninput="altShow()"><b id="altv_tunnel"></b></div>
         <div class="altbar"><span>QR area scan</span><input type="range" id="alt_search" step="0.1" oninput="altShow()"><b id="altv_search"></b></div>
-        <div class="row"><button class="go" id="altset" onclick="altSet()">Set altitudes</button><span class="d" id="altnote" style="color:var(--dim)"></span></div>
+        <div class="row noradio"><button class="go" id="altset" onclick="altSet()">Set altitudes</button><span class="d" id="altnote" style="color:var(--dim)"></span></div>
       </div>
       <div class="row" title="straight to the autopilot; the mission stops and hands the drone to you (no failsafe flight)">
         <button class="stop" onclick="ask('LAND now, where it is (autopilot LAND)?').then(y => y && post('land'))">LAND</button>
@@ -177,7 +183,7 @@
 </main>
 
 <div class="card noradio onlyros" style="margin:0 10px 10px">
-  <h2>Bench test · props off</h2>
+  <h2 id="benchtitle">Bench test · props off</h2>
   <div class="benchgrid">
     <div>
       <div id="benchwarn">Real motors spin. Remove every prop first.</div>
@@ -189,6 +195,7 @@
         <button class="bbtn" onclick="benchMotor(3)">RL</button><button class="bbtn" onclick="benchMotor(4)">FL</button>
         <button class="bbtn" onclick="benchMotor(0)">All, in turn</button>
       </div>
+      <div class="row" id="followrow"><button class="bbtn go" onclick="benchFollow()">Real motors + winch follow the sim</button></div>
       <div class="row"><span>Winch</span><input id="b_winch" type="number" min="1" max="60" step="1" value="5" style="width:64px"><span>s</span><button class="bbtn" onclick="benchWinch()">Run winch</button></div>
       <div class="row"><button class="stop big" style="flex:1" onclick="post('bench_stop')">■ STOP motors + winch</button></div>
     </div>
@@ -218,7 +225,7 @@
     <h2>Preflight</h2>
     <div class="checks" id="checks"></div>
   </div>
-  <div class="card noflight">
+  <div class="card noflight simplehide" id="gfcard">
     <h2>Geofence (GPS)</h2>
     <div class="d">The organisers' 6 points: fill the arena OR the QR area (whichever their 4 corners are), the other 2 in
       Extra. Arena only: the QR area's back + side walls are the arena's, its front wall = the entry tunnel's exit line (found in flight).</div>
@@ -239,7 +246,7 @@
     </table>
     <div class="row">
       <button onclick="saveGf()">Save</button>
-      <button class="go" onclick="saveGf().then(() => post('apply', {mode: val('mode')}))">Save + Apply</button>
+      <button class="go mainhide" onclick="saveGf().then(() => post('apply', {mode: val('mode')}))">Save + Apply</button>
       <button class="stop noflight" onclick="ask('Erase every geofence point (Arena, QR area, Extra)? The Course numbers stay.').then(y => y && post('geofence_clear').then(() => { gfDirty = false; }))">🗑 Clear geofence</button>
       <button class="noradio" onclick="ask('Replace with the sim world\'s arena + QR area?').then(y => y && post('from_world', {world: val('world')}).then(() => gfDirty=false))">Fill from sim world</button>
     </div>
@@ -348,6 +355,8 @@ function mapBounds(s) {
   if (loc) pts.push(...loc.field, ...loc.delivery, ...loc.extra);
   if (cm) pts.push([cm.x0, cm.y0], [cm.x0 + cm.w, cm.y0 + cm.h]);
   if (pose) pts.push([pose[0], pose[1]]);
+  (s.red_boxes || []).forEach(r => pts.push([r[0], r[1]], [r[2], r[3]]));
+  (s.ros.qrs || []).forEach(q => pts.push([q.x, q.y]));
   if (tr) { pts.push(...tr.zone); tr.tunnels.forEach(t => pts.push([t.x0, t.y - t.w / 2], [t.x1, t.y + t.w / 2])); }
   s.ros.track.forEach(p => pts.push(p));
   if (!pts.length) pts.push([-5, -5], [5, 5]);
@@ -375,6 +384,7 @@ function drawMap(s, id, actual) {
   if (loc) { poly(loc.field, '#3fd0d0'); poly(loc.delivery, '#e8c547', [6, 4]);
     loc.extra.forEach((q, i) => { ctx.strokeStyle = '#c58cff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(X(q[0]), Y(q[1]), 5, 0, 7); ctx.stroke();
       ctx.fillStyle = '#c58cff'; ctx.fillText('E' + (i + 1), X(q[0]) + 6, Y(q[1]) - 6); }); }
+  const blob = (x, y, col, filled) => { ctx.strokeStyle = ctx.fillStyle = col; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(X(x), Y(y), 6, 0, 7); filled ? ctx.fill() : ctx.stroke(); };
   const box = (x, y, sx, sy) => ctx.fillRect(X(x - sx / 2), Y(y + sy / 2), sx * sc, sy * sc);
   if (actual && truth) {
     poly(truth.zone, '#e8c547', [6, 4]);
@@ -383,15 +393,15 @@ function drawMap(s, id, actual) {
     ctx.fillStyle = '#c58cff'; truth.obstacles.forEach(o => box(o.x, o.y, o.sx, o.sy));
     ctx.fillStyle = 'rgb(235,0,0)'; truth.red.forEach(r => ctx.fillRect(X(r.x0), Y(r.y1), (r.x1 - r.x0) * sc, (r.y1 - r.y0) * sc));
     truth.boards.forEach(b => { const q = (s.ros.qrs || []).find(k => k.payload === b.payload);
-      ctx.strokeStyle = ctx.fillStyle = b.target ? '#3fbf6f' : '#e8c547'; ctx.lineWidth = 2;
-      if (q) ctx.fillRect(X(b.x) - 4, Y(b.y) - 4, 8, 8); else ctx.strokeRect(X(b.x) - 4, Y(b.y) - 4, 8, 8);
-      ctx.fillStyle = '#dfe6ee'; ctx.fillText(b.payload + (q ? ` · off ${Math.hypot(q.x - b.x, q.y - b.y).toFixed(1)} m` : ''), X(b.x) + 7, Y(b.y) + 4); });
+      blob(b.x, b.y, b.target ? '#3fbf6f' : '#e8c547', !!q);
+      ctx.fillStyle = '#dfe6ee'; ctx.fillText(b.payload + (q ? ` · off ${Math.hypot(q.x - b.x, q.y - b.y).toFixed(1)} m` : ''), X(b.x) + 9, Y(b.y) + 4); });
   }
   if (!actual) {
+    if (!cm) { ctx.fillStyle = 'rgb(235,0,0)'; (s.red_boxes || []).forEach(r => ctx.fillRect(X(r[0]), Y(r[3]), (r[2] - r[0]) * sc, (r[3] - r[1]) * sc)); }   // the radio: boxes, no costmap
     ctx.fillStyle = '#c58cff'; obstCells.forEach(c => ctx.fillRect(X(c[0]) - 1.5, Y(c[1]) - 1.5, 3, 3));
     // the boards as read (ArUco: the whole id, QR: the part after the dash)
     (s.ros.qrs || []).forEach(q => { const c = q.status === 'target' ? '#3fbf6f' : q.status === 'rejected' ? '#ff9600' : '#e8c547';
-      ctx.fillStyle = c; ctx.fillRect(X(q.x) - 4, Y(q.y) - 4, 8, 8); ctx.fillText(String(q.payload).split('-')[1] || q.payload, X(q.x) + 6, Y(q.y) + 4); });
+      blob(q.x, q.y, c, true); ctx.fillStyle = c; ctx.fillText(String(q.payload).split('-')[1] || q.payload, X(q.x) + 9, Y(q.y) + 4); });
     if (s.ros.target) { const [tx, ty] = s.ros.target; ctx.strokeStyle = '#3fbf6f'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(X(tx), Y(ty), 9, 0, 7); ctx.stroke(); }
   }
   // track
@@ -475,12 +485,18 @@ $('altchart').addEventListener('mouseleave', () => { altHover = null; });
 // ---- altitude bars
 let altDirty = false;
 const ALT_KEYS = ['takeoff', 'tunnel', 'search'];
-function altShow() { altDirty = true; ALT_KEYS.forEach(k => $('altv_' + k).textContent = Number(val('alt_' + k)).toFixed(1) + ' m'); }
+function altShow() { altDirty = true; ALT_KEYS.forEach(k => $('altv_' + k).textContent = Number(val('alt_' + k)).toFixed(2) + ' m'); }
 function altRender(s) {
   if (!s.alts) return;
   ALT_KEYS.forEach(k => { const e = $('alt_' + k), [lo, hi] = s.alt_limits[k]; e.min = lo; e.max = hi;
-    if (!altDirty) { e.value = s.alts[k]; $('altv_' + k).textContent = s.alts[k].toFixed(1) + ' m'; } });
+    if (!altDirty) { e.value = s.alts[k]; $('altv_' + k).textContent = s.alts[k].toFixed(2) + ' m'; } });
   $('altnote').textContent = altDirty ? 'not set yet' : '';
+}
+function startAuto() {
+  const test = snap && snap.test, h = Object.fromEntries(ALT_KEYS.map(k => [k, parseFloat(val('alt_' + k))]));
+  ask((test ? `TEST: start marker ${h.takeoff} m, tunnels ${h.tunnel} m, QR area ${h.search} m. ` : '') +
+      'Start the WHOLE mission? Preflight, then a 10 s countdown (Stop cancels), then it flies by itself.')
+    .then(y => y && post('auto_start', test ? {alts: h} : {}));
 }
 async function altSet() { const j = await post('alt_plan', Object.fromEntries(ALT_KEYS.map(k => [k, parseFloat(val('alt_' + k))]))); if (j.ok) altDirty = false; }
 
@@ -490,6 +506,10 @@ function benchBody() { return {props_off: chk('propsoff'), throttle: parseFloat(
 function benchMotor(m) {
   const name = {0: 'ALL FOUR, one after the other', 1: 'FRONT RIGHT', 2: 'REAR RIGHT', 3: 'REAR LEFT', 4: 'FRONT LEFT'}[m];
   ask(`Spin ${name} at ${val('b_thr')} % for ${val('b_secs')} s${m ? '' : ' each'}? Every prop must be off.`).then(y => y && post('bench_motor', {...benchBody(), motor: m}));
+}
+function benchFollow() {
+  ask('The REAL motors take the sim\'s output one at a time, up to about 75 %, and the REAL winch runs on the sim\'s DROP. Every prop must be off, hands clear.')
+    .then(y => y && post('bench_follow', {props_off: chk('propsoff')}));
 }
 function benchWinch() { ask(`Run the winch for ${val('b_winch')} s? Keep hands and the line clear.`).then(y => y && post('bench_winch', {props_off: chk('propsoff'), seconds: parseFloat(val('b_winch'))})); }
 function benchRender(s) {
@@ -501,13 +521,19 @@ function benchRender(s) {
     ['Altitude', fmt(t.local_z ?? t.alt_rel, 2) + ' m'], ['Battery', fmt(t.batt_a, 1) + ' A'], ['Voltage', fmt(t.batt_v, 2) + ' V'],
     ['Motor test', b.motor_left ? b.motor_left.toFixed(0) + ' s left' : 'off'], ['Winch', b.winch_left ? b.winch_left.toFixed(0) + ' s left' : 'off'], ['Armed', t.armed === undefined ? '–' : t.armed ? 'ARMED' : 'disarmed']]
     .map(([k, v]) => `<div class="tile"><span>${k}</span><b>${esc(v)}</b></div>`).join('');
-  $('benchnote').textContent = (b.motors.some(m => m.rpm != null) ? 'RPM from the ESCs. ' : 'No ESC RPM reported: this shows the output sent to each motor, not its speed. ') +
+  const real = b.target === 'real';
+  $('benchtitle').textContent = real ? 'REAL drone · props off' : 'Bench test · props off';
+  $('followrow').style.display = real ? '' : 'none';
+  const sims = b.motors.filter(m => m.sim != null).map(m => `${m.name} sim ${m.sim} real ${m.pwm ?? '–'}`).join(' · ');
+  $('benchnote').textContent = (real ? `The buttons drive the REAL Pixhawk. ${b.follow ? 'FOLLOWING the sim, one motor at a time. ' : ''}${b.follow_msg ? b.follow_msg + '. ' : ''}${sims ? sims + '. ' : ''}` : '') + (b.motors.some(m => m.rpm != null) ? 'RPM from the ESCs. ' : 'No ESC RPM reported: this shows the output sent to each motor, not its speed. ') +
     'The winch has no speed sensor: watch the battery current. ArduCopter spins one motor at a time.';
 }
 
 // ---- render
 function render(s) {
   snap = s; const t = s.tel;
+  document.body.classList.toggle('testapp', !!s.test);
+  if (s.auto) { $('autolog').textContent = s.auto.lines.join('\n'); $('autostart').disabled = s.auto.running || !!t.armed; }
   document.body.classList.toggle('inflight', !!(s.radio && t.armed));   // radio + armed: MANUAL + LAND/RTL/KILL only
   if (s.radio) { if (val('mode') !== 'radio') setMode('radio'); }
   else if (s.stack.running && s.stack.mode && s.stack.mode !== val('mode')) setMode(s.stack.mode);   // follow what runs
@@ -579,7 +605,7 @@ function render(s) {
   if (s.obst_ver !== obstVer && !obstBusy) { obstBusy = true; const v = s.obst_ver;
     fetch('/obstacles.json').then(r => r.json()).then(j => { obstCells = j.cells; obstVer = v; }).catch(() => {}).finally(() => setTimeout(() => obstBusy = false, 1000)); }
   $('truthnote').textContent = s.truth ? 'the sim world: boards hollow until found, drone from the autopilot' : 'no ground truth on a real drone: geofence + flown track';
-  drawMap(s, 'map', false); drawMap(s, 'truemap', true);
+  drawMap(s, 'map', false); if (!s.radio) drawMap(s, 'truemap', true);
   cvaRender(s); altRender(s); benchRender(s);
   // log
   const lines = (s.ros.log || []).map(l => { const {time, state, ...rest} = l; return `<div>${new Date(time * 1000).toLocaleTimeString()} <b>${esc(state)}</b> ${esc(JSON.stringify(rest))}</div>`; });
@@ -626,9 +652,11 @@ corridorUi();
 benchUi();
 
 function setMode(m) {
+  if (document.body.classList.contains('simple')) { m = 'sim'; $('launchbtn').textContent = '▶ Start'; $('stopbtn').textContent = '■ Stop'; }
   $('mode').value = m;
   ['real', 'sim', 'offboard'].forEach(k => { document.body.classList.toggle('mode-' + k, m === k); $('m_' + k).classList.toggle('on', m === k); });
   document.body.classList.toggle('mode-radio', m === 'radio');
+  if (m === 'radio') { const g = $('gfcard'); g.classList.add('top'); document.body.insertBefore(g, document.querySelector('main')); }   // first: save it, then Start
   // the offboard Jetson flies the QR area only
   if (m === 'offboard' && !['qr', 'qr_drop'].includes(val('segment'))) $('segment').value = 'qr';
   if (m === 'offboard' && !$('vrxframe').src) $('vrxframe').src = 'http://' + location.hostname + ':8094';

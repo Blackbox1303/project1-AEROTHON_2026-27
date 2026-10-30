@@ -165,7 +165,7 @@ class MissionSupervisor(Node):
         p('approach_altitude', 6.5)  # m at most: both tunnels' overhead banner fix + the flight to the standoff (user,
         #                              2026-10-30: the height isn't known well enough to go lower sooner)
         p('align_altitude', 2.3)     # m: banner search + wall fit outside the tunnels (below 8 ft: no climbing near them)
-        p('tunnel_altitude', 1.5)    # m: both tunnels (v3: roofed 10 ft, never above 8 ft = 2.44 m)
+        p('tunnel_altitude', 1.98)   # m: both tunnels, 6.5 ft (user, 2026-10-30; roofed 10 ft, never above 8 ft = 2.44 m)
         p('entry_speed', 1.0)        # m/s along the entry tunnel (no obstacles)
         p('return_speed', 0.5)       # m/s along the exit tunnel (the blocks: lateral plan + sidesteps)
         p('exit_colour', 'blue')     # banner of the tunnel to fly into from the zone (2026-10-30: blue with a thin
@@ -179,6 +179,7 @@ class MissionSupervisor(Node):
         p('overhead_look', 1.5)      # s hovering per look at least (the detector runs at 4 Hz, a track needs 2 hits) ...
         p('overhead_frames', 4)      # ... and until it has processed this many frames (the loaded sim: ~1 per 8 s)
         p('overhead_look_max', 40.0) # s (wall) per look at most
+        p('overhead_relooks', 1)     # looks again from overhead_hold_back: no time to spend on the banner (user, 2026-10-30)
         p('overhead_banner_len', [2.0, 5.5])  # m: the floor banner (11.5 ft = 3.5 m) projected on the ground; the
         #                              top banner projected on the ground from 5 m comes out ~2.5 x longer
         p('overhead_hold_back', 1.5) # m on the start side of the banner where the drone looks from (never over the roof)
@@ -1352,12 +1353,28 @@ class MissionSupervisor(Node):
         direction of its long edge (mod 180 deg) on the ground, from its corner rays (the lower banner lies flat at the
         mouth like a doormat - user, 2026-10-30)."""
         self.overhead_dets, self.overhead_frames = [], 0
-        t0, c0 = time.monotonic(), self.clock_s()
+        t0, c0, n = time.monotonic(), self.clock_s(), 0
         while (self.clock_s() - c0 < self.g('overhead_look') or self.overhead_frames < self.g('overhead_frames')) \
                 and time.monotonic() - t0 < self.g('overhead_look_max'):
             if self.abort_reason:
                 raise Abort(self.abort_reason)
+            if len(self.overhead_dets) != n:         # the first banner seen ends the look (user, 2026-10-30)
+                n = len(self.overhead_dets)
+                if self.overhead_fixes()[0]:
+                    break
             time.sleep(0.05)
+        fixes, seen = self.overhead_fixes()
+        self.get_logger().info(f'overhead look: {self.overhead_frames} frames, {self.overhead_colour} {seen[:6]}')
+        if not fixes:
+            return None
+        best = max(fixes, key=lambda g: g[0])
+        near = [g for g in fixes if np.linalg.norm(g[1] - best[1]) < 1.0]
+        a2 = sum(math.cos(2 * g[2]) for g in near), sum(math.sin(2 * g[2]) for g in near)
+        return {'centre': np.mean([g[1] for g in near], axis=0), 'across': math.atan2(a2[1], a2[0]) / 2,
+                'length': float(np.mean([g[3] for g in near])), 'n': len(near)}
+
+    def overhead_fixes(self):
+        """The detections so far -> ([(score, centre, long edge direction, length)], what was seen, for the log)."""
         lo, hi = self.g('overhead_banner_len')
         fixes, seen = [], []
         for d in self.overhead_dets:
@@ -1376,14 +1393,7 @@ class MissionSupervisor(Node):
             seen.append(f'({c[0]:.1f},{c[1]:.1f}) {length:.1f}m')
             if lo <= length <= hi:
                 fixes.append((d['score'], c, math.atan2(e[1], e[0]), length))
-        self.get_logger().info(f'overhead look: {self.overhead_frames} frames, {self.overhead_colour} {seen[:6]}')
-        if not fixes:
-            return None
-        best = max(fixes, key=lambda g: g[0])
-        near = [g for g in fixes if np.linalg.norm(g[1] - best[1]) < 1.0]
-        a2 = sum(math.cos(2 * g[2]) for g in near), sum(math.sin(2 * g[2]) for g in near)
-        return {'centre': np.mean([g[1] for g in near], axis=0), 'across': math.atan2(a2[1], a2[0]) / 2,
-                'length': float(np.mean([g[3] for g in near])), 'n': len(near)}
+        return fixes, seen
 
     def overhead_fix(self, colour, looks, axis_of, deadline):
         """At approach_altitude, the look points (x, y, yaw) in turn until colour's floor banner is seen, then again from
@@ -1406,7 +1416,7 @@ class MissionSupervisor(Node):
             if fix is None:
                 self.set_state(self.state, result=f'no {colour} banner seen from above')
                 return None
-            for _ in range(3):
+            for _ in range(self.g('overhead_relooks')):
                 axis = axis_of(fix)
                 look = fix['centre'] - self.g('overhead_hold_back') * np.array([math.cos(axis), math.sin(axis)])
                 self.fly(*look, alt, deadline, yaw=axis)                   # short of the mouth: never over the roof

@@ -36,6 +36,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 import urllib.request
@@ -51,6 +52,8 @@ except ImportError:
 OFFBOARD_ALT = 9.0           # (< 10 m: the airspace rule, 2026-10-30) --offboard-alt: the VRX explorer's search height, m (ArUco 8084: 1 m)
 MARKER = 'qr'                # --marker: what the boards carry, qr | aruco (the 8084 ArUco delivery dashboard)
 RADIO = None                 # --radio: this dashboard runs ON THE LENOVO on the telemetry radio (the final flight)
+TEST = False                 # --test: the radio dashboard's test copy (aerothon test): its own heights on each Start
+PORT = 8080
 AGENT = 194                  # the onboard Jetson's mav_agent (MAV_COMP_ID_ONBOARD_COMPUTER2)
 AGENT_CMD = 31010            # its MAV_CMD_USER_1; param1: 1 launch 2 stop 5 abort 6 status 7 start segment 8 operator
 SEG_CODE = {'full': 1, 'qr': 2, 'tunnel': 3, 'qr_drop': 4}
@@ -141,6 +144,7 @@ class State:
         self.tel_track = []
         self.mission_type = 'full'
         self.red_check = None        # why the red map is not the one 10 ft red zone (red_sanity), None = fine
+        self.red_boxes = []          # the red zones as [x0, y0, x1, y1] in odom: what fits on the radio (red_boxes)
         self.mission_t0 = None
         self.zone_t0 = None
         self.alt_offset = 0.0        # the operator's search-height trim (m), as last set on the explorer
@@ -188,6 +192,7 @@ class Mavlink(threading.Thread):
         self.radio, self.radio_err = radio, None
         self.agent, self.agent_detail, self.chunks = {}, {}, {}
         self.vio, self.boards = {}, {}   # the agent's VIO position (32802) and boards (32803, by payload)
+        self.red = []                # the agent's red-zone boxes (32804)
         if radio:
             # the final flight: this PC owns the SiK radio and relays every packet both ways to QGroundControl
             # (its UDP auto-connect) - a mavlink-router in-process: QGC and this dashboard both see the drone
@@ -255,7 +260,7 @@ class Mavlink(threading.Thread):
             return
         if t == 'HEARTBEAT':
             S.tel_time['agent'] = now
-        elif t == 'TUNNEL' and msg.payload_type in (32800, 32801, 32802, 32803):
+        elif t == 'TUNNEL' and msg.payload_type in (32800, 32801, 32802, 32803, 32804):
             try:
                 d = json.loads(bytes(msg.payload[:msg.payload_length]).decode())
             except ValueError:
@@ -268,6 +273,8 @@ class Mavlink(threading.Thread):
             elif msg.payload_type == 32802:               # VIO position (mav_agent --vio-period)
                 self.vio = d
                 S.tel_time['agent_vio'] = now
+            elif msg.payload_type == 32804:               # the red zones, as boxes: the costmap doesn't fit
+                self.red = d.get('r') or []
             elif d.get('p'):                              # a board (mav_agent --board-period): latest per payload
                 self.boards[d['p']] = d
         elif t == 'STATUSTEXT':                       # chunked (MAVLink 2): join the chunks of one id
@@ -588,6 +595,7 @@ class Ros(threading.Thread):
         """The red zones themselves (no margin): drawn solid over the no-fly margin of /delivery/map."""
         self.red_arr = np.array(m.data, np.int16).reshape(m.info.height, m.info.width) >= 100
         S.red_check = red_sanity(self.red_arr, m.info.resolution)
+        S.red_boxes = red_boxes(self.red_arr, m.info)
         if self.last_map is not None:
             self.on_map(self.last_map)
 
@@ -760,7 +768,7 @@ def alt_trim(delta):
 # key: (supervisor parameter, default, lowest, highest). 9.5 m: the airspace cap; tunnel 2.0: the supervisor's own cap
 # (8 ft ceiling - 0.14 - 0.3) and altitude_planner's z_max; search 5.5: the explorer's alt_min (5 m is the drop height)
 ALT_FILE = DATA / 'altitudes.json'
-ALT_PLAN = {'takeoff': ('takeoff_altitude', 5.0, 2.0, 9.5), 'tunnel': ('tunnel_altitude', 1.5, 0.8, 2.0),
+ALT_PLAN = {'takeoff': ('takeoff_altitude', 5.0, 2.0, 9.5), 'tunnel': ('tunnel_altitude', 1.98, 0.8, 2.0),
             'search': ('search_altitude', 9.0, 5.5, 9.5)}
 
 
@@ -779,6 +787,16 @@ def push_alts(alts, search=True):
     if success and search:
         success, msg = ROS.set_doubles(ROS.cli_explore_params, 'the explorer', altitude=alts['search'])
     return success, msg
+
+
+def checked_alts(alts):
+    """A start's heights -> the dict, or raises ValueError. 'mission': the fixed ones, whatever is saved."""
+    if alts == 'mission':
+        return {k: d[1] for k, d in ALT_PLAN.items()}
+    for k, (_, _, lo, hi) in ALT_PLAN.items():
+        if not lo <= float(alts[k]) <= hi:
+            raise ValueError(f'{k} {alts[k]} m: allowed {lo} - {hi} m')
+    return {k: float(alts[k]) for k in ALT_PLAN}
 
 
 def set_alts(body):
@@ -885,12 +903,105 @@ BENCH_MAX_THR, BENCH_MAX_S, BENCH_ALL_S = 25.0, 10.0, 5.0   # %, s one motor, s 
 BENCH_WINCH_S, RC5_AUX = 60.0, 28                     # RC5_AUX: the supervisor's rc5_aux_function
 
 
+class RealLink:
+    """During a sim run the onboard router is paused and the sim's autopilot answers on MAV: the REAL Pixhawk's USB port
+    is free, and this opens it for the bench panel only (never while the router has it). Closed again with the stack."""
+
+    def __init__(self):
+        self.conn, self.tel, self.acks, self.hb, self.err = None, {}, {}, 0.0, ''
+
+    def open(self):
+        import glob
+        from pymavlink import mavutil
+        if self.conn is not None:
+            return True
+        ids = glob.glob('/dev/serial/by-id/*Pixhawk*-if00') or glob.glob('/dev/serial/by-id/*Holybro*-if00')
+        if not ids:
+            self.err = 'the real Pixhawk is not on USB'
+            return False
+        try:
+            self.conn = mavutil.mavlink_connection(ids[0], baud=921600, source_system=251, source_component=190)
+        except Exception as e:
+            self.conn, self.err = None, f'real Pixhawk: {e}'
+            return False
+        threading.Thread(target=self.loop, args=(self.conn, mavutil), daemon=True).start()
+        return True
+
+    def close(self):
+        c, self.conn, self.hb = self.conn, None, 0.0
+        self.tel = {}
+        if c is not None:
+            threading.Timer(1.5, c.close).start()     # after the reader's last timeout
+
+    def loop(self, conn, mavutil):
+        last = 0.0
+        while self.conn is conn:
+            now = time.monotonic()
+            try:
+                if now - last > 1.0:
+                    last = now
+                    conn.mav.heartbeat_send(6, 8, 0, 0, 4)
+                    for msg_id, hz in ((36, 5), (11030, 2)):
+                        conn.mav.command_long_send(1, 1, 511, 0, msg_id, 1e6 / hz, 0, 0, 0, 0, 0)
+                m = conn.recv_match(blocking=True, timeout=0.5)
+            except Exception as e:
+                self.err = f'real Pixhawk: {e}'
+                self.close()
+                return
+            if m is None or m.get_srcComponent() != 1:
+                continue
+            t = m.get_type()
+            if t == 'HEARTBEAT':
+                self.hb = time.monotonic()
+                self.tel['armed'] = bool(m.base_mode & 128)
+            elif t == 'SERVO_OUTPUT_RAW':
+                self.tel['servo'] = [m.servo1_raw, m.servo2_raw, m.servo3_raw, m.servo4_raw]
+            elif t == 'ESC_TELEMETRY_1_TO_4':
+                self.tel['rpm'] = list(m.rpm)
+            elif t == 'COMMAND_ACK':
+                self.acks[m.command] = (m.result, time.monotonic())
+
+    def command(self, cmd, *p):
+        if self.conn is not None:
+            p = list(p) + [0] * (7 - len(p))
+            self.conn.mav.command_long_send(1, 1, cmd, 0, *p)
+
+    def command_ack(self, cmd, *p):
+        t0 = time.monotonic()
+        for _ in range(2):
+            self.command(cmd, *p)
+            end = time.monotonic() + 1.5
+            while time.monotonic() < end:
+                a = self.acks.get(cmd)
+                if a and a[1] >= t0:
+                    return a[0] in (0, 5), Mavlink.RESULTS.get(a[0], f'result {a[0]}')
+                time.sleep(0.05)
+        return False, 'no ACK from the real Pixhawk'
+
+
+REAL = RealLink()
+FOLLOW_MAX_PWM, FOLLOW_STEP_S = 1750, 0.3             # us: above hover, under full power; s each motor of the round
+FOLLOW_WINCH_S = 45.0                                 # s: the real drop's hold
+
+
 class Bench:
     def __init__(self):
         self.until = 0.0              # the running motor test ends (monotonic); ArduCopter says armed until then
         self.motor, self.throttle = None, 0.0
         self.winch_until = 0.0
+        self.follow = False           # the real motors + winch follow the sim
+        self.follow_msg = ''
         self.lock = threading.Lock()
+
+    def real(self):
+        """In a sim run the buttons mean the REAL drone, not the sim's autopilot."""
+        return not RADIO and STACK.mode == 'sim' and STACK.running()
+
+    def link(self):
+        return REAL if self.real() else MAV
+
+    def armed(self):
+        return REAL.tel.get('armed') if self.real() else S.tel.get('armed')
 
     def blocked(self, body):
         """Why nothing may spin now, or None. Heartbeats report armed during ArduCopter's own test, so 'armed' only
@@ -899,10 +1010,18 @@ class Bench:
             return 'bench test: on the Jetson dashboard only'
         if body.get('props_off') is not True:
             return 'tick PROPS ARE OFF first'
-        if not fresh('HEARTBEAT', 3, S.tel_time):
+        if self.real():
+            if not REAL.open():
+                return REAL.err
+            end = time.monotonic() + 3.0              # just opened: its first heartbeat
+            while time.monotonic() - REAL.hb > 3 and time.monotonic() < end:
+                time.sleep(0.05)
+            if time.monotonic() - REAL.hb > 3:
+                return 'no heartbeat from the real Pixhawk'
+        elif not fresh('HEARTBEAT', 3, S.tel_time):
             return 'no autopilot link'
-        if S.tel.get('armed') is not False and time.monotonic() > self.until:
-            return f'the drone must be DISARMED (armed {S.tel.get("armed")})'
+        if self.armed() is not False and time.monotonic() > self.until:
+            return f'the drone must be DISARMED (armed {self.armed()})'
         return None
 
     def run_motor(self, body):
@@ -920,7 +1039,7 @@ class Bench:
         limit = BENCH_ALL_S if seq == 0 else BENCH_MAX_S
         if not 0 < secs <= limit:
             return False, f'seconds: up to {limit:g}'
-        success, msg = MAV.command_ack(209, seq or 1, 0, thr, secs, 4 if seq == 0 else 1, 0, 0)
+        success, msg = self.link().command_ack(209, seq or 1, 0, thr, secs, 4 if seq == 0 else 1, 0, 0)
         if not success:
             return False, f'motor test: autopilot {msg} (see the FCU messages)'
         # all four: each motor runs secs, then 50 % of that at zero before the next (ArduCopter motor_test.cpp)
@@ -931,9 +1050,10 @@ class Bench:
     def stop_motor(self):
         """Throttle 0, timeout 0: the autopilot ends the test on its next loop, sequence included. Sent only while a test
         runs: this same command starts one otherwise."""
+        self.follow = False
         if time.monotonic() > self.until:
             return True, 'motors: no test running'
-        success, msg = MAV.command_ack(209, 1, 0, 0, 0, 1, 0, 0)
+        success, msg = self.link().command_ack(209, 1, 0, 0, 0, 1, 0, 0)
         self.motor = None
         return success, f'motors stop: autopilot {msg}'
 
@@ -949,7 +1069,10 @@ class Bench:
             return False, f'seconds: up to {BENCH_WINCH_S:g}'
         if time.monotonic() < self.winch_until:
             return False, 'the winch is already running'
-        success, msg = MAV.command_ack(218, RC5_AUX, 2)
+        return self.winch_on(secs)
+
+    def winch_on(self, secs):
+        success, msg = self.link().command_ack(218, RC5_AUX, 2)
         if not success:
             return False, f'winch: autopilot {msg}'
         self.winch_until = time.monotonic() + secs
@@ -959,7 +1082,7 @@ class Bench:
     def winch_watch(self):
         """Relay off at the end - and at once if the drone arms outside a motor test."""
         while time.monotonic() < self.winch_until:
-            if S.tel.get('armed') and time.monotonic() > self.until:
+            if self.armed() and time.monotonic() > self.until:
                 break
             time.sleep(0.1)
         self.stop_winch()
@@ -969,26 +1092,77 @@ class Bench:
             if not self.winch_until:
                 return True, 'winch: already off'
             self.winch_until = 0.0
-        success, msg = MAV.command_ack(218, RC5_AUX, 0)
+        success, msg = self.link().command_ack(218, RC5_AUX, 0)
         return success, f'winch relay OFF: autopilot {msg}'
 
+    def start_follow(self, body):
+        """The real motors take the sim's output, one after the other (ArduCopter's motor test: one at a time, disarmed,
+        no parameter changed, each command over by itself in FOLLOW_STEP_S + 0.1 s). The winch relay on the sim's DROP."""
+        if not self.real():
+            return False, 'only during a sim run: press Start first'
+        why = self.blocked(body)
+        if why:
+            return False, why
+        if self.follow:
+            return False, 'already following'
+        self.follow, self.follow_msg = True, ''
+        threading.Thread(target=self.follow_loop, daemon=True).start()
+        return True, 'the real motors follow the sim, one at a time; the winch on DROP'
+
+    def follow_loop(self):
+        k, dropped = 0, False
+        while self.follow and self.real() and REAL.conn is not None:
+            a = REAL.acks.get(209)
+            if a and a[0] != 0 and time.monotonic() - a[1] < 2.0:
+                self.follow_msg = f'refused by the real Pixhawk: {Mavlink.RESULTS.get(a[0], a[0])}'
+                break
+            if time.monotonic() - REAL.hb > 3 or (self.armed() and time.monotonic() > self.until):
+                self.follow_msg = 'real Pixhawk lost or armed: stopped'
+                break
+            state = (S.ros.get('state') or '').split(' ')[0]
+            if state == 'DROP' and not dropped and time.monotonic() > self.winch_until:
+                dropped = bool(self.winch_on(FOLLOW_WINCH_S)[0])
+            servo = S.tel.get('servo') if S.tel.get('armed') and fresh('SERVO_OUTPUT_RAW', 3, S.tel_time) else None
+            if not servo:                                 # the sim on the ground: nothing to follow
+                time.sleep(0.2)
+                continue
+            seq = k % 4 + 1
+            k += 1
+            REAL.command(209, seq, 1, min(FOLLOW_MAX_PWM, servo[BENCH_OUTPUT[seq - 1]]), FOLLOW_STEP_S + 0.1, 1, 0, 0)
+            self.motor, self.until = seq, time.monotonic() + FOLLOW_STEP_S + 2.0
+            time.sleep(FOLLOW_STEP_S)
+        self.follow = False
+
     def active(self):
-        return time.monotonic() < max(self.until, self.winch_until)
+        return not self.real() and time.monotonic() < max(self.until, self.winch_until)
 
     def status(self):
         now = time.monotonic()
-        tel, ok_servo = S.tel, fresh('SERVO_OUTPUT_RAW', 2, S.tel_time)
-        servo = tel.get('servo') if ok_servo else None
-        rpm = tel.get('rpm') if fresh('ESC_TELEMETRY_1_TO_4', 3, S.tel_time) else None
+        real = self.real() and REAL.conn is not None
+        sim = S.tel.get('servo') if self.real() and fresh('SERVO_OUTPUT_RAW', 3, S.tel_time) else None
+        if real:
+            servo, rpm = REAL.tel.get('servo'), REAL.tel.get('rpm')
+        else:
+            tel, ok_servo = S.tel, fresh('SERVO_OUTPUT_RAW', 2, S.tel_time)
+            servo = tel.get('servo') if ok_servo else None
+            rpm = tel.get('rpm') if fresh('ESC_TELEMETRY_1_TO_4', 3, S.tel_time) else None
         if rpm and servo and not any(rpm) and max(servo) > 1150:   # the message with no real ESC behind it (SITL reads 0
             rpm = None                                             # at 1588 us): 'no RPM', not 'stopped'
         return {'motors': [{'name': BENCH_MOTORS[k + 1], 'pwm': servo[i] if servo else None,
-                            'rpm': rpm[i] if rpm else None} for k, i in enumerate(BENCH_OUTPUT)],
+                            'rpm': rpm[i] if rpm else None, 'sim': sim[i] if sim else None}
+                           for k, i in enumerate(BENCH_OUTPUT)],
+                'target': 'real' if self.real() else 'autopilot', 'follow': self.follow, 'follow_msg': self.follow_msg,
                 'motor_left': round(max(0.0, self.until - 2.0 - now), 1), 'winch_left': round(max(0.0, self.winch_until - now), 1),
                 'max_throttle': BENCH_MAX_THR}
 
 
 BENCH = Bench()
+
+
+def bench_off():
+    BENCH.stop_motor()
+    BENCH.stop_winch()
+    REAL.close()
 
 
 # ---------------------------------------------------------------- the stack (sim / real)
@@ -1105,6 +1279,7 @@ class Stack:
             # the map starts clean: the last run's flight path (MAVLink track) and costmap stayed drawn (2026-10-27)
             S.tel_track = []
             S.costmap_png, S.costmap_meta = None, None
+            S.red_boxes = []
         return True, f'{mode} stack starting (run {self.run}{", ArUco boards" if self.marker == "aruco" else ""})'
 
     def corridor_args(self):
@@ -1121,6 +1296,9 @@ class Stack:
             time.sleep(2)
         msg = 'stack not READY in 7 min'
         while live() and time.monotonic() < end:
+            if MARKER == 'aruco' and self.mode == 'sim' and S.origin is not None:   # 8084: the sim world's geofence, no clicks
+                save_gf(gf_from_world(self.world))
+                apply_gf(load_gf(), 'sim')
             success, msg = start_mission(seg, go.get('payload', ''), go.get('read_qr', True), go.get('override'))
             if success:
                 self.go_msg = f'{seg} started'
@@ -1471,6 +1649,18 @@ def red_sanity(red, res):
     return None
 
 
+def red_boxes(red, info):
+    """The red zones as [x0, y0, x1, y1] (odom, 0.1 m), biggest first, 3 at most: one radio packet. The course has one;
+    more means red_sanity is complaining. Specks as in red_sanity."""
+    if red is None or not red.any():
+        return []
+    res, ox, oy = info.resolution, info.origin.position.x, info.origin.position.y
+    _, _, stats, _ = cv2.connectedComponentsWithStats(red.astype(np.uint8), connectivity=8)
+    blobs = sorted((st for st in stats[1:] if st[4] * res * res >= 0.25), key=lambda st: -st[4])[:3]
+    return [[round(float(ox + b[0] * res), 1), round(float(oy + b[1] * res), 1),
+             round(float(ox + (b[0] + b[2]) * res), 1), round(float(oy + (b[1] + b[3]) * res), 1)] for b in blobs]
+
+
 def alerts():
     out = []
     if S.red_check:
@@ -1601,7 +1791,9 @@ def snapshot():
             'statustext': S.statustext[-15:],
             'alt_offset': S.alt_offset, 'alts': load_alts(),
             'alt_limits': {k: d[2:] for k, d in ALT_PLAN.items()},
+            'test': TEST, 'auto': {'running': auto_running(), 'lines': AUTO['lines'][-8:]},
             'cva': commanded(), 'bench': BENCH.status(), 'truth': world_truth(), 'obst_ver': S.obst_ver,
+            'red_boxes': S.red_boxes,
             'vio_pose': {'xyz': S.ros.get('vio_pose'), 'health': S.ros['states'].get('vio', ''),
                          'age': round(time.monotonic() - S.ros_time['vio_pose'], 1) if 'vio_pose' in S.ros_time else None},
             'ages': {k: round(time.monotonic() - t, 1) for k, t in S.ros_time.items()},
@@ -1622,6 +1814,7 @@ def snapshot():
                                   'status': b.get('st') or 'pending'} for b in MAV.boards.values() if b['p'] != '*target']
             tb = MAV.boards.get('*target')
             out['ros']['target'] = (tb['x'], tb['y']) if tb else None
+            out['red_boxes'] = MAV.red
             vv, va = MAV.vio, S.tel_time.get('agent_vio')
             out['vio_pose'] = {'xyz': vv.get('v'), 'health': vv.get('h', ''),
                                'age': round(time.monotonic() - va + (vv.get('a') or 0), 1) if va else None}
@@ -1700,6 +1893,10 @@ async def api(request):
                   state=(MAV.agent.get('s') if RADIO else S.ros.get('state')) or '', radio=bool(RADIO),
                   gf={k: len(gf.get(k) or []) for k in ('arena', 'qr', 'extra')},
                   link=fresh('HEARTBEAT', 3, S.tel_time), agent=fresh('agent', 5, S.tel_time) if RADIO else None)
+    if what == 'auto_start' and RADIO:                # the page's one Start: `aerothon mission`'s sequence
+        return ok(*auto_start(body))
+    if what == 'auto_stop' and RADIO:                 # the page's one Stop
+        return ok(*(await loop.run_in_executor(None, auto_stop)))
     if RADIO and what not in ('geofence', 'capture', 'geofence_clear'):   # those stay here: the corners are kept on this PC
         return ok(*(await loop.run_in_executor(None, radio_api, what, body)))
     if what == 'operator':                            # mav_agent action 8: the ground took over over the radio
@@ -1787,6 +1984,7 @@ async def api(request):
     if what == 'status':                              # lenovo/aerothon.sh status
         return ok(True, stack_phase(), mode=STACK.mode, run=STACK.run, state=S.ros.get('state'))
     if what == 'stack_stop':
+        await loop.run_in_executor(None, bench_off)   # before the sim goes: the real motors, the winch, the Pixhawk's port
         return ok(*(await loop.run_in_executor(None, STACK.stop)))
     if what == 'mission_reset':                       # the Reset button / radio action 12 / aerothon mission
         return ok(*(await loop.run_in_executor(None, mission_reset)))
@@ -1798,6 +1996,8 @@ async def api(request):
         return ok(*(await loop.run_in_executor(None, BENCH.run_motor, body)))
     if what == 'bench_winch':
         return ok(*(await loop.run_in_executor(None, BENCH.run_winch, body)))
+    if what == 'bench_follow':
+        return ok(*(await loop.run_in_executor(None, BENCH.start_follow, body)))
     if what == 'bench_stop':                          # the page's Stop: never gated, it only stops things
         m1 = await loop.run_in_executor(None, BENCH.stop_motor)
         m2 = await loop.run_in_executor(None, BENCH.stop_winch)
@@ -1805,7 +2005,8 @@ async def api(request):
     if what == 'mission_start':                       # full | qr | qr_drop | tunnel
         S.alt_offset = 0.0                            # the explorer drops its trim at the search start too
         return ok(*(await loop.run_in_executor(None, lambda: start_mission(
-            body.get('type', 'full'), body.get('payload') or '', body.get('read_qr', True), body.get('override')))))
+            body.get('type', 'full'), body.get('payload') or '', body.get('read_qr', True), body.get('override'),
+            body.get('alts')))))
     if what == 'mission_abort':
         if STACK.mode == 'offboard':                  # the explorer's abort: BRAKE, hold where it is
             return ok(*(await loop.run_in_executor(None, vrx_post, 'abort')))
@@ -1844,6 +2045,7 @@ def clear_ui():
     S.ros.update(track=[], log=[], qrs=[], target=None, candidates=[])
     S.tel_track, S.statustext = [], []
     S.obst, S.obst_ver = {}, S.obst_ver + 1
+    S.red_boxes = []
     S.mission_t0 = S.zone_t0 = None
 
 
@@ -1904,6 +2106,14 @@ def radio_api(what, body):
         return ok_, msg
     if what == 'apply':
         return radio_apply_gf()
+    if what == 'alts_send':                           # aerothon test: the heights of the next start only
+        if not TEST:
+            return False, 'heights: the test app only (aerothon test)'
+        try:
+            a = checked_alts(body.get('alts'))
+        except (TypeError, KeyError, ValueError) as e:
+            return False, f'heights: {e}'
+        return MAV.command_ack(AGENT_CMD, 13, a['takeoff'], a['tunnel'], a['search'], comp=AGENT, timeout=8.0, final_within=10.0)
     if what == 'alt_trim':                            # in flight too: agent action 10, param2 = the step (m)
         try:
             delta = float(body.get('delta'))
@@ -1985,8 +2195,9 @@ def sim_place_at_zone(world):
     return False, 'the autopilot position did not follow the move in 60 s', None
 
 
-def start_mission(kind, payload='', read_qr=True, override=False):
-    """Preflight gate, the segment's supervisor parameters, /mission/start -> (ok, message)."""
+def start_mission(kind, payload='', read_qr=True, override=False, alts=None):
+    """Preflight gate, the segment's supervisor parameters, /mission/start -> (ok, message). alts: this start's heights
+    or 'mission' (the fixed ones, from the radio); None: what this dashboard's bars saved."""
     kind = SEGMENT_ALIAS.get(kind, kind)
     if BENCH.active():
         return False, 'a bench test is running: stop it first'
@@ -2022,7 +2233,11 @@ def start_mission(kind, payload='', read_qr=True, override=False):
     s1, m1 = ROS.set_supervisor(**SEGMENTS[kind], read_start_qr=bool(read_qr) or not payload)
     if not s1:
         return False, f'supervisor parameters: {m1}'
-    s2, m2 = push_alts(load_alts(), search=kind != 'tunnel')   # never start on heights other than the bars show
+    try:
+        alts = load_alts() if alts is None else checked_alts(alts)
+    except (TypeError, KeyError, ValueError) as e:
+        return False, f'altitudes: {e}'
+    s2, m2 = push_alts(alts, search=kind != 'tunnel')   # never start on heights other than the bars show
     if not s2:
         return False, f'altitudes: {m2}'
     success, msg = ROS.call(ROS.cli_start, ROS.Trigger.Request())
@@ -2053,12 +2268,64 @@ def emergency(what):
     return success, msg
 
 
+# ---- the radio page's one Start / one Stop: auto_mission.py, the same sequence as ever, with its output on the page
+AUTO = {'proc': None, 'lines': []}
+
+
+def auto_running():
+    p = AUTO['proc']
+    return p is not None and p.poll() is None
+
+
+def auto_read(p):
+    for line in p.stdout:                             # text mode: the countdown's \r ends a line too
+        if line.strip():
+            AUTO['lines'] = (AUTO['lines'] + [line.strip()[:160]])[-40:]
+
+
+def auto_start(body):
+    if auto_running():
+        return False, 'already running'
+    if S.tel.get('armed'):
+        return False, 'the drone is ARMED'
+    cmd = [sys.executable, '-u', str(HERE / 'auto_mission.py'), '--url', f'http://127.0.0.1:{PORT}']
+    if TEST:
+        try:
+            a = checked_alts(body.get('alts'))
+        except (TypeError, KeyError, ValueError) as e:
+            return False, f'heights: {e}'
+        cmd += ['--alts', json.dumps(a)]
+    AUTO['lines'] = []
+    AUTO['proc'] = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    threading.Thread(target=auto_read, args=(AUTO['proc'],), daemon=True).start()
+    return True, 'started: geofence, stack, preflight, countdown'
+
+
+def auto_stop():
+    """Cancels the sequence (nothing flies) and stops the stack on the drone. Never in the air: LAND / RTL are for that."""
+    if S.tel.get('armed'):
+        return False, 'the drone is ARMED: use LAND, RTH, RTL, MANUAL or KILL'
+    p = AUTO['proc']
+    if auto_running():
+        p.send_signal(signal.SIGINT)
+        try:
+            p.wait(3)
+        except subprocess.TimeoutExpired:
+            p.kill()
+    if stack_phase() == 'stopped':
+        return True, 'stopped'
+    return radio_api('stack_stop', {})
+
+
 async def index(request):
     if MARKER == 'qr':
         return web.FileResponse(HERE / 'static/index.html')
     # the ArUco delivery dashboard: its own title, a banner, the ArUco twins of the sim worlds
     html = (HERE / 'static/index.html').read_text()
-    html = html.replace('<title>AeroTHON Ground Station</title>', '<title>AeroTHON ArUco Delivery</title>')
+    html = html.replace('<title>AeroTHON Ground Station</title>', f'<title>AeroTHON {"TEST app" if TEST else "ArUco Delivery"}</title>')
+    if TEST:
+        html = html.replace('<body>', '<body><div style="background:#b45309;color:#fff;font:700 14px system-ui;padding:6px 10px">'
+                            'TEST APP: flies the heights set below, not the mission heights</div>', 1)
     html = html.replace('<option>competition</option><option>comp_far1</option>',
                         '<option>competition_aruco</option><option>comp_far1_aruco</option>')
     # every segment, as the QR mission had them: the whole mission (start marker, tunnels, the marker area, the drop,
@@ -2067,6 +2334,8 @@ async def index(request):
     html = html.replace('<body>', '<body><div style="background:#1d4ed8;color:#fff;font:600 13px system-ui;'
                         'padding:4px 10px">AeroTHON final mission - ArUco markers (matched to the start marker) instead '
                         'of QR codes; everything else as before</div>', 1)
+    if not RADIO:                                     # 8084: the sim, simple (user, 2026-10-30)
+        html = html.replace('<body>', '<body class="simple">', 1)
     return web.Response(text=html, content_type='text/html')
 
 
@@ -2077,14 +2346,15 @@ def main():
     ap.add_argument('--mavlink-port', type=int, default=14650)
     ap.add_argument('--radio', default='', help='the final flight, ON THE LENOVO: the SiK radio (/dev/ttyUSB0:57600); '
                     'telemetry + RTH / RTL / LAND / KILL + segment start via the onboard mav_agent; QGC gets a relay')
+    ap.add_argument('--test', action='store_true', help='--radio: the test copy (aerothon test): heights on the page')
     ap.add_argument('--qgc', default='127.0.0.1:14550', help="--radio: QGroundControl's UDP port (its auto-connect)")
     ap.add_argument('--marker', default='qr', choices=('qr', 'aruco'),
                     help='what the boards carry: qr (8080) | aruco (the ArUco delivery mission, 8084)')
     ap.add_argument('--offboard-alt', type=float, default=10.0,
                     help='offboard (VRX): search height, m - the drop is at min(5 m, this)')
     args = ap.parse_args()
-    global RADIO, MARKER, OFFBOARD_ALT
-    MARKER, OFFBOARD_ALT = args.marker, args.offboard_alt
+    global RADIO, MARKER, OFFBOARD_ALT, TEST, PORT
+    MARKER, OFFBOARD_ALT, TEST, PORT = args.marker, args.offboard_alt, args.test, args.port
     STACK.marker = MARKER
     RADIO = args.radio or None
     DATA.mkdir(parents=True, exist_ok=True)
@@ -2112,7 +2382,7 @@ def main():
     # active exception', apport crash dump), so a stop + relaunch found the old process still on the port
     # (2026-10-27). Bounded to 2 s after SIGINT / SIGTERM.
     async def exit_soon(_app):
-        BENCH.stop_winch()                            # never leave the relay on behind a stopped dashboard
+        bench_off()                                   # never leave the relay on behind a stopped dashboard
         threading.Timer(2.0, os._exit, args=(0,)).start()
     app.on_shutdown.append(exit_soon)
     web.run_app(app, host='0.0.0.0', port=args.port, print=None, shutdown_timeout=2.0)

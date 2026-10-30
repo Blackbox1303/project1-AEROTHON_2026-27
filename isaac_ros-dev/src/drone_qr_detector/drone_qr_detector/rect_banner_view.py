@@ -65,6 +65,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # run as a plain 
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 
+from drone_qr_detector import white_frame  # noqa: E402
 from drone_qr_detector.fisheye_model import FisheyeModel  # noqa: E402
 
 
@@ -524,6 +525,7 @@ class BannerDetector:
         a = self.a
         s = img.shape[1] / float(small.shape[1])
         hsv = cv2.cvtColor(cv2.GaussianBlur(small, (5, 5), 0), cv2.COLOR_BGR2HSV)
+        framed, white_px = white_frame.frames(small)
         k_close = max(5, (a.proc_width // 90) | 1)
         min_area = a.min_area_frac * small.shape[0] * small.shape[1]
         found = []
@@ -533,6 +535,8 @@ class BannerDetector:
                 m = self.suppress_ground(hsv, m, vsmall)
             m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
             m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_close, k_close)))
+            if colour in framed:                              # the white frame first; the colour blob for far banners
+                m = cv2.bitwise_and(white_frame.cut_by_frame(m, framed[colour], white_px), vsmall)
             self.last_masks[colour] = m
             # second look with thin bridges cut: a banner touching same-coloured clutter (a stalk to a dark print on
             # the wall) gets a corner pulled; the cut costs far banners whose letters already thin the colour - so
@@ -633,9 +637,11 @@ class BannerDetector:
         # only (a far banner's border is under a pixel, a cut-off one is half missing), never a reason to reject
         band = max(2, int(round(0.12 * short * s)))
         ring = cv2.subtract(cv2.dilate(inside, np.ones((2 * band + 1, 2 * band + 1), np.uint8)), inside)
-        rim = cv2.bitwise_and(cv2.inRange(crop_hsv, (0, 0, int(max(a.v_min, 0.9 * v_col))), (180, a.white_s_max, 255)),
-                              ring)
+        rim = cv2.bitwise_and(cv2.inRange(crop_hsv, (0, 0, int(max(a.v_min, 0.9 * v_col))),
+                                          (180, min(a.white_s_max, white_frame.PALE_S), 255)), ring)   # the sky is S ~100
         white_rim = cv2.countNonZero(rim) / max(1, cv2.countNonZero(ring))
+        if short * s >= a.rim_min_px and white_rim < a.rim_min and not partial:
+            return None                                       # close enough to see a frame, and there is none: not a banner
         if not a.with_letters:
             # plain banner: its colour fills it (the fitted quad's rim may catch a little background)
             if solid < a.min_solid:
@@ -995,9 +1001,11 @@ def parse_args(argv=None):
     g.add_argument('--interp', choices=('auto', 'cubic', 'linear'), default='auto',
                    help='remap interpolation; auto = cubic on the GPU (VPI), linear on the CPU')
     g = p.add_argument_group('detection')
-    g.add_argument('--green-h', type=int, nargs=2, default=[68, 92], metavar=('LO', 'HI'),
+    g.add_argument('--green-h', type=int, nargs=2, default=[45, 99], metavar=('LO', 'HI'),
                    help='OpenCV hue 0-180 (the real banner H 81-86 teal green, grass H 19-46: 2026-10-30 photo)')
     g.add_argument('--blue-h', type=int, nargs=2, default=[95, 135], metavar=('LO', 'HI'))
+    g.add_argument('--rim-min', type=float, default=0.35, help='white share of the band round a banner (white_frame.py)')
+    g.add_argument('--rim-min-px', type=float, default=12.0, help='banner height from which that frame must be seen')
     g.add_argument('--blue-s-min', type=int, default=140,
                    help='blue only: the sky is H ~106, S ~96-113 (2026-10-30 photo) - a printed banner is far more saturated')
     g.add_argument('--red-h', type=int, nargs=2, default=[170, 8], metavar=('LO', 'HI'),

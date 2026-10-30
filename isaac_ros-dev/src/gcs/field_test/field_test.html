@@ -22,6 +22,9 @@ button{background:#26313d;color:var(--ink);border:1px solid var(--line);border-r
 button:hover{border-color:var(--accent)}
 button.go{background:#1d5c36;border-color:#2b8a50} button.stop{background:#6b1f22;border-color:#a3343a}
 button:disabled{opacity:.35;cursor:not-allowed}
+button.big{padding:9px 22px;font-size:15px;font-weight:700}
+.propsbox{font-size:14px;font-weight:600;color:var(--ink);background:#3a1517;border:1px solid #a3343a;border-radius:5px;padding:8px 10px}
+details>summary{cursor:pointer;color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.06em}
 input{background:var(--deep);color:var(--ink);border:1px solid var(--line);border-radius:4px;padding:5px 6px;font:inherit;width:70px}
 input.wide{width:220px}
 label{font-size:12px;color:var(--muted)}
@@ -48,33 +51,57 @@ label{font-size:12px;color:var(--muted)}
 .tile.fresh{animation:flash 1.2s}
 @keyframes flash{0%{background:#1f3f66}100%{background:var(--deep)}}
 </style></head><body>
-<header><h1>AeroTHON field test</h1><span class="pill bad">PROPS OFF - carried by hand</span>
+<header><h1>AeroTHON field test</h1>
+ <button class="go big" onclick="cmd('start')">▶ Start</button><button class="stop big" onclick="stopAll()">■ Stop</button>
+ <label class=propsbox><input type=checkbox id=props style="width:auto"> Props are OFF</label>
  <span id=link class=pill>-</span><span id=cams class=pill>-</span><span id=fcp class=pill>-</span><span id=mot class=pill>-</span></header>
 <main>
-<div class=card><h2>Results <span class=legend>(the latest answer of each check: press its button, or the walk-through reads boards)</span></h2>
+<div id=msg></div>
+<div class=cols>
+ <div class=card><h2>Motors · winch · flight modes <span class=legend>(drone DISARMED)</span></h2>
+  <div class=row><button class=go onclick="spinTest()">Test all motors (3 s)</button>
+   <button class=go onclick="winch()">Run winch (5 s)</button><button class=stop onclick="cmd('winch', -1)">Stop winch</button>
+   <span id=winchst class=legend></span></div>
+  <div class=row><b style="width:84px">Mode</b><button onclick="cmd('set_mode', 0)">STABILIZE</button><button onclick="cmd('set_mode', 3)">AUTO</button>
+   <button onclick="cmd('set_mode', 6)">RTL</button></div>
+  <div class=tiles id=fctiles style="grid-template-columns:repeat(4,minmax(0,1fr))"></div>
+  <div class=legend id=winchhow style="margin-top:6px"></div>
+  <div class=legend>Mode switch on the transmitter, channel 7: &lt;1230 STABILIZE · 1491-1620 AUTO · &gt;1750 RTL. The tiles show what the Pixhawk sees.</div>
+ </div>
+ <div class=card><h2>Checks</h2>
+  <div class=row><b style="width:84px">Markers</b><button onclick="cmd('start_qr')">Read START marker</button><button onclick="cmd('detect_qr')">Detect markers</button>
+   <button onclick="cmd('scan_qr')">Scan / match</button></div>
+  <div class=row><b style="width:84px">Course</b><button onclick="cmd('red')">Red zone</button><button onclick="cmd('green')">Green banner</button>
+   <button onclick="cmd('blue')">Blue banner</button><button onclick="cmd('obstacle')">Obstacles</button></div>
+  <div class=row><b style="width:84px">Walk</b><button class=go onclick="cmd('walk_qr')">QR area search</button><button class=go onclick="cmd('walk_obstacle')">Obstacle nav</button>
+   <button class=stop onclick="cmd('walk_stop')">Stop walk</button><button onclick="cmd('next')">Skip board</button></div>
+  <div class=row><b style="width:84px">Motor cues</b><button id=mon onclick="motors(1)">ON</button><button class=stop onclick="motors(0)">OFF</button></div>
+  <details style="margin-top:8px"><summary>Walk setup</summary>
+   <div class=row><b style="width:84px">QR area</b><button onclick="cmd('corner',1)">corner 1 here</button><button onclick="cmd('corner',2)">2</button>
+    <button onclick="cmd('corner',3)">3</button><button onclick="cmd('corner',4)">4</button><button onclick="cmd('corner',0)">clear</button>
+    <button onclick="cmd('area_geofence')">from the geofence</button></div>
+   <div class=row><b style="width:84px">Heights</b><label>virtual <input id=valt value=10></label><button onclick="num('virtual_alt','valt')">set</button>
+    <label>carried at <input id=carry value=1.2></label><button onclick="num('carry_height','carry')">set</button>
+    <label>lanes <input id=lane value=3></label><button onclick="num('lane_spacing','lane')">set</button></div>
+   <div class="row cable"><b style="width:84px">Spin %</b><label>low <input id=lvl_low> mid <input id=lvl_mid> high <input id=lvl_high></label><button onclick=levels()>set</button></div>
+   <div class="row cable"><b style="width:84px">Start QR</b><input id=sq class=wide placeholder="type the payload (cable only)"><button onclick="typed()">set</button>
+    <span id=sqnow class=legend></span></div>
+   <div class=row><button onclick="cmd('status')">Status</button></div>
+  </details>
+ </div>
+</div>
+
+<div class=card><h2>Results <span class=legend>(the latest answer of each check)</span></h2>
  <div class=tiles id=tiles></div></div>
 
 <div class=cols>
- <div class=card><h2>Autopilot · winch · flight modes <span class=legend>(PROPS OFF, drone DISARMED)</span></h2>
-  <div class=tiles id=fctiles style="grid-template-columns:repeat(4,minmax(0,1fr))"></div>
-  <div class=row style="margin-top:8px"><b style="width:84px">Winch</b>
-   <button class=go onclick="winch(0)">▼ Winch test: RC5 drop (45 s)</button><button class=stop onclick="cmd('winch', -1)">■ Stop winch</button>
-   <span id=winchst class=legend></span></div>
-  <div class=legend id=winchhow></div>
-  <div class=row style="margin-top:8px"><b style="width:84px">Mode switch</b>
-   <button onclick="cmd('set_mode', 0)">STABILIZE</button><button onclick="cmd('set_mode', 3)">AUTO</button>
-   <button onclick="cmd('set_mode', 6)">RTL</button>
-   <span class=legend>or flip channel 7 on the transmitter: &lt;1230 STABILIZE · 1491-1620 AUTO · &gt;1750 RTL - the tiles show what the Pixhawk sees</span></div>
- </div>
  <div class=card><h2>Walk map <span id=walkinfo class=legend></span></h2>
   <svg id=walk style="width:100%;height:300px;background:#0b0f13;border-radius:6px"></svg>
   <div class=legend>white: your track (GPS) · blue band: ground the camera covered · dots where each check answered:
    <span style="color:var(--ok)">match / found / clear</span> · <span style="color:var(--accent)">another marker</span> ·
    <span style="color:var(--warn)">unsure / none</span> · <span style="color:var(--bad)">red zone / failed</span></div>
  </div>
-</div>
 
-<div class=cols>
  <div class=card>
   <h2>Guidance</h2>
   <div class=guide>
@@ -99,30 +126,6 @@ label{font-size:12px;color:var(--muted)}
    below 5.5 m). Nothing spinning = stand still.</div>
  </div>
 
- <div class=card>
-  <h2>Controls</h2>
-  <div class=row><button class=go onclick="cmd('start')">Start on the Jetson</button><button class=stop onclick="cmd('stop')">Stop it</button>
-   <button onclick="cmd('status')">Status</button></div>
-  <div class=row><b style="width:84px">Scan</b><button onclick="cmd('detect_qr')">Detect markers</button><button onclick="cmd('scan_qr')">Scan / match</button>
-   <button onclick="cmd('start_qr')">Read START marker</button></div>
-  <div class=row><b style="width:84px"></b><button onclick="cmd('red')">Red zone</button><button onclick="cmd('green')">Green banner</button>
-   <button onclick="cmd('blue')">Blue banner</button><button onclick="cmd('obstacle')">Obstacles</button></div>
-  <div class=row><b style="width:84px">Walk</b><button class=go onclick="cmd('walk_qr')">QR area search</button><button class=go onclick="cmd('walk_obstacle')">Obstacle nav</button>
-   <button class=stop onclick="cmd('walk_stop')">Stop walk</button><button onclick="cmd('next')">Skip board</button></div>
-  <div class=row><b style="width:84px">Motors</b><label><input type=checkbox id=props style="width:auto"> props are OFF</label>
-   <button id=mon onclick="motors(1)">Motor cues ON</button><button class=stop onclick="motors(0)">OFF</button>
-   <button onclick="spinTest()">Spin all 4 (6 s)</button>
-   <span class=cable><label>spin % low <input id=lvl_low> mid <input id=lvl_mid> high <input id=lvl_high></label><button onclick=levels()>set</button></span></div>
-  <div class=row><b style="width:84px">Heights</b><label>virtual <input id=valt value=10></label><button onclick="num('virtual_alt','valt')">set</button>
-   <label>carried at <input id=carry value=1.2></label><button onclick="num('carry_height','carry')">set</button>
-   <label>lanes <input id=lane value=3></label><button onclick="num('lane_spacing','lane')">set</button></div>
-  <div class=row><b style="width:84px">QR area</b><button onclick="cmd('corner',1)">corner 1 here</button><button onclick="cmd('corner',2)">2</button>
-   <button onclick="cmd('corner',3)">3</button><button onclick="cmd('corner',4)">4</button><button onclick="cmd('corner',0)">clear</button>
-   <button onclick="cmd('area_geofence')">from the geofence</button></div>
-  <div class="row cable"><b style="width:84px">Start QR</b><input id=sq class=wide placeholder="type the payload (cable only)"><button onclick="typed()">set</button>
-   <span id=sqnow class=legend></span></div>
-  <div id=msg></div>
- </div>
 </div>
 
 <div class="cols cable">
@@ -137,6 +140,7 @@ label{font-size:12px;color:var(--muted)}
 </main>
 <script>
 const $ = id => document.getElementById(id);
+const SPIN_S = 3, WINCH_S = 5;     // the page's tests only: quick checks. The mission's real drop still holds 45 s
 let link = 'cable', busy = false, lastEv = '';
 const show = (el, on) => el.classList.toggle('hide', !on);
 
@@ -153,12 +157,20 @@ async function cmd(name, arg, text) {
   busy = false;
 }
 function motors(on) {
-  if (on && !$('props').checked) { $('msg').textContent = 'tick "props are OFF" first'; return; }
+  if (on && !$('props').checked) { $('msg').textContent = 'tick "Props are OFF" first'; return; }
   cmd('motors', on);
 }
 function spinTest() {
-  if (!$('props').checked) { $('msg').textContent = 'tick "props are OFF" first'; return; }
-  cmd('spin_test', 6);
+  if (!$('props').checked) { $('msg').textContent = 'tick "Props are OFF" first'; return; }
+  cmd('spin_test', SPIN_S);
+}
+// the top Stop: everything, whatever is running - motors, winch and walk at once, then the Jetson side
+async function stopAll() {
+  busy = false; $('msg').textContent = 'stopping ...';
+  const send = (name, arg) => post('api/cmd', {name, arg: arg ?? 0}).catch(() => null);
+  await Promise.all([send('motors', 0), send('winch', -1), send('walk_stop')]);
+  const d = await send('stop');
+  $('msg').textContent = d && d.ok ? 'OK  stopped: motors, winch, walk, Jetson side' : 'FAILED  ' + ((d && d.message) || 'no answer');
 }
 function num(name, id) { cmd(name, parseFloat($(id).value)); }
 function typed() { const v = $('sq').value.trim(); if (v) cmd('start_qr', 0, v); }
@@ -259,10 +271,9 @@ function drawTiles(res) {
 }
 
 // the autopilot panel, the winch test, the walk map
-function winch(hold) {
-  if (!$('props').checked) { $('msg').textContent = 'tick "props are OFF" first (Motors row)'; return; }
-  if (!confirm('Winch test: RC channel 5 ON for 45 s, then back. PROPS OFF, drone disarmed, nothing under the hook?')) return;
-  cmd('winch', hold);
+function winch() {
+  if (!$('props').checked) { $('msg').textContent = 'tick "Props are OFF" first'; return; }
+  cmd('winch', WINCH_S);
 }
 function drawFc(s) {
   const f = s.fc || {}, d = s.drop || f.drop || {}, radio = s.link === 'radio';
@@ -277,8 +288,8 @@ function drawFc(s) {
   $('fctiles').innerHTML = T.map(([k, val, sub, cls]) => `<div class="tile ${cls}"><div class=k><span>${k}</span></div><span class=v style="font-size:16px">${val ?? '-'}</span><div class=d>${sub}</div></div>`).join('');
   $('winchst').textContent = d.phase ? `${d.phase}${d.left_s ? ' · ' + d.left_s + ' s left' : ''}${d.method ? ' · ' + d.method : ''}${d.msg ? ' · ' + d.msg : ''}` : '';
   $('winchhow').textContent = radio
-    ? 'Radio: this laptop sends it to the Pixhawk over the SiK radio as the ground station (sysid 255) - RC channel 5: the aux function RC5_OPTION (DO_AUX_FUNCTION high) if set, else an RC5 override at 2000 µs, held 45 s, then back to the transmitter.'
-    : 'Cable: the Jetson sends it (field_link on the Pixhawk USB, as the ground station sysid 255) - RC channel 5: the aux function RC5_OPTION if set, else an RC5 override at 2000 µs, held 45 s, then back. Needs "Start on the Jetson" first.';
+    ? 'Radio: this laptop sends it to the Pixhawk over the SiK radio as the ground station (sysid 255) - RC channel 5: the aux function RC5_OPTION (DO_AUX_FUNCTION high) if set, else an RC5 override at 2000 µs, held 5 s, then back to the transmitter.'
+    : 'Cable: the Jetson sends it (field_link on the Pixhawk USB, as the ground station sysid 255) - RC channel 5: the aux function RC5_OPTION if set, else an RC5 override at 2000 µs, held 5 s, then back. Needs "Start on the Jetson" first.';
 }
 function drawWalk(s) {
   const w = s.walk || {}, svg = $('walk');

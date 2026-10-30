@@ -62,6 +62,7 @@ def main():
     ap.add_argument('--url', default='http://127.0.0.1:8080')
     ap.add_argument('--countdown', type=int, default=10, help='s before the start (Ctrl-C cancels)')
     ap.add_argument('--segment', default='full', help='full (the whole mission) | qr | qr_drop | tunnel')
+    ap.add_argument('--alts', default='', help='JSON {takeoff, tunnel, search}: the test app (aerothon test), this start only')
     ap.add_argument('--check', action='store_true', help='only the radio, the Jetson and the saved geofence: nothing is '
                                                          'sent to the drone')
     a = ap.parse_args()
@@ -136,11 +137,16 @@ def main():
         print()
     except KeyboardInterrupt:
         print()
-        say('cancelled - nothing started (the stack stays up: Stop stack on the page, or run again)')
+        say('cancelled - nothing started')
         return
     st = page.status()
     if st.get('failing') or st.get('message') != 'ready' or st.get('armed'):
         raise SystemExit(f'[mission] not started: {st.get("message")} {st.get("failing")}')
+    if a.alts:
+        r = page.post('alts_send', {'alts': json.loads(a.alts)})
+        say(f'test heights {a.alts}: {"OK" if r.get("ok") else "FAILED"} {r.get("message", "")}')
+        if not r.get('ok'):
+            raise SystemExit('[mission] the test heights did not reach the drone: not started')
     r = page.post('mission_start', {'type': a.segment})
     say(f'START: {"OK" if r.get("ok") else "FAILED"} {r.get("message", "")}')
     if not r.get('ok'):
@@ -162,7 +168,7 @@ def main():
                 last = now
             armed_seen = armed_seen or bool(st.get('armed'))
             if armed_seen and st.get('armed') is False:
-                say(f'landed and disarmed after {time.monotonic() - t0:.0f} s - Stop stack on the page when done')
+                say(f'landed and disarmed after {time.monotonic() - t0:.0f} s - press Stop on the page when done')
                 return
             time.sleep(1.0)
     except KeyboardInterrupt:

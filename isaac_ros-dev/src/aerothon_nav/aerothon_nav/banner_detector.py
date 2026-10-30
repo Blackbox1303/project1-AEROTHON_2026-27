@@ -38,6 +38,8 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import String
+
+from drone_qr_detector import white_frame
 from tf2_ros import Buffer, TransformListener
 
 from aerothon_nav.fisheye import camera_model
@@ -77,8 +79,9 @@ class BannerDetector(Node):
         p('odom_frame', 'odom')
         p('tf_max_age', 1.0)         # s: an image newer than the latest pose by up to this uses that pose
         # OpenCV HSV: H 0-180. Measured in sim (banner H ~66 / ~13, S ~240); retune on the day.
-        p('green.h', [68, 92])                  # the real banner: H 81-86 (teal green), grass H 19-46 (2026-10-30)
-        p('green.s_min', 110)
+        # Wide on purpose: the white frame finds the banner (white_frame.py), these only catch one too far off to show it
+        p('green.h', [45, 99])                  # the real banner: H 81-86 (teal green), the sim's 66, grass H 19-46
+        p('green.s_min', 80)
         p('green.v_min', 30)
         p('orange.h', [7, 24])
         p('orange.s_min', 160)
@@ -94,6 +97,8 @@ class BannerDetector(Node):
         p('white_min', 0.0)          # 2026-10-30: plain banners (no letters), a thin white border; the sim's: letters
         p('white_max', 0.5)
         p('min_aspect', 1.5)
+        p('rim_min', 0.35)           # white share of the ring round a banner ...
+        p('rim_min_px', 12.0)        # ... from this height in px, where the frame can be resolved
         self.g = lambda n: self.get_parameter(n).value  # noqa: E731
         self.cam = None
         self.last = 0.0
@@ -123,10 +128,13 @@ class BannerDetector(Node):
         hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
         colours = ('green', 'orange', 'blue') if self.g('colour') == 'both' else (self.g('colour'),)
         found, debug_masks = [], []
+        framed, white = white_frame.frames(small)
         for colour in colours:
             mask = self.colour_mask(hsv, colour)
-            debug_masks.append(mask)
             joined = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
+            if colour in framed:                       # the white frame first; the colour blob for far banners
+                joined = white_frame.cut_by_frame(joined, framed[colour], white)
+            debug_masks.append(joined)
             contours, _ = cv2.findContours(joined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             for c in contours:
                 d = self.judge(c, img, ds, colour)
@@ -185,7 +193,10 @@ class BannerDetector(Node):
             return None
         # the thin white border round the banner (course 2026-10-30): evidence only, a far one is under a pixel
         ring = cv2.subtract(cv2.dilate(hull_mask, np.ones((7, 7), np.uint8)), hull_mask)
-        white_rim = cv2.countNonZero(cv2.bitwise_and(white, ring)) / max(1, cv2.countNonZero(ring))
+        rim = cv2.inRange(crop, (0, 0, int(self.g('text_v_ratio') * v_col)), (180, white_frame.PALE_S, 255))   # the sky: S ~100
+        white_rim = cv2.countNonZero(cv2.bitwise_and(rim, ring)) / max(1, cv2.countNonZero(ring))
+        if min(cv2.minAreaRect(hull * ds)[1]) >= self.g('rim_min_px') and white_rim < self.g('rim_min'):
+            return None                                # close enough to see a frame, and there is none: not a banner
         # elongation on the rays: gnomonic projection around the blob's centre ray, so the fisheye's
         # bending near the image edge doesn't distort the shape
         pts = hull.reshape(-1, 2).astype(np.float64) * ds

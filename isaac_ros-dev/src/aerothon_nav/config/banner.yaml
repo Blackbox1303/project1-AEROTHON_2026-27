@@ -10,13 +10,15 @@ banner_detector:
     image_topic: /camera/color/image_raw
     info_topic: /camera/color/camera_info
     downscale: 2            # 640 x 360 -> 320 x 180 (the 1640 px Arducam used 4)
-    green.h: [68, 92]       # the real banner (photo 2026-10-30, sun): H 81-86, S 160-237, V 194-205 - teal green; the
-    green.s_min: 110        # grass H 19-46: 0 % in. 55-82 (the sim's) took only 19 % of the real banner
+    # The white frame finds the banner, whatever the light (drone_qr_detector/white_frame.py). These wide ranges only catch
+    # a banner too far off to show its frame: not to be tuned to the day's hue.
+    green.h: [45, 99]       # real banner (photo 2026-10-30, sun): H 81-86, the sim's 66; grass H 19-46
+    green.s_min: 80
     green.v_min: 30
     orange.h: [7, 24]
     orange.s_min: 160
     orange.v_min: 50
-    blue.h: [100, 125]      # 2026-10-30: blue = the EXIT tunnel seen from the QR / marker area (v3: the other one)
+    blue.h: [100, 135]      # 2026-10-30: blue = the EXIT tunnel seen from the QR / marker area (v3: the other one)
     blue.s_min: 160
     blue.v_min: 30
     white.s_max: 100        # letters: less saturated than this ...
@@ -26,3 +28,5 @@ banner_detector:
     white_min: 0.0          # 2026-10-30: the real banners are plain (thin white border, no letters); 0.03 = letters
     white_max: 0.5
     min_aspect: 1.5
+    rim_min: 0.35           # white share of the ring round a banner ...
+    rim_min_px: 12.0        # ... from this height in px: nearer, a blob with no white frame is no banner

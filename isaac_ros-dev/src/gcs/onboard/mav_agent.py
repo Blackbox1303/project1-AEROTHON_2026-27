@@ -13,6 +13,8 @@ MAVROS is 191) on mavlink-router's agent endpoint (UDP 14660: router/sim.conf, o
                 saved + applied on the onboard dashboard (no cable / Wi-Fi to the Jetson, user 2026-10-28)
               10 search height trim (param2: the step in m, e.g. -0.5): in flight too - the explorer flies its search
                  height + the trim at once, never below its alt_min (user, 2026-10-28)
+              13 test heights for the NEXT start only (param2 start marker, param3 tunnels, param4 QR area, m): the
+                 test app (aerothon test). Any start without it flies the mission's fixed heights (user, 2026-10-30)
               11 FIELD TEST (props off, carried by hand; gcs/field_test): param2 = its code (field_proto.CODES: 1 start
                  / 2 stop = field_test.sh, the rest -> field_vision's /api/cmd), param3 its argument, param4 a press
                  number. While it runs: TUNNEL 32820 its guidance ~1 Hz + STATUSTEXT 'FT <result / event>'
@@ -26,6 +28,8 @@ MAVROS is 191) on mavlink-router's agent endpoint (UDP 14660: router/sim.conf, o
   boards    TUNNEL 32803: {p: payload, x, y (odom, as the map), st: status} at once for a new board / a status change
             / a move > 0.5 m, plus one board again every --board-period s (0 = off; round robin: a packet lost on the
             radio comes back); the confirmed target as p '*target' - ~65 B a packet
+  red       TUNNEL 32804: {r: [[x0, y0, x1, y1], ...]} the red zones as boxes (odom; the dashboard's red_boxes, 3 at most),
+            at once on a change and every --board-period s; the costmap itself doesn't fit on the radio - ~50 B a packet
   events    STATUSTEXT on a change of stack phase / FSM state, a new QR, the target, a new alert (QGC shows them too)
   heartbeat 1 Hz, MAV_TYPE_ONBOARD_CONTROLLER
 A radio at 57600 baud carries ~5 KB/s: the status adds ~70 B/s, VIO ~70 B/s at 1 Hz, the boards ~13 B/s at one per
@@ -50,12 +54,12 @@ from pymavlink import mavutil  # noqa: E402
 COMP = 194                       # MAV_COMP_ID_ONBOARD_COMPUTER2
 CMD = 31010                      # MAV_CMD_USER_1
 ACTIONS = {1: 'launch', 2: 'stop', 3: 'full', 4: 'delivery', 5: 'abort', 6: 'status', 7: 'segment', 8: 'operator',
-           9: 'geofence', 10: 'alt_trim', 11: 'field', 12: 'reset'}
+           9: 'geofence', 10: 'alt_trim', 11: 'field', 12: 'reset', 13: 'alts'}
 FIELD_SH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'field_test', 'field_test.sh')
 FIELD_URL = 'http://127.0.0.1:8097'   # field_test/field_vision.py
 T_FIELD = 32820                  # out: the field test's guidance (field_test/field_proto.py)
 SEGMENTS = {1: 'full', 2: 'qr', 3: 'tunnel', 4: 'qr_drop'}   # action 7, param2 (the 8080 page in --radio mode)
-T_STATUS, T_DETAIL, T_VIO, T_BOARD = 32800, 32801, 32802, 32803
+T_STATUS, T_DETAIL, T_VIO, T_BOARD, T_RED = 32800, 32801, 32802, 32803, 32804
 T_GEOFENCE = 32810               # in: the radio page's geofence corners (action 9)
 ALERT_REPEAT = 60.0              # s between two STATUSTEXTs of the same alert
 
@@ -89,6 +93,8 @@ class Agent:
         self.boards_sent = {}        # payload -> (x, y, status) last sent
         self.gf_chunks = {}          # transfer id -> {chunk index: bytes} (TUNNEL 32810)
         self.board_rr = 0            # round-robin index of the periodic resend
+        self.red_sent = None         # the red-zone boxes last sent
+        self.next_alts = None        # the test app's heights, for the next start only
         self.bytes_out = {}          # packet type -> bytes sent (the radio load, printed every minute)
         self.field_on, self.field_n = False, None   # the field test answering; its last event relayed
 
@@ -138,6 +144,15 @@ class Agent:
             self.board_rr = (self.board_rr + 1) % len(bs)
             self.send_board(bs[self.board_rr])
 
+    def send_red(self):
+        if self.snap is not None:                     # no snapshot yet: nothing known, don't clear the ground's map
+            self.red_sent = self.snap.get('red_boxes') or []
+            self.tunnel(T_RED, {'r': self.red_sent})
+
+    def red_events(self):
+        if self.snap is not None and (self.snap.get('red_boxes') or []) != self.red_sent:
+            self.send_red()
+
     # ---- onboard dashboard
     async def ws_loop(self):
         while True:
@@ -160,6 +175,12 @@ class Agent:
                     return bool(d.get('ok')), str(d.get('message', ''))
         except Exception as e:
             return False, f'dashboard: {e}'
+
+    async def mission_start(self, kind):
+        """Over the radio: the mission's fixed heights, never what a sim / test left saved on the dashboard - unless the
+        test app sent its own just before this start."""
+        alts, self.next_alts = self.next_alts or 'mission', None
+        return await self.api('mission_start', {'type': kind, 'alts': alts})
 
     async def apply_geofence(self, chunks, crc, tid):
         import zlib
@@ -189,15 +210,18 @@ class Agent:
             return await self.api('stack_start', body)
         if action == 'stop':
             return await self.api('stack_stop', {})
+        if action == 'alts':
+            self.next_alts = {'takeoff': float(p2), 'tunnel': float(p3), 'search': float(p4)}
+            return True, f'test heights for the next start: {self.next_alts}'
         if action in ('full', 'delivery'):
-            return await self.api('mission_start', {'type': action})
+            return await self.mission_start(action)
         if action == 'abort':
             return await self.api('mission_abort', {})
         if action == 'segment':
             seg = SEGMENTS.get(int(p2))
             if seg is None:
                 return False, f'segment code {p2}: 1 full 2 qr 3 tunnel 4 qr_drop'
-            return await self.api('mission_start', {'type': seg})
+            return await self.mission_start(seg)
         if action == 'reset':                         # 12: a clean start (the last mission's files + memory)
             return await self.api('mission_reset', {})
         if action == 'operator':                      # the ground's LAND / RTH / RTL / KILL: no failsafe flight over it
@@ -369,11 +393,13 @@ class Agent:
                 t_vio = now
             if self.a.board_period > 0:
                 self.board_events()
+                self.red_events()
                 if now - t_bd >= self.a.board_period:
                     self.resend_board()
+                    self.send_red()
                     t_bd = now
             if now - t_load >= 60.0:                  # what this agent puts on the radio, per packet type
-                names = {T_STATUS: 'status', T_DETAIL: 'detail', T_VIO: 'vio', T_BOARD: 'boards', T_FIELD: 'field'}
+                names = {T_STATUS: 'status', T_DETAIL: 'detail', T_VIO: 'vio', T_BOARD: 'boards', T_RED: 'red', T_FIELD: 'field'}
                 print('radio load B/s: ' + ', '.join(f'{names[k]} {v / (now - t_load):.0f}'
                                                     for k, v in sorted(self.bytes_out.items())), flush=True)
                 self.bytes_out, t_load = {}, now
