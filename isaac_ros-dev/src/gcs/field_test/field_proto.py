@@ -39,7 +39,7 @@ CODES = {
     20: ('status', ''),                    # a status packet now
     21: ('spin_test', 's (0 = 6 s)'),      # props OFF: all four motors in turn FR RR RL FL (cw chase), mid level
     22: ('set_mode', 'ArduCopter mode number (0 STABILIZE, 3 AUTO, 6 RTL)'),   # disarmed only: the switch test
-    23: ('winch', 's held (0 = 45)'),      # props OFF, disarmed: the drop mechanism on RC5, then back
+    23: ('winch', 's held (0 = 45, < 0 stops)'),   # props OFF, disarmed: the drop mechanism on RC5, then back
 }
 BY_NAME = {v[0]: k for k, v in CODES.items()}
 
@@ -123,6 +123,9 @@ class Rc5Drop:
         self.stop = False
 
     def start(self, hold=DROP_HOLD):
+        if hold is not None and float(hold) < 0:     # the page's Stop: RC5 back at once
+            self.stop = True
+            return True, 'winch test: stopping - RC5 back to the transmitter'
         if self.state['phase'] not in ('idle', 'done', 'failed', 'stopped'):
             return False, f'already running: {self.state["phase"]}'
         if self.fc.get('armed') is not False:

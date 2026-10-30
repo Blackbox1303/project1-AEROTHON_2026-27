@@ -55,6 +55,26 @@ label{font-size:12px;color:var(--muted)}
  <div class=tiles id=tiles></div></div>
 
 <div class=cols>
+ <div class=card><h2>Autopilot · winch · flight modes <span class=legend>(PROPS OFF, drone DISARMED)</span></h2>
+  <div class=tiles id=fctiles style="grid-template-columns:repeat(4,minmax(0,1fr))"></div>
+  <div class=row style="margin-top:8px"><b style="width:84px">Winch</b>
+   <button class=go onclick="winch(0)">▼ Winch test: RC5 drop (45 s)</button><button class=stop onclick="cmd('winch', -1)">■ Stop winch</button>
+   <span id=winchst class=legend></span></div>
+  <div class=legend id=winchhow></div>
+  <div class=row style="margin-top:8px"><b style="width:84px">Mode switch</b>
+   <button onclick="cmd('set_mode', 0)">STABILIZE</button><button onclick="cmd('set_mode', 3)">AUTO</button>
+   <button onclick="cmd('set_mode', 6)">RTL</button>
+   <span class=legend>or flip channel 7 on the transmitter: &lt;1230 STABILIZE · 1491-1620 AUTO · &gt;1750 RTL - the tiles show what the Pixhawk sees</span></div>
+ </div>
+ <div class=card><h2>Walk map <span id=walkinfo class=legend></span></h2>
+  <svg id=walk style="width:100%;height:300px;background:#0b0f13;border-radius:6px"></svg>
+  <div class=legend>white: your track (GPS) · blue band: ground the camera covered · dots where each check answered:
+   <span style="color:var(--ok)">match / found / clear</span> · <span style="color:var(--accent)">another marker</span> ·
+   <span style="color:var(--warn)">unsure / none</span> · <span style="color:var(--bad)">red zone / failed</span></div>
+ </div>
+</div>
+
+<div class=cols>
  <div class=card>
   <h2>Guidance</h2>
   <div class=guide>
@@ -238,6 +258,49 @@ function drawTiles(res) {
   }).join('');
 }
 
+// the autopilot panel, the winch test, the walk map
+function winch(hold) {
+  if (!$('props').checked) { $('msg').textContent = 'tick "props are OFF" first (Motors row)'; return; }
+  if (!confirm('Winch test: RC channel 5 ON for 45 s, then back. PROPS OFF, drone disarmed, nothing under the hook?')) return;
+  cmd('winch', hold);
+}
+function drawFc(s) {
+  const f = s.fc || {}, d = s.drop || f.drop || {}, radio = s.link === 'radio';
+  const v = x => x == null ? '-' : x;
+  const T = [['Flight mode', f.mode, f.armed ? 'ARMED' : 'disarmed', f.armed ? 'bad' : 'ok'],
+             ['RC7 mode switch', v(f.ch7), 'position: ' + (f.sw7 || '-'), 'info'],
+             ['RC5 winch', v(f.ch5), (f.ch5 > 1700 ? 'HIGH - drop on' : f.ch5 ? 'low' : 'no RC') + (d.phase && d.phase !== 'idle' ? ' · test: ' + d.phase : ''), f.ch5 > 1700 ? 'warn' : ''],
+             ['Throttle', f.thr == null ? '-' : f.thr + ' %', '', ''],
+             ['Roll / pitch', `${v(f.roll)}° / ${v(f.pitch)}°`, '', ''], ['Yaw', f.hdg == null ? '-' : f.hdg + '°', '', ''],
+             ['Motors PWM', (f.mot || []).join(' · ') || '-', '1 · 2 · 3 · 4', ''],
+             ['ESC RPM', (f.rpm || []).join(' · ') || '-', (f.rpm || []).length ? '1 · 2 · 3 · 4' : 'no ESC telemetry', '']];
+  $('fctiles').innerHTML = T.map(([k, val, sub, cls]) => `<div class="tile ${cls}"><div class=k><span>${k}</span></div><span class=v style="font-size:16px">${val ?? '-'}</span><div class=d>${sub}</div></div>`).join('');
+  $('winchst').textContent = d.phase ? `${d.phase}${d.left_s ? ' · ' + d.left_s + ' s left' : ''}${d.method ? ' · ' + d.method : ''}${d.msg ? ' · ' + d.msg : ''}` : '';
+  $('winchhow').textContent = radio
+    ? 'Radio: this laptop sends it to the Pixhawk over the SiK radio as the ground station (sysid 255) - RC channel 5: the aux function RC5_OPTION (DO_AUX_FUNCTION high) if set, else an RC5 override at 2000 µs, held 45 s, then back to the transmitter.'
+    : 'Cable: the Jetson sends it (field_link on the Pixhawk USB, as the ground station sysid 255) - RC channel 5: the aux function RC5_OPTION if set, else an RC5 override at 2000 µs, held 45 s, then back. Needs "Start on the Jetson" first.';
+}
+function drawWalk(s) {
+  const w = s.walk || {}, svg = $('walk');
+  const pts = (w.track || []).concat((w.hits || []).map(h => [h.x, h.y])).concat(w.here ? [[w.here[0], w.here[1]]] : []);
+  if (!w.gps || !pts.length) { svg.innerHTML = ''; $('walkinfo').textContent = 'waiting for a GPS 3D fix (outdoors)'; return; }
+  const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]), r = w.cover_r || 1.2;
+  const x0 = Math.min(...xs) - 3, x1 = Math.max(...xs) + 3, y0 = Math.min(...ys) - 3, y1 = Math.max(...ys) + 3;
+  const span = Math.max(x1 - x0, y1 - y0, 6);
+  svg.setAttribute('viewBox', `${x0} ${-y0 - span} ${span} ${span}`);
+  const P = p => `${p[0]},${-p[1]}`, k = span / 300;
+  const col = h => { const [vv, c] = verdict(h.key, h); return c === 'ok' ? 'var(--ok)' : c === 'info' ? 'var(--accent)' : c === 'bad' || h.key === 'red' && !/none/.test(h.text) ? 'var(--bad)' : 'var(--warn)'; };
+  let h = '';
+  if ((w.track || []).length > 1) {
+    h += `<polyline points="${w.track.map(P).join(' ')}" fill=none stroke="#4aa3ff" stroke-opacity=.18 stroke-width=${2 * r} stroke-linecap=round stroke-linejoin=round />`;
+    h += `<polyline points="${w.track.map(P).join(' ')}" fill=none stroke="#fff" stroke-width=${1.5 * k} />`;
+  }
+  for (const t of w.hits || []) h += `<circle cx=${t.x} cy=${-t.y} r=${5 * k} fill="${col(t)}"><title>${t.t} ${t.key}: ${t.text.replace(/</g, '&lt;')}</title></circle>`;
+  if (w.here) h += `<g transform="translate(${w.here[0]},${-w.here[1]}) rotate(${w.here[2] || 0})"><polygon points="0,${-9 * k} ${-5 * k},${6 * k} ${5 * k},${6 * k}" fill="var(--accent)" /></g>`;
+  svg.innerHTML = h;
+  $('walkinfo').textContent = `${(w.track || []).length} track points · ${(w.hits || []).length} answers on the map`;
+}
+
 function pill(id, text, cls) { const e = $(id); e.textContent = text; e.className = 'pill ' + (cls || ''); }
 
 async function poll() {
@@ -263,6 +326,7 @@ async function poll() {
     pill('mot', 'motor cues ' + (s.motors_on ? 'ON' : 'off') + (f.motor_msg ? ' - ' + f.motor_msg : ''), s.motors_on ? 'warn' : '');
     drawGuide(s.guide, s.motors_on);
     drawTiles(s.results);
+    drawFc(s); drawWalk(s);
     if (link !== 'radio') { drawMap(s);
       if (s.levels && document.activeElement.tagName !== 'INPUT') for (const k of ['low','mid','high']) $('lvl_' + k).value = s.levels[k];
       if (s.settings && document.activeElement.tagName !== 'INPUT') { $('carry').value = s.settings.carry_height; $('lane').value = s.settings.lane_spacing; $('valt').value = s.settings.search_alt; }
