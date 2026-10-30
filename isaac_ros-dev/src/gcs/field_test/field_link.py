@@ -26,6 +26,10 @@ import urllib.request
 os.environ['MAVLINK20'] = '1'
 from pymavlink import mavutil  # noqa: E402
 
+import sys  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import field_proto as fp  # noqa: E402
+
 COMP = 195                                     # MAV_COMP_ID_ONBOARD_COMPUTER3 (mav_agent is 194)
 MOTOR_TEST = 209                               # MAV_CMD_DO_MOTOR_TEST
 SEQ_DEG = {1: 45.0, 2: 135.0, 3: 225.0, 4: 315.0}   # test sequence A..D of a quad X: deg clockwise from the nose
@@ -49,9 +53,18 @@ class Link:
         self.t_cue = 0.0
         self.t_test = 0.0                      # the Pixhawk's last ACCEPTED motor test
         self.sent = 0
+        self.acks = {}                         # command -> (result, time)
+        # the GCS's own encoder (sysid 255) on the same link: ArduPilot takes RC overrides from SYSID_MYGCS only
+        self.gcs = mavutil.mavlink.MAVLink(self.mav, srcSystem=255, srcComponent=190)
+        self.drop = fp.Rc5Drop(self.st, lambda cmd, *p: self.mav.mav.command_long_send(1, 1, cmd, 0,
+                                                                                      *((list(p) + [0] * 7)[:7])),
+                               lambda pwm: self.gcs.rc_channels_override_send(1, 1, 65535, 65535, 65535, 65535, int(pwm),
+                                                                             65535, 65535, 65535),
+                               lambda n: self.mav.mav.param_request_read_send(1, 1, n.encode(), -1))
+        self.req_seen = None
 
     def request_streams(self):
-        for msg, hz in ((33, 5), (24, 2), (30, 10), (132, 5), (1, 1)):
+        for msg, hz in ((33, 5), (24, 2), (30, 10), (132, 5), (1, 1), (74, 2), (65, 2), (36, 2), (11030, 2)):
             self.mav.mav.command_long_send(1, 1, 511, 0, msg, 1e6 / hz, 0, 0, 0, 0, 0)
 
     def rx_loop(self):
@@ -69,6 +82,9 @@ class Link:
                 continue
             t, s = m.get_type(), self.st
             self.t_fc, s['link'] = time.time(), 'ok'
+            fp.fc_update(s, m, mavutil.mode_string_v10)        # the test page's panel (throttle, RC 5 / 7, RPM ...)
+            if t == 'COMMAND_ACK':
+                self.acks[m.command] = (m.result, time.time())
             if t == 'HEARTBEAT':
                 s['armed'] = bool(m.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
                 s['mode'] = mavutil.mode_string_v10(m)
@@ -94,14 +110,46 @@ class Link:
     def vision_loop(self):
         """5 Hz: the Pixhawk's state to field_vision, its motor cue back."""
         while True:
-            body = json.dumps(dict(self.st, fc_age=round(time.time() - self.t_fc, 1) if self.t_fc else None)).encode()
+            body = json.dumps(dict(self.st, fc_age=round(time.time() - self.t_fc, 1) if self.t_fc else None,
+                                   drop=dict(self.drop.state))).encode()
             try:
                 r = urllib.request.urlopen(urllib.request.Request(f'{self.a.vision}/api/fc', body,
                                                                   {'Content-Type': 'application/json'}), timeout=1.0)
                 self.cue, self.t_cue = json.loads(r.read()), time.time()
             except Exception:
                 self.cue = {'pattern': 'off', 'on': False}
+            req = self.cue.get('req')
+            if req and req.get('id') != self.req_seen:   # a mode / winch test from the page, once
+                self.req_seen = req['id']
+                threading.Thread(target=self.do_req, args=(req,), daemon=True).start()
             time.sleep(0.2)
+
+    def do_req(self, req):
+        """The test page's autopilot tests (disarmed only): set_mode (DO_SET_MODE) | winch (fp.Rc5Drop)."""
+        if req['do'] == 'winch':
+            ok, msg = self.drop.start(req.get('arg') or 0)
+        else:
+            num = int(req.get('arg') or 0)
+            if num not in fp.TEST_MODES:
+                ok, msg = False, 'modes: 0 STABILIZE, 3 AUTO, 6 RTL'
+            elif self.st.get('armed') is not False:
+                ok, msg = False, f'disarmed only (armed {self.st.get("armed")})'
+            else:
+                self.acks.pop(176, None)
+                for _ in range(3):
+                    self.mav.mav.command_long_send(1, 1, 176, 0, 1, num, 0, 0, 0, 0, 0)
+                    t0 = time.time()
+                    while time.time() - t0 < 1.5 and 176 not in self.acks:
+                        time.sleep(0.05)
+                    if 176 in self.acks:
+                        break
+                r = self.acks.get(176)
+                time.sleep(1.2)
+                name = fp.TEST_MODES[num]
+                ok = r is not None and r[0] == 0
+                msg = (f'{name}: no answer from the autopilot' if r is None else
+                       f'{name}: {"accepted" if ok else "REFUSED (result " + str(r[0]) + ")"} - now {self.st.get("mode")}')
+        self.st['req_done'] = {'id': req['id'], 'ok': ok, 'msg': msg}
 
     def motor_loop(self):
         """One motor at a time, step_s each, the sequence of the cue's pattern."""

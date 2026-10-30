@@ -54,9 +54,42 @@ def check_of(text):
     return next((k for p, k in PREFIX if text.startswith(p)), None)
 
 
+class WalkMap:
+    """The walk-through on a map (user, 2026-10-30): the drone's GPS track (local metres from the first fix), the ground
+    its camera has covered, and every detection where the drone was when it was seen."""
+
+    def __init__(self, cover_r=1.2):
+        self.o, self.track, self.hits, self.here, self.cover_r = None, [], [], None, cover_r
+        self.lock = threading.Lock()
+
+    def update(self, fc):
+        lat, lon = fc.get('lat'), fc.get('lon')
+        if not lat or not lon or (fc.get('fix') or 0) < 3:
+            return
+        if self.o is None:
+            self.o = (lat, lon)
+        x = (lon - self.o[1]) * 111320.0 * math.cos(math.radians(self.o[0]))
+        y = (lat - self.o[0]) * 110540.0
+        with self.lock:
+            self.here = [round(x, 2), round(y, 2), fc.get('hdg')]
+            if not self.track or math.dist(self.track[-1], (x, y)) > 0.3:
+                self.track = (self.track + [[round(x, 2), round(y, 2)]])[-3000:]
+
+    def hit(self, key, ok, text):
+        with self.lock:
+            if self.here is not None:
+                self.hits = (self.hits + [{'x': self.here[0], 'y': self.here[1], 'key': key, 'ok': ok,
+                                           'text': text[:160], 't': time.strftime('%H:%M:%S')}])[-200:]
+
+    def get(self):
+        with self.lock:
+            return {'track': list(self.track), 'here': self.here, 'hits': list(self.hits), 'cover_r': self.cover_r,
+                    'gps': self.o is not None}
+
+
 class Results:
-    def __init__(self):
-        self.r, self.lock = {}, threading.Lock()
+    def __init__(self, walk=None):
+        self.r, self.lock, self.walk = {}, threading.Lock(), walk
 
     def put(self, key, ok, text):
         if key in CHECKS and text:
@@ -66,6 +99,8 @@ class Results:
                     return
                 self.r[key] = {'ok': ok, 'text': text, 't': time.strftime('%H:%M:%S'), 'ts': time.time(),
                                'n': (old or {}).get('n', 0) + 1}
+            if self.walk is not None:
+                self.walk.hit(key, ok, text)
 
     def event(self, text):
         self.put(check_of(text), True, text)
@@ -109,8 +144,46 @@ class Radio:
         self.qgc.setblocking(False)
         h, _, p = qgc.partition(':')
         self.qgc_addr = (h, int(p))
+        self.drop = fp.Rc5Drop(self.fc, self.send_cmd, self.rc5, self.request_param)
         for f in (self.rx_loop, self.qgc_loop, self.hb_loop):
             threading.Thread(target=f, daemon=True).start()
+
+    # ---- the autopilot, straight over the radio (this app is the GCS, sysid 255): mode / winch tests
+    def send_cmd(self, cmd, *p):
+        if self.conn is not None:
+            p = (list(p) + [0] * 7)[:7]
+            self.conn.mav.command_long_send(1, 1, cmd, 0, *p)
+
+    def rc5(self, pwm):
+        if self.conn is not None:                   # channel 5 only; 65535 = leave the others alone, 0 = release
+            self.conn.mav.rc_channels_override_send(1, 1, 65535, 65535, 65535, 65535, int(pwm), 65535, 65535, 65535)
+
+    def request_param(self, name):
+        if self.conn is not None:
+            self.conn.mav.param_request_read_send(1, 1, name.encode(), -1)
+
+    def set_mode(self, num):
+        """The mode switch test: DO_SET_MODE, disarmed only -> (ok, message)."""
+        num = int(num)
+        if num not in fp.TEST_MODES:
+            return False, 'modes: 0 STABILIZE, 3 AUTO, 6 RTL'
+        if self.fc.get('armed') is not False:
+            return False, f'disarmed only (armed {self.fc.get("armed")})'
+        self.acks.pop(176, None)
+        for _ in range(3):
+            self.send_cmd(176, 1, num)
+            t0 = time.time()
+            while time.time() - t0 < 1.5 and 176 not in self.acks:
+                time.sleep(0.05)
+            if 176 in self.acks:
+                break
+        r = self.acks.get(176)
+        name = fp.TEST_MODES[num]
+        if r is None:
+            return False, f'{name}: no answer from the autopilot'
+        time.sleep(1.2)                             # its next heartbeat
+        return r[0] == 0, f'{name}: {"accepted" if r[0] == 0 else "REFUSED (result " + str(r[0]) + ")"} - now ' \
+                          f'{self.fc.get("mode")} ({self.fc.get("fc_text", "")})'
 
     def open(self):
         try:
@@ -138,7 +211,7 @@ class Radio:
                     time.sleep(2)
                     continue
             if time.time() - t_req > 15:              # the Pixhawk's height / GPS / heading, light on the radio
-                for msg, hz in ((33, 2), (24, 1), (30, 2)):
+                for msg, hz in fp.FC_STREAMS:            # the panel: attitude, throttle, RC 5 / 7, motors, RPM
                     self.conn.mav.command_long_send(1, 1, 511, 0, msg, 1e6 / hz, 0, 0, 0, 0, 0)
                 t_req = time.time()
             try:
@@ -160,18 +233,11 @@ class Radio:
             return
         if comp == 1:
             self.t_fc = now
-            f = self.fc
-            if t == 'HEARTBEAT':
-                f['armed'] = bool(m.base_mode & 128)
-                f['mode'] = self.mavutil.mode_string_v10(m)
-            elif t == 'GLOBAL_POSITION_INT':
-                f.update(lat=m.lat * 1e-7, lon=m.lon * 1e-7, alt_rel=round(m.relative_alt / 1000.0, 2))
-            elif t == 'GPS_RAW_INT':
-                f.update(fix=m.fix_type, sats=m.satellites_visible)
-            elif t == 'ATTITUDE':
-                f['hdg'] = round(math.degrees(m.yaw) % 360, 1)
-            elif t == 'STATUSTEXT':
+            fp.fc_update(self.fc, m, self.mavutil.mode_string_v10)
+            if t == 'STATUSTEXT':
                 self.add_text('PIXHAWK ' + m.text.rstrip('\0'))
+            elif t == 'COMMAND_ACK':
+                self.acks[m.command] = (m.result, m.progress, now)
             return
         if comp != fp.AGENT_COMP:
             return
@@ -271,12 +337,13 @@ class Radio:
                          'fc': round(now - self.t_fc, 1) if self.t_fc else None},
                 'mode': g['mode'], 'guide': g, 'motors_on': bool(st.get('mo')), 'fc': self.fc,
                 'settings': {'valt': st.get('va')}, 'boards_done': st.get('n'), 'events': ev,
-                'results': self.results.get()}
+                'results': self.results.get(), 'drop': dict(self.drop.state)}
 
 
 def build(a):
     app = web.Application()
-    results = Results()
+    walk = WalkMap()
+    results = Results(walk)
     radio = Radio(a.radio, a.qgc, results) if a.radio else None
     seen = {'n': None}                                    # cable: the Jetson's events already taken
     jet = a.jetson.rstrip('/') if a.jetson else None
@@ -314,7 +381,10 @@ def build(a):
 
     async def state(_):
         if radio:
-            return web.json_response(radio.state())
+            st = radio.state()
+            walk.update(st['fc'])
+            st['walk'] = walk.get()
+            return web.json_response(st)
         d = await proxy_json('GET', '/api/state')
         if 'mode' not in d:
             return web.json_response({'link': 'cable', 'up': False, 'error': d.get('message'), 'guide': None,
@@ -330,7 +400,8 @@ def build(a):
             seen['n'] = max(e['n'] for e in evs)
         elif seen['n'] is None:
             seen['n'] = 0
-        d.update(link='cable', up=True, results=results.get())
+        walk.update(d.get('fc') or {})
+        d.update(link='cable', up=True, results=results.get(), walk=walk.get())
         return web.json_response(d)
 
     async def cmd(request):
@@ -339,6 +410,14 @@ def build(a):
         code = fp.BY_NAME.get(name)
         if code is None:
             return web.json_response({'ok': False, 'message': f'unknown command {name}'})
+        if radio and name in ('set_mode', 'winch'):    # straight to the autopilot over the radio (no Jetson needed)
+            loop = asyncio.get_running_loop()
+            if name == 'set_mode':
+                ok, msg = await loop.run_in_executor(None, radio.set_mode, float(body.get('arg') or 0))
+            else:
+                ok, msg = radio.drop.start(float(body.get('arg') or 0))
+            radio.add_text(('MODE ' if name == 'set_mode' else 'WINCH ') + msg)
+            return web.json_response({'ok': ok, 'message': msg})
         if radio:
             if body.get('text'):
                 return web.json_response({'ok': False, 'message': 'typing a start QR needs the cable (the radio '

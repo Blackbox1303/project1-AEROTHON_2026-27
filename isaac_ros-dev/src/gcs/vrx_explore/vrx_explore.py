@@ -67,8 +67,6 @@ import laptop_vrx_mission as base  # noqa: E402
 # hand over to the RC pilot (user, 2026-10-30): ArduCopter custom modes for MAV_CMD_DO_SET_MODE; the explorer stops
 HANDOVER = {'loiter': 5, 'poshold': 16, 'alt_hold': 2, 'stabilize': 0, 'brake': 17}
 MAX_ALT = 9.5                  # m: the airspace rule there - never above 10 m (user, 2026-10-30); margin for overshoot
-PILOT_MODES = {'STABILIZE', 'ALT_HOLD', 'LOITER', 'POSHOLD', 'BRAKE', 'ACRO', 'SPORT', 'DRIFT', 'FLOWHOLD', 'ZIGZAG',
-               'MANUAL', 'STABILIZED', 'ALTCTL', 'POSCTL', 'RATTITUDE'}   # seen in flight: the pilot has the drone
 sys.path.insert(0, str(HERE.parents[1] / 'aerothon_nav'))
 from aerothon_nav import aruco_match, aruco_tools, qr_area, qr_match  # noqa: E402
 from aerothon_nav.fisheye import Fisheye  # noqa: E402
@@ -423,10 +421,11 @@ class VrxExplore(base.VrxDeliverySystem):
                 score = am.similarity(self.template, am.signature(view, q)) if self.template is not None else None
                 sharp = am.sharpness(view, q)
                 k = next((k for k, o in enumerate(seen) if np.linalg.norm(o[0].mean(axis=0) - c) < side / 2), None)
+                one = (px, score, sharp, am.side_px(q), am.glare_share(view, q))
                 if k is None:
-                    seen.append((px, score, sharp, am.side_px(q)))
+                    seen.append(one)
                 elif sharp > seen[k][2]:
-                    seen[k] = (px, score, sharp, am.side_px(q))
+                    seen[k] = one
         return seen
 
     def _decode_patch(self, img):
@@ -440,9 +439,9 @@ class VrxExplore(base.VrxDeliverySystem):
         h, w = gray.shape[:2]
         am, target = self.aruco, self.start_qr or aruco_match.IMAGE_ONLY
         found, boxes = {}, []
-        for px, score, sharp, side in self.aruco_seen(gray):
+        for px, score, sharp, side, glare in self.aruco_seen(gray):
             g_pts, weight = self.pixel_to_ground_enu(np.vstack([px.mean(axis=0), px]), w, h, pose_now, rpy_now)
-            verdict = am.classify(score, sharp, side, self.a.aruco_hi, self.a.aruco_lo)
+            verdict = am.classify(score, sharp, side, self.a.aruco_hi, self.a.aruco_lo, glare)
             if verdict == 'match':
                 payload = target
             elif verdict == 'different':
@@ -567,8 +566,9 @@ class VrxExplore(base.VrxDeliverySystem):
             ok = self.tel.get('armed') and self.tel.get('mode') == self.offboard_name
             bad_since = None if ok else (bad_since or time.monotonic())
             if bad_since and time.monotonic() - bad_since > 1.5 and not self.abort_reason:
-                if self.tel.get('armed') and self.tel.get('mode') in PILOT_MODES:
-                    # the RC pilot's mode switch / a hand-over button: the failsafe must not put BRAKE / LAND over it
+                if self.tel.get('armed'):
+                    # any other mode while armed: the RC switch (STABILIZE / AUTO / RTL), MANUAL, an autopilot failsafe -
+                    # the explorer's failsafe must not put BRAKE / LAND over it
                     self.offboard_active = False
                     self.abort_reason = f'operator took over: {self.tel.get("mode")}'
                     continue
@@ -696,7 +696,7 @@ class VrxExplore(base.VrxDeliverySystem):
     def deep_read_aruco(self, x, y):
         """The ArUco deep read over a candidate: every setting x filter per frame, the best score kept."""
         am = self.aruco
-        scores, sharp, frames, last, how = [], 0.0, 0, None, ''
+        scores, sharp, frames, last, how, glare = [], 0.0, 0, None, '', 0.0
         while frames < self.a.verify_rounds:
             if self.abort_reason:
                 raise RuntimeError(self.abort_reason)
@@ -711,16 +711,17 @@ class VrxExplore(base.VrxDeliverySystem):
             for name, patch in views or []:
                 r = am.best_in_patch(patch, self.template, min_px=8.0)
                 if r is not None and (best is None or r[0] > best[0]):
-                    best = (r[0], r[1], f'{name}/{r[2]}')
+                    best = (r[0], r[1], f'{name}/{r[2]}', r[3])
             if best is not None:
                 scores.append(best[0])
                 sharp = max(sharp, best[1])
+                glare = max(glare, best[3])
                 how = best[2] if best[0] >= max(scores) else how
         if self.template is None or len(scores) < 3:
             return 'unsure' if self.template is None else 'unseen'
         s = float(np.median(sorted(scores)[-3:]))
         res = 'unsure' if sharp < am.BLURRY else 'match' if s >= self.a.aruco_hi else \
-            'different' if s <= self.a.aruco_lo else 'unsure'
+            'different' if s <= self.a.aruco_lo and glare <= am.GLARE_MAX else 'unsure'
         if res == 'match':
             self.add_board(self.start_qr or am.IMAGE_ONLY, x, y, pose)
         elif res == 'different':

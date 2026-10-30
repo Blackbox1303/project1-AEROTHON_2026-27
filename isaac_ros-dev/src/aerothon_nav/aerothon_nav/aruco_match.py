@@ -25,14 +25,18 @@ MIN_SIDE = 30.0                # px (in a 1:1 view) a marker must have before 'a
 #                                low as 0.39; >= 40 px: same >= 0.91, others <= 0.39
 
 
-def classify(score, sharp, side, hi=0.80, lo=0.65):
+GLARE_MAX = 0.05               # share of the black border ring that may be bright before 'different' is not believed
+
+
+def classify(score, sharp, side, hi=0.80, lo=0.65, glare=0.0):
     """One view of a marker -> 'match' | 'different' | 'unsure'. A match needs a crisp view; 'different' also needs
-    the marker big enough (MIN_SIDE) - a small target can look like another marker, never the other way round."""
+    the marker big enough (MIN_SIDE) and no glare on it (glare_share <= GLARE_MAX): a small or glared target can look
+    like another marker (2026-10-30 tests: 5 of 8 glared targets), never the other way round."""
     if score is None or sharp < BLURRY:
         return 'unsure'
     if score >= hi:
         return 'match'
-    if score <= lo and side >= MIN_SIDE:
+    if score <= lo and side >= MIN_SIDE and glare <= GLARE_MAX:
         return 'different'
     return 'unsure'
 
@@ -100,8 +104,85 @@ def is_marker(gray, quad):
             and hi - lo > 30.0)
 
 
+def _order(q):
+    q = np.asarray(q, np.float64).reshape(4, 2)
+    c = q.mean(axis=0)
+    return q[np.argsort(np.arctan2(q[:, 1] - c[1], q[:, 0] - c[0]))]
+
+
+def marker_in_board(gray, board):
+    """The dark marker inside a white board quad: its extent in the board straightened (so it works whatever the white
+    margin), mapped back -> 4 x 2 quad or None. Glare / blur on the marker's own border don't matter here."""
+    S = 96
+    q = _order(board)
+    dst = np.float32([[0, 0], [S - 1, 0], [S - 1, S - 1], [0, S - 1]])
+    M = cv2.getPerspectiveTransform(q.astype(np.float32), dst)
+    w = cv2.warpPerspective(gray, M, (S, S), flags=cv2.INTER_AREA, borderMode=cv2.BORDER_REPLICATE)
+    t, dark = cv2.threshold(cv2.GaussianBlur(w, (3, 3), 0), 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
+    dark = cv2.morphologyEx(dark, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    if not 0.15 < (dark > 0).mean() < 0.85:
+        return None
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(dark)
+    if n < 2:
+        return None
+    k = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))         # the marker: the biggest dark part
+    x, y, bw, bh = stats[k, :4]
+    if min(bw, bh) < 0.45 * S or max(bw, bh) > 1.4 * min(bw, bh):
+        return None
+    if np.median(w[dark == 0]) - np.median(w[lab == k]) < 30:   # dark on white, clearly
+        return None
+    box = np.float32([[x, y], [x + bw, y], [x + bw, y + bh], [x, y + bh]]).reshape(-1, 1, 2)
+    return cv2.perspectiveTransform(box, np.linalg.inv(M)).reshape(4, 2).astype(np.float64)
+
+
+def board_quads(gray, min_px=10.0):
+    """Marker quads found through their WHITE BOARD on the darker ground (a strong outline that blur and the sun's
+    glare don't break - the marker's own thin black border they do: 2026-10-30 tests)."""
+    g = cv2.GaussianBlur(gray, (5, 5), 0)
+    h, w = g.shape[:2]
+    out = []
+    _, otsu = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+    block = max(31, (min(h, w) // 6) | 1)
+    adapt = cv2.adaptiveThreshold(g, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, block, -10)
+    for bw in (otsu, adapt):
+        bw = cv2.morphologyEx(bw, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+        # a board = a bright blob WITH the dark marker inside: fill its holes (RETR_EXTERNAL) and take its outline
+        for c in cv2.findContours(bw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]:
+            area = cv2.contourArea(c)
+            if area < (1.15 * min_px) ** 2 or area > 0.6 * h * w:
+                continue
+            hull = cv2.convexHull(c)
+            peri = cv2.arcLength(hull, True)
+            ap = cv2.approxPolyDP(hull, 0.04 * peri, True)
+            q = ap.reshape(-1, 2).astype(np.float64) if len(ap) == 4 else \
+                cv2.boxPoints(cv2.minAreaRect(hull)).astype(np.float64)
+            if cv2.contourArea(q.astype(np.float32)) < 0.8 * cv2.contourArea(hull) and len(ap) != 4:
+                continue
+            sides = np.linalg.norm(q - np.roll(q, 1, axis=0), axis=1)
+            if sides.min() < 1.15 * min_px or sides.max() > 2.5 * sides.min():
+                continue
+            x, y, bw_, bh_ = cv2.boundingRect(c)
+            if x <= 1 or y <= 1 or x + bw_ >= w - 2 or y + bh_ >= h - 2:
+                continue                                        # the board cut off by the view's edge
+            mq = marker_in_board(gray, q)
+            if mq is not None and side_px(mq) >= min_px:
+                out.append(mq)
+    return out
+
+
+def inside_view(gray, q, margin=3.0):
+    """Every corner margin px inside the image: a marker cut off by the view's edge is never judged (a cut board gave a
+    wrong outline that scored -0.02 against its own start marker, 2026-10-30 test)."""
+    h, w = gray.shape[:2]
+    q = np.asarray(q).reshape(4, 2)
+    return bool((q[:, 0] >= margin).all() and (q[:, 1] >= margin).all() and (q[:, 0] <= w - 1 - margin).all()
+                and (q[:, 1] <= h - 1 - margin).all())
+
+
 def marker_quads(gray, min_px=10.0):
-    """Marker-like squares in gray, largest first, nested ones dropped."""
+    """Marker-like squares in gray, largest first, nested ones dropped: OpenCV's square finder on the marker's own
+    border, plus the markers found through their white board (board_quads) where that finder lost them. Only those
+    wholly inside the view."""
     out = []
     for q in sorted(candidates(gray), key=lambda q: -cv2.contourArea(q.astype(np.float32))):
         side = float(np.mean(np.linalg.norm(q - np.roll(q, 1, axis=0), axis=1)))
@@ -110,26 +191,89 @@ def marker_quads(gray, min_px=10.0):
         c = tuple(float(v) for v in q.mean(axis=0))
         if any(cv2.pointPolygonTest(p.astype(np.float32), c, False) >= 0 for p in out):
             continue                                            # inside a kept one: its own border's inner edge
-        if is_marker(gray, q):
+        if inside_view(gray, q) and is_marker(gray, q):
+            out.append(q)
+    for q in board_quads(gray, min_px):
+        if not inside_view(gray, q, margin=6.0):
+            continue
+        c = tuple(float(v) for v in q.mean(axis=0))
+        if not any(cv2.pointPolygonTest(p.astype(np.float32), c, False) >= 0 for p in out):
             out.append(q)
     return out
 
 
+GLARE = 245                    # grey level: a pixel this bright is burnt out (sun glare on the board) - not compared
+MIN_VALID = 0.5                # share of the inside that must be glare-free to compare at all
+
+
+def _norm(up, ok):
+    if ok.sum() < MIN_VALID * MASK.sum():
+        return None
+    v = up - up[ok].mean()
+    n = np.linalg.norm(v[ok])
+    if n <= 1e-3:
+        return None
+    v = (v / n).astype(np.float32)
+    v[~ok] = np.nan
+    return v
+
+
 def signature(gray, quad):
-    """SIZE x SIZE float32 (zero mean, unit norm over MASK) of the marker inside quad, or None."""
+    """2 x SIZE x SIZE float32 of the marker inside quad (or None): [0] every pixel, [1] the burnt-out ones (>= GLARE:
+    the sun's reflection on a laminated board - or, in bright sun, the white cells themselves) left out as NaN.
+    similarity() takes the better of the two: glare can't spoil the match, nor can bright whites empty it."""
     if quad is None:
         return None
-    up = cv2.GaussianBlur(_upright(gray, quad, SIZE).astype(np.float32), (0, 0), BLUR)
-    v = up - up[MASK].mean()
-    n = np.linalg.norm(v[MASK])
-    return (v / n).astype(np.float32) if n > 1e-3 else None
+    raw = _upright(gray, quad, SIZE)
+    up = cv2.GaussianBlur(raw.astype(np.float32), (0, 0), BLUR)
+    burnt = cv2.dilate((raw >= GLARE).astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
+    full = _norm(up, MASK.copy())
+    if full is None:
+        return None
+    masked = _norm(up, MASK & ~burnt) if burnt[MASK].any() else full
+    return np.stack([full, full if masked is None else masked])
 
 
 def similarity(a, b):
-    """Masked normalised correlation, best of the 4 turns of b (-1 .. 1); None if either is missing."""
+    """Masked normalised correlation, best of the 4 turns of b (-1 .. 1) and of all pixels / glare left out (see
+    signature); None if either is missing."""
     if a is None or b is None:
         return None
-    return float(max(np.sum(a[MASK] * np.rot90(b, k)[MASK]) for k in range(4)))
+    a, b = np.asarray(a), np.asarray(b)
+    if a.ndim == 3 or b.ndim == 3:
+        aa, bb = (a if a.ndim == 3 else np.stack([a, a])), (b if b.ndim == 3 else np.stack([b, b]))
+        got = [v for v in (_sim(aa[0], bb[0]), _sim(aa[1], bb[1]), _sim(aa[0], bb[1]), _sim(aa[1], bb[0]))
+               if v is not None]
+        return max(got) if got else None
+    return _sim(a, b)
+
+
+def _sim(a, b):
+    best = None
+    for k in range(4):
+        r = np.rot90(b, k)
+        m = MASK & np.isfinite(a) & np.isfinite(r)
+        if m.sum() < MIN_VALID * MASK.sum():
+            continue
+        x, y = a[m] - a[m].mean(), r[m] - r[m].mean()
+        d = float(np.sqrt(np.sum(x * x) * np.sum(y * y)))
+        if d > 1e-9:
+            c = float(np.sum(x * y) / d)
+            best = c if best is None else max(best, c)
+    return best
+
+
+def glare_share(gray, quad):
+    """0 .. 1: how much of the marker's BLACK BORDER RING (black on every marker) is bright - the sun's glare. Sampled in
+    the middle of the border cell (blur bleeds only its edges); bright = above 75 % of the marker's own range."""
+    up = _upright(gray, quad, SIZE).astype(np.float32)
+    a, b = int(round(0.035 * SIZE)), int(round(0.095 * SIZE))
+    ring = np.concatenate([up[a:b, a:SIZE - a].ravel(), up[SIZE - b:SIZE - a, a:SIZE - a].ravel(),
+                           up[b:SIZE - b, a:b].ravel(), up[b:SIZE - b, SIZE - b:SIZE - a].ravel()])
+    lo_, hi_ = float(np.percentile(up, 3)), float(np.percentile(up, 99))
+    if hi_ - lo_ < 20:
+        return 0.0
+    return float((ring > lo_ + 0.75 * (hi_ - lo_)).mean())
 
 
 def sharpness(gray, quad):
@@ -158,7 +302,7 @@ def filters(patch):
 
 def best_in_patch(patch, tmpl, min_px=10.0):
     """The marker in an undistorted patch nearest its centre, matched against tmpl over the filters ->
-    (score, sharpness, how) or None when no marker is in it."""
+    (score, sharpness, how, glare share) or None when no marker is in it."""
     h, w = patch.shape[:2]
     best = None
     for fname, img in filters(patch):
@@ -170,5 +314,5 @@ def best_in_patch(patch, tmpl, min_px=10.0):
         if s is None:
             continue
         if best is None or s > best[0]:
-            best = (s, sharpness(img, q), fname)
+            best = (s, sharpness(img, q), fname, glare_share(img, q))
     return best

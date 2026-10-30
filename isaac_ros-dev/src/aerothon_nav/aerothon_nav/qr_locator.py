@@ -721,14 +721,15 @@ class QrLocator(Node):
                 score = am.similarity(tmpl, am.signature(view, q)) if tmpl is not None else None
                 sharp = am.sharpness(view, q)
                 dup = next((k for k, o in enumerate(seen) if np.linalg.norm(o[0].mean(axis=0) - c) < side / 2), None)
+                one = (px, score, sharp, am.side_px(q), am.glare_share(view, q))
                 if dup is None:
-                    seen.append((px, score, sharp, am.side_px(q)))
+                    seen.append(one)
                 elif sharp > seen[dup][2]:            # the same marker in two views: the crisper one
-                    seen[dup] = (px, score, sharp, am.side_px(q))
+                    seen[dup] = one
         target = self.start_qr or am.IMAGE_ONLY
         found = []
-        for px, score, sharp, side in seen:
-            verdict = am.classify(score, sharp, side, self.g('aruco_hi'), self.g('aruco_lo'))
+        for px, score, sharp, side, glare in seen:
+            verdict = am.classify(score, sharp, side, self.g('aruco_hi'), self.g('aruco_lo'), glare)
             if verdict == 'match':
                 found.append((target, px))
             elif verdict == 'different':
@@ -739,7 +740,7 @@ class QrLocator(Node):
                     cx, cy = float(pts[0][0]), float(pts[0][1])
                     if self.in_zone(cx, cy) and not self.deep_red(cx, cy) and not self.near_decoded(cx, cy):
                         self.add_cand(cx, cy, conf=round(float(score), 2) if score is not None else None)
-        self.last_boxes_px = [(1.0 if s is None else max(0.0, s), px, None) for px, s, _, _ in seen
+        self.last_boxes_px = [(1.0 if s is None else max(0.0, s), px, None) for px, s, _, _, _ in seen
                               if not any(px is f[1] for f in found)]
         return found
 
@@ -766,6 +767,8 @@ class QrLocator(Node):
             r = am.best_in_patch(patch, tmpl)
             if r is not None and (best is None or r[0] > best[0]):
                 best = (r[0], r[1], f'{name}/{r[2]}')
+            if r is not None:
+                v['glare'] = max(v.get('glare', 0.0), r[3])
         v['round'] += 1
         if best is not None:
             v['scores'].append(best[0])
@@ -784,7 +787,7 @@ class QrLocator(Node):
         elif s >= self.g('aruco_hi'):
             self.add_board(self.start_qr or am.IMAGE_ONLY, 'image_match')
             self.verify_done('match', score=round(s, 3), how=how)
-        elif s <= self.g('aruco_lo'):
+        elif s <= self.g('aruco_lo') and v.get('glare', 0.0) <= am.GLARE_MAX:   # glare: never 'another marker'
             self.add_board('<marker>', 'image_match')
             self.verify_done('different', score=round(s, 3), how=how)
         else:

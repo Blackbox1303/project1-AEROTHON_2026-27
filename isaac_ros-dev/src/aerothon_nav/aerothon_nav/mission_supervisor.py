@@ -458,6 +458,7 @@ class MissionSupervisor(Node):
             res.success, res.message = False, 'no PX4 pose / MAVROS connection yet'
             return res
         self.running, self.abort_reason, self.target, self.geofence = True, None, None, None
+        self.landing = False
         self.crashed = self.operator = False
         threading.Thread(target=self.run, daemon=True).start()
         res.success, res.message = True, 'mission started'
@@ -528,19 +529,20 @@ class MissionSupervisor(Node):
                 return False
         return True
 
-    # the pilot's modes (ArduCopter / PX4): never set by this mission - seen in flight, the RC pilot (mode switch) or the
-    # ground's hand-over button took the drone (user, 2026-10-30)
-    PILOT_MODES = {'STABILIZE', 'ALT_HOLD', 'LOITER', 'POSHOLD', 'BRAKE', 'ACRO', 'SPORT', 'DRIFT', 'FLOWHOLD', 'ZIGZAG',
-                   'MANUAL', 'STABILIZED', 'ALTCTL', 'POSCTL', 'RATTITUDE'}
+    # the modes this mission sets itself (GUIDED / OFFBOARD, LAND; PX4's take-off): ANY other mode while it flies was set
+    # by someone else - the RC mode switch (channel 7: STABILIZE / AUTO / RTL, user 2026-10-30), the ground's MANUAL /
+    # LAND / RTL buttons, or an autopilot failsafe (battery / radio -> RTL / LAND)
+    OWN_MODES = {'GUIDED', 'OFFBOARD', 'LAND', 'AUTO.LAND', 'AUTO.TAKEOFF', 'AUTO.LOITER'}
 
     def check_takeover(self):
-        """A pilot mode while the mission flies: the operator has it - stop at once, no failsafe flight (which would
-        put the autopilot back in GUIDED and take the drone from the pilot)."""
-        if self.operator or not self.running or not self.mav.armed or self.mav.mode not in self.PILOT_MODES:
+        """Another mode while the mission flies: the pilot / the autopilot has it - stop at once, no failsafe flight
+        (which would put the autopilot back in GUIDED and take the drone from the pilot / undo an RTL)."""
+        own = self.OWN_MODES if getattr(self, 'landing', False) else self.OWN_MODES - {'LAND', 'AUTO.LAND'}
+        if self.operator or not self.running or not self.mav.armed or not self.mav.mode or self.mav.mode in own:
             return
         self.operator = True
-        self.abort_reason = f'operator took over: {self.mav.mode} (RC or the ground)'
-        self.get_logger().warn(f'{self.mav.mode} while the mission flies: handed to the operator, no more setpoints')
+        self.abort_reason = f'operator took over: {self.mav.mode} (the RC switch, the ground or an autopilot failsafe)'
+        self.get_logger().warn(f'{self.mav.mode} while the mission flies: handed over, no more setpoints')
 
     def check_crash(self):
         """Flipped / crashed while armed: kill the motors at once (non-blocking), abort the mission."""
@@ -1709,6 +1711,7 @@ class MissionSupervisor(Node):
         self.wait(lambda: self.pose()[2] > alt - 0.5, deadline)
 
     def land(self):
+        self.landing = True                          # LAND is this mission's own from here (check_takeover)
         self.set_state('LAND')
         deadline = self.limit('land')
         land = self.modes['land']
@@ -1767,6 +1770,7 @@ class MissionSupervisor(Node):
         except Exception as e:
             self.get_logger().error(f'failsafe could not finish ({e}): landing in place')
             try:
+                self.landing = True
                 self.mav_call(self.set_mode, SetMode.Request(custom_mode=self.modes['land']))
             except Exception:
                 pass

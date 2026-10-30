@@ -405,6 +405,7 @@ class App:
         self.lock = threading.Lock()
         self.events, self.n_ev = [], 0
         self.fc, self.fc_t = {}, 0.0
+        self.fc_req = None                            # a mode / winch test for field_link (see command)
         self.motors_on = False
         self.spin_until = 0.0                         # spin_test: the cw chase on all four until then
         self.levels = {'low': a.spin_low, 'mid': a.spin_mid, 'high': a.spin_high}
@@ -567,6 +568,20 @@ class App:
                 self.lane_i = 0
             self.event(f'{n.replace("_", " ")} {v:.1f} m')
             return True, f'{n} {v:.1f} m'
+        if n in ('set_mode', 'winch'):                # the autopilot tests: field_link does them, its answer back
+            self.fc_req_n = getattr(self, 'fc_req_n', 0) + 1
+            rid = self.fc_req_n
+            self.fc_req = {'id': rid, 'do': n, 'arg': float(arg)}
+            t0 = time.time()
+            while time.time() - t0 < 8.0:
+                done = (self.fc or {}).get('req_done') or {}
+                if done.get('id') == rid:
+                    self.fc_req = None
+                    self.event(f'{"MODE" if n == "set_mode" else "WINCH"} {done.get("msg", "")}')
+                    return bool(done.get('ok')), str(done.get('msg', ''))
+                time.sleep(0.1)
+            self.fc_req = None
+            return False, 'no answer from field_link (the Pixhawk link)'
         if n == 'status':
             return True, self.guide.get('say', '')
         return False, f'unknown command {name}'
@@ -1228,7 +1243,7 @@ def make_handler(app):
                 return self.js({'ok': False, 'message': 'bad JSON'}, 400)
             if u.path == '/api/fc':                   # field_link: the Pixhawk's state in, the motor cue out
                 app.fc, app.fc_t = body, time.time()
-                return self.js(app.motor_cue())
+                return self.js(dict(app.motor_cue(), req=app.fc_req))   # + a mode / winch test to do
             if u.path == '/api/cmd':
                 name = body.get('name') or fp.CODES.get(int(body.get('code', 0)), ('?',))[0]
                 try:

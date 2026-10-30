@@ -17,7 +17,7 @@ import sys
 import time
 import urllib.request
 
-PILOT_MODES = {'STABILIZE', 'ALT_HOLD', 'LOITER', 'POSHOLD', 'BRAKE', 'ACRO', 'SPORT', 'DRIFT', 'FLOWHOLD'}
+OWN_MODES = {'GUIDED', 'LAND'}   # what the mission sets itself; anything else in flight = handed over
 
 
 def say(msg):
@@ -142,8 +142,9 @@ def main():
             now = (st.get('state'), st.get('fc_mode'), st.get('armed'))
             if now != last:
                 say(f'state {now[0] or "-"} | flight mode {now[1] or "-"} | {"ARMED" if now[2] else "disarmed"}')
-                if now[1] in PILOT_MODES and now[2]:
-                    say(f'{now[1]}: the pilot has the drone (manual) - the mission stopped')
+                if now[2] and now[1] and now[1] not in OWN_MODES:
+                    say(f'{now[1]}: the pilot / the RC switch / an autopilot failsafe has the drone - the mission '
+                        f'stopped')
                 last = now
             armed_seen = armed_seen or bool(st.get('armed'))
             if armed_seen and st.get('armed') is False:
