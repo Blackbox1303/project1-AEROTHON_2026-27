@@ -6,8 +6,8 @@
   READ_START_QR   1 m forward, /mission/read_qr (qr_reader stores the payload)
   OVERHEAD_GREEN  (user, 2026-10-28) still at takeoff_altitude 5 m: the downward Arducam (drone_qr_detector banner_node
                   as overhead_banner) finds the GREEN banner - floor 'doormat' at the mouth / top banner, 11.5 x 1.5 ft
-                  across the tunnel; RED = the other tunnel, ignored (its position excludes that tunnel from the wall
-                  fit). Look points every overhead_step m towards the QR area (unknown: the take-off heading), then
+                  across the tunnel (2026-10-28 a RED banner marked the other tunnel - gone 2026-10-30: red is ignored,
+                  the start zone is red). Look points every overhead_step m towards the QR area (unknown: the take-off heading), then
                   lines overhead_lateral m to the sides. The banner's long edge on the ground -> the tunnel axis (away
                   from home); fly to standoff before the mouth at 5 m - never over the roof - then down to align_altitude
                   (< 8 ft) and ALIGN_GREEN in entry_align's geofence mode = the D435 wall fit refines the axis.
@@ -22,6 +22,10 @@
                   offboard_bridge caps 2.3 m in and at them); out of the entry tunnel fly clear of the roof, THEN climb
                   to search_altitude 10 m; drop at 5 m, back to 10 m; down to align_altitude at the exit approach. The
                   tunnel to fly into always shows GREEN (from the start area: entry; from the zone: exit), blue the other
+  COURSE 2026-10-30 (user): the entry tunnel GREEN, the exit tunnel BLUE as seen from the QR / marker area (exit_colour),
+                  both with a thin white border, an upper banner + a lower one flat on the floor at the mouth (doormat).
+                  ONLY these two banners: none marks a tunnel to ignore. The start zone is RED: take off from it, land
+                  back on it at the end
   (the start_from test entries below fly from home to search_start in a straight line over the roofed tunnels -
                   the bridge's tunnel ceiling stops that: use them only with the old worlds)
   (start_from delivery: the ground station's DELIVERY-ONLY mission - the drone stands at / beside the delivery zone:
@@ -54,7 +58,7 @@
                   the mission goes on to the exit - the drone still has to come home.
                   Hardware (ArduCopter): vio_bringup/config/ardupilot_vio_params.parm (winch relays); the sim:
                   vio_cuda_ws/sim/ardupilot_sim_params.parm (SITL relay pins, SIM_PIN_MASK shows them).
-  ALIGN_EXIT      /nav/entry/align, colour exit_colour (v3 green); the corridor found is checked against the entrance geofence: one
+  ALIGN_EXIT      /nav/entry/align, colour exit_colour (blue since 2026-10-30; v3 green); the corridor found is checked against the entrance geofence: one
                   whose centre line is within exclude_radius of the entry corridor's IS the entry corridor -> rejected
   ALIGN_GEOFENCE  exit fallback (no exit banner, or it led back to the entry corridor): entry_align mode geofence,
                   predicted mouth = the entry corridor's far end, direction = entry yaw + 180 deg, entry corridor
@@ -139,13 +143,15 @@ class MissionSupervisor(Node):
         p = self.declare_parameter
         # ALTITUDES: 10 m in the tunnels and the search, 5 m for the drop (user, 2026-10-23 - the earlier 10 ft rule
         # was a misunderstanding). fly() clamps to max_altitude and offboard_bridge clamps its setpoint independently
-        p('max_altitude', 11.2)      # m: 10 m + the altitude planner's band over tunnel obstacles (z_max 10.9)
+        p('max_altitude', 9.5)       # m: HARD CAP - the airspace rule there: never above 10 m (user, 2026-10-30); 0.5 m
+        #                              left for ArduCopter's height overshoot. Every fly() target is clamped to it
         p('takeoff_altitude', 5.0)   # m: take off to 5 m, move 1 m forward, scan the start QR, then descend to align_altitude for corridor VIO
         p('align_altitude', 2.3)     # m: banner search + wall fit outside the tunnels (below 8 ft: no climbing near them)
         p('tunnel_altitude', 1.5)    # m: both tunnels (v3: roofed 10 ft, never above 8 ft = 2.44 m)
         p('entry_speed', 1.0)        # m/s along the entry tunnel (no obstacles)
         p('return_speed', 0.5)       # m/s along the exit tunnel (the blocks: lateral plan + sidesteps)
-        p('exit_colour', 'green')    # banner of the tunnel to fly into from the zone (v3: green; v2: orange)
+        p('exit_colour', 'blue')     # banner of the tunnel to fly into from the zone (2026-10-30: blue with a thin
+        #                              white border; v3: green; v2: orange)
         p('overhead_banner', True)   # OVERHEAD_GREEN: the Arducam banner fix from takeoff_altitude before ALIGN_GREEN
         p('overhead_step', 2.0)      # m between look points
         p('overhead_search_dist', 2.0)   # m out from the start QR along the search heading: from 5 m the camera sees
@@ -159,7 +165,7 @@ class MissionSupervisor(Node):
         #                              top banner projected on the ground from 5 m comes out ~2.5 x longer
         p('overhead_hold_back', 1.5) # m on the start side of the banner where the drone looks from (never over the roof)
         p('overhead_lateral_max', 1.5)  # m: the wall fit's corridor must pass this close to the banner centre
-        p('search_altitude', 10.0)   # delivery zone (sim: nadir_hd 60 deg reads ~4 m round the drone from here)
+        p('search_altitude', 9.0)    # delivery zone: under the 10 m airspace limit with margin (was 10 m; 2026-10-30)
         p('deliver_altitude', 5.0)   # m: the drop height
         p('deliver_tol', 0.15)       # m: arrival tolerance over the target (both levels)
         p('fine_wait', 8.0)          # s at the drop height for qr_locator's fine fix (reads from there) before release
@@ -169,6 +175,8 @@ class MissionSupervisor(Node):
         p('direct_fallback', 6.0)    # m: Nav2 can't reach a target this close (e.g. in a red zone's margin - never IN a
         #                              red zone, qr_locator checks): fly the short hop straight at search height
         p('deliver_hold', 1.5)       # s settling at deliver_altitude before the release (after the re-centring)
+        p('deliver_min_time', 45.0)  # s at deliver_altitude at least, from arriving to the climb: the winch and the drop
+        #                              mechanism need it (user, 2026-10-30)
         p('drop_wait', 1.5)          # s after the release is acknowledged (payload clear) before closing
         p('drop_retries', 3)
         p('delivery_nav2', False)    # False: the QR-zone legs (to the target, to the exit, zone exit) are A* routes on
@@ -249,9 +257,10 @@ class MissionSupervisor(Node):
         p('entry_altitude_mode', 'fixed')
         p('return_altitude_mode', 'planner')
         p('return_reserve', 240.0)    # s
-        p('min_corridor_length', 4.0) # m: corridor_nav min_length (exit detection from here on; v3 tunnels 6.7 m)
+        p('min_corridor_length', 2.2) # m: corridor_nav min_length (exit detection from here on): 0.6 x the 12 ft
+        #                               (3.66 m) tunnels of 2026-10-30 - the course block sets it (v3: 4.0 of 6.7 m)
         p('length_slack', 1.5)        # m: return corridor min_length = entry corridor length - this
-        p('deliver_reserve', 90.0)    # s (winch: ~35 s of it lowering + winding in 5.5 m at 0.34 m/s)
+        p('deliver_reserve', 120.0)   # s: the climb down / up + deliver_min_time 45 s at 5 m (the winch: ~35 s of it)
         p('limit_takeoff', 90.0)     # s per state
         p('limit_read_qr', 45.0)
         p('limit_align', 300.0)
@@ -346,6 +355,7 @@ class MissionSupervisor(Node):
         self.operator = False
         self.tilt_since = None
         self.create_timer(0.1, self.check_crash, callback_group=reentrant)
+        self.create_timer(0.2, self.check_takeover, callback_group=reentrant)
         self.trail, self.in_corridor, self.window_seen = [], False, False
         self.t0_clock = None
         self.create_timer(0.2, self.record_trail, callback_group=reentrant)
@@ -517,6 +527,20 @@ class MissionSupervisor(Node):
             if not self.flight.fly(x, y, z, yaw, vmax=self.g('retrace_speed'), tol=0.25, timeout=120.0):
                 return False
         return True
+
+    # the pilot's modes (ArduCopter / PX4): never set by this mission - seen in flight, the RC pilot (mode switch) or the
+    # ground's hand-over button took the drone (user, 2026-10-30)
+    PILOT_MODES = {'STABILIZE', 'ALT_HOLD', 'LOITER', 'POSHOLD', 'BRAKE', 'ACRO', 'SPORT', 'DRIFT', 'FLOWHOLD', 'ZIGZAG',
+                   'MANUAL', 'STABILIZED', 'ALTCTL', 'POSCTL', 'RATTITUDE'}
+
+    def check_takeover(self):
+        """A pilot mode while the mission flies: the operator has it - stop at once, no failsafe flight (which would
+        put the autopilot back in GUIDED and take the drone from the pilot)."""
+        if self.operator or not self.running or not self.mav.armed or self.mav.mode not in self.PILOT_MODES:
+            return
+        self.operator = True
+        self.abort_reason = f'operator took over: {self.mav.mode} (RC or the ground)'
+        self.get_logger().warn(f'{self.mav.mode} while the mission flies: handed to the operator, no more setpoints')
 
     def check_crash(self):
         """Flipped / crashed while armed: kill the motors at once (non-blocking), abort the mission."""
@@ -784,7 +808,7 @@ class MissionSupervisor(Node):
     def on_operator(self, req, res):
         self.operator = True
         if self.running:
-            self.abort_reason = 'operator took over (LAND / RTL / KILL from the ground)'
+            self.abort_reason = 'operator took over (LAND / RTL / KILL / a hand-over mode from the ground)'
         res.success, res.message = True, 'mission handed to the operator' if self.running else 'no mission running'
         return res
 
@@ -1156,7 +1180,8 @@ class MissionSupervisor(Node):
         d = json.loads(m.data)
         if d.get('colour') == 'none':
             self.overhead_frames += 1
-        elif d.get('colour') in ('green', 'red'):
+        elif d.get('colour') == 'green':            # 2026-10-30: no banner marks the other tunnel any more, and
+            #                                           the start zone is a red area under the drone: red is ignored
             self.overhead_dets = (self.overhead_dets + [d])[-200:]
 
     @staticmethod
@@ -1169,7 +1194,8 @@ class MissionSupervisor(Node):
 
     def overhead_look(self):
         """Hover overhead_look s -> (green fix or None, red centres). A green fix: the floor banner's centre and the
-        direction of its long edge (mod 180 deg) on the ground, from its corner rays."""
+        direction of its long edge (mod 180 deg) on the ground, from its corner rays (the lower banner lies flat at the
+        mouth like a doormat - user, 2026-10-30)."""
         self.overhead_dets, self.overhead_frames = [], 0
         t0, c0 = time.monotonic(), self.clock_s()
         while (self.clock_s() - c0 < self.g('overhead_look') or self.overhead_frames < self.g('overhead_frames')) \
@@ -1495,12 +1521,18 @@ class MissionSupervisor(Node):
                     self.fly(tx, ty, self.g('search_altitude'), deadline, vmax=1.5, tol=self.g('deliver_tol'))
                     self.target_fine = None                  # reads from the drop height only
                     self.fly(tx, ty, self.g('deliver_altitude'), deadline, vmax=0.5, tol=self.g('deliver_tol'))
+                    t_low = self.clock_s()                   # at the drop height: deliver_min_time from here
                     self.refine_over_target(tx, ty, deadline)
                     hold_end = self.clock_s() + self.g('deliver_hold')   # node clock (sim time in the sim)
                     while self.clock_s() < hold_end:
                         self.check(deadline)
                         self.flight.hold(0.2, self.g('deliver_altitude'))
                     released = self.drop(deadline)
+                    # the winch + drop mechanism needs deliver_min_time at the drop height before the climb (user,
+                    # 2026-10-30: 45 s) - whatever the open-loop winch timing says
+                    while self.clock_s() < t_low + self.g('deliver_min_time'):
+                        self.check(deadline)
+                        self.flight.hold(0.2, self.g('deliver_altitude'))
                     self.set_state('DELIVER', delivered_at=[round(v, 2) for v in self.pose()[:2]], released=released)
                     self.trigger('/delivery/search/stop', required=False)
 

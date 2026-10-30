@@ -358,7 +358,7 @@ class VrxDeliverySystem:
         self.zone_t0 = None
         self.log_entries = []
         self.takeoff_alt = 5.0
-        self.search_alt = 10.0
+        self.search_alt = 9.0                # under the 10 m airspace limit (2026-10-30)
         self.deliver_alt = 5.0
         # payload drop: 'winch' (N20 + Cytron MDD20A on ArduPilot RELAY1 = PWM1 run / RELAY2 = DIR1, 6 m line,
         # passive hook that lets go on a slack line) | 'gripper' (MAV_CMD_DO_GRIPPER). The same numbers as

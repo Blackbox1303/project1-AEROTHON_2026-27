@@ -83,7 +83,7 @@ class OffboardBridge(Node):
         #                                 along it), and above it the fence keeps the drone out of the corridor boxes
         p('tunnel_margin', 1.0)     # m before / after a tunnel where the cap already / still applies
         p('geofence_lookahead', 0.6)  # s
-        p('max_altitude', 11.2)     # m: hard cap on every altitude target (10 m flight + the altitude planner's band),
+        p('max_altitude', 9.5)      # m: hard cap on every altitude target - the airspace rule: never above 10 m (2026-10-30),
         #                             whatever a planner or the supervisor asks for (0.33 m overshoot seen, 2026-10-21)
         p('max_yaw_rate', 0.8)      # rad/s
         p('alt_kp', 0.8)            # 1/s, altitude error -> climb rate

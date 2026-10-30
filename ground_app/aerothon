@@ -113,7 +113,7 @@ case "${1:-}" in
     launch "onboard-$M" http://127.0.0.1:8080 python3 -s "$HERE/apps/dashboard/gcs_server.py" --radio "$DEV" --port 8080 --marker "$M" ;;
   offboard)
     M=${2:-aruco}; DROP=${3:-drop}; DEV=$(find_radio "${4:-/dev/ttyUSB0:57600}"); VIDEO=${5:-}; TARGET=${6:-}
-    ALT=1.0; [ "$M" = qr ] && ALT=10.0
+    ALT=1.0; [ "$M" = qr ] && ALT=9.0      # never above 10 m (airspace rule there)
     A=(--link "$DEV" --alt "$ALT" --marker "$M" --qgc 127.0.0.1:14550 --port 8094)
     [ "$DROP" = drop ] && A+=(--drop); [ -n "$VIDEO" ] && A+=(--video "$VIDEO"); [ -n "$TARGET" ] && A+=(--start-qr "$TARGET")
     [ -d "$HERE/apps/offboard/wechat_qrcode" ] && A+=(--wechat-dir "$HERE/apps/offboard/wechat_qrcode")

@@ -12,8 +12,10 @@ The board's IMAGE is kept too (qr_match.signature of the central view, the frame
 <store_file>.sig.npy + .png - qr_locator compares the zone boards that don't decode with it (user, 2026-10-28: the
 QRs may hold random text or nothing). A QR seen (box + signature in min_hits frames) that never decodes - no data -
 is a read too: payload qr_match.IMAGE_ONLY, the zone boards are then matched by image only.
-marker 'aruco' (default: the AEROTHON_MARKER environment variable, else 'qr'): the start board is an ArUco marker
-3x3 .. 6x6 instead, read on the undistorted image (aruco_tools.detect_fisheye); the payload is e.g. '4X4#23'.
+marker 'aruco' (default: the AEROTHON_MARKER environment variable, else 'qr'): the start board is an ArUco marker, and
+it is NOT read (user, 2026-10-30: match by image only). Every frame: the marker-like square nearest straight down in the
+undistorted view (aruco_match.marker_quads) -> its image signature; the crispest x biggest one is stored (.sig.npy +
+.png) and the payload is aruco_match.IMAGE_ONLY - qr_locator matches the zone markers against that image.
   service: /mission/read_qr (std_srvs/Trigger) -> success + payload in `message`
   out:     /mission/start_qr (std_msgs/String JSON {payload, source, hits, frames, also_seen, time}),
            latched; the same JSON in store_file, so a restarted node (or the supervisor) still has it
@@ -72,10 +74,9 @@ class QrReader(Node):
         self.chase = {}
         self.aruco = None
         if g('marker') == 'aruco':
-            from aerothon_nav import aruco_tools
-            self.aruco_tools = aruco_tools
-            self.aruco = aruco_tools.Detector(raw=False)   # a 4x4-6x6 grid off the dictionaries is a misread
-            self.get_logger().info('start marker: ArUco 3x3 .. 6x6 on the undistorted image')
+            from aerothon_nav import aruco_match
+            self.aruco = aruco_match
+            self.get_logger().info('start marker: ArUco, its IMAGE (no id read) on the undistorted view')
         else:
             self.init_qr()
         self.init_ros()
@@ -141,10 +142,25 @@ class QrReader(Node):
         return set()
 
     def read_aruco(self, gray, fisheye=True):
-        """Marker payloads in a frame: through undistorted views on the fisheye, straight on a pinhole image."""
+        """{IMAGE_ONLY} when a marker is under the drone (nearest straight down in the undistorted view), its image
+        kept while reading; else {}. No id is read."""
+        am = self.aruco
+        view = gray
         if fisheye and self.cam is not None:
-            return set(self.aruco_tools.detect_fisheye(self.aruco, gray, self.cam))
-        return {p for p, _ in self.aruco.detect(gray)}
+            view, _ = self.cam.rectify_patch(gray, ray_d=None, fov_deg=100.0, zoom_scale=1.0, max_size=1100)
+        qs = am.marker_quads(view)
+        if not qs:
+            return set()
+        h, w = view.shape[:2]
+        q = min(qs, key=lambda q: np.hypot(*(q.mean(axis=0) - [w / 2, h / 2])))
+        sig = am.signature(view, q)
+        if sig is None:
+            return set()
+        if self.reading:
+            side = float(np.mean(np.linalg.norm(q - np.roll(q, 1, axis=0), axis=1)))
+            crop = am._upright(view, q, 160, margin=20)
+            self.templates.append((sig, am.sharpness(view, q) * side, crop))   # save_template keeps the best
+        return {am.IMAGE_ONLY}
 
     def template(self, view):
         """The board's image signature in an undistorted view: around the best QrNet box (else the whole view) ->

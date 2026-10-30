@@ -1,5 +1,5 @@
-"""Find the corridor-entrance banner ("AeroTHON 2026", green entry / orange exit) in the Arducam
-image and publish the RAY to it in odom.
+"""Find the corridor-entrance banner (green entry / blue exit since 2026-10-30, plain with a thin white border; the
+sim's: "AeroTHON 2026" lettered, v2 orange exit) in the camera image and publish the RAY to it in odom.
 
 The banner's size and mounting are unknown, so nothing here assumes them: a banner is a strongly
 coloured, solid, elongated patch with white text inside. Per processed frame (at most rate_hz, on
@@ -77,8 +77,8 @@ class BannerDetector(Node):
         p('odom_frame', 'odom')
         p('tf_max_age', 1.0)         # s: an image newer than the latest pose by up to this uses that pose
         # OpenCV HSV: H 0-180. Measured in sim (banner H ~66 / ~13, S ~240); retune on the day.
-        p('green.h', [55, 82])
-        p('green.s_min', 160)
+        p('green.h', [68, 92])                  # the real banner: H 81-86 (teal green), grass H 19-46 (2026-10-30)
+        p('green.s_min', 110)
         p('green.v_min', 30)
         p('orange.h', [7, 24])
         p('orange.s_min', 160)
@@ -90,7 +90,8 @@ class BannerDetector(Node):
         p('text_v_ratio', 0.85)                 # ... and V >= this x the banner colour's median V
         p('min_area', 60)                       # px in the downscaled image
         p('min_solidity', 0.75)
-        p('white_min', 0.03)
+        p('max_tilt_deg', 35.0)      # deg: the banner's long side from level in the view (an upright pole: ~90)
+        p('white_min', 0.0)          # 2026-10-30: plain banners (no letters), a thin white border; the sim's: letters
         p('white_max', 0.5)
         p('min_aspect', 1.5)
         self.g = lambda n: self.get_parameter(n).value  # noqa: E731
@@ -131,6 +132,8 @@ class BannerDetector(Node):
                 d = self.judge(c, img, ds, colour)
                 if d:
                     found.append(d)
+                elif cv2.contourArea(c) > 4 * self.g('min_area'):
+                    found += self.split(c, joined, img, ds, colour)
         found.sort(key=lambda d: -d['score'])
         best = found[0] if found else None
         if found:
@@ -142,6 +145,20 @@ class BannerDetector(Node):
         lo, hi = self.g(f'{colour}.h')
         return cv2.inRange(hsv, (lo, self.g(f'{colour}.s_min'), self.g(f'{colour}.v_min')), (hi, 255, 255))
 
+    def split(self, contour, mask, img, ds, colour):
+        """A blob joined to something thinner of its colour (the green POLES at the mouth touch the floor banner, 2026-10-30
+        photo): opened with growing kernels the thin part goes first; the pieces are judged again."""
+        blob = np.zeros_like(mask)
+        cv2.drawContours(blob, [contour], -1, 255, -1)
+        blob = cv2.bitwise_and(blob, mask)
+        for k in (3, 5, 9, 13, 19):
+            opened = cv2.morphologyEx(blob, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+            got = [d for d in (self.judge(c, img, ds, colour) for c in
+                                cv2.findContours(opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]) if d]
+            if got:
+                return got
+        return []
+
     def judge(self, contour, img, ds, colour):
         area = cv2.contourArea(contour)
         if area < self.g('min_area'):
@@ -149,8 +166,9 @@ class BannerDetector(Node):
         hull = cv2.convexHull(contour)
         # colour and text on a full-resolution crop around the hull
         x, y, w, h = cv2.boundingRect(hull * ds)
-        x0, y0 = max(0, x - ds), max(0, y - ds)
-        crop = cv2.cvtColor(img[y0:y + h + ds, x0:x + w + ds], cv2.COLOR_BGR2HSV)
+        pad = ds + 6                                   # room for the white border round it
+        x0, y0 = max(0, x - pad), max(0, y - pad)
+        crop = cv2.cvtColor(img[y0:y + h + pad, x0:x + w + pad], cv2.COLOR_BGR2HSV)
         hull_mask = np.zeros(crop.shape[:2], np.uint8)
         cv2.fillConvexPoly(hull_mask, hull * ds - [x0, y0], 255)
         n_hull = cv2.countNonZero(hull_mask)
@@ -165,6 +183,9 @@ class BannerDetector(Node):
         white_frac = n_white / n_hull
         if solidity < self.g('min_solidity') or not self.g('white_min') <= white_frac <= self.g('white_max'):
             return None
+        # the thin white border round the banner (course 2026-10-30): evidence only, a far one is under a pixel
+        ring = cv2.subtract(cv2.dilate(hull_mask, np.ones((7, 7), np.uint8)), hull_mask)
+        white_rim = cv2.countNonZero(cv2.bitwise_and(white, ring)) / max(1, cv2.countNonZero(ring))
         # elongation on the rays: gnomonic projection around the blob's centre ray, so the fisheye's
         # bending near the image edge doesn't distort the shape
         pts = hull.reshape(-1, 2).astype(np.float64) * ds
@@ -183,9 +204,16 @@ class BannerDetector(Node):
         aspect = max(w, h) / max(min(w, h), 1e-6)
         if aspect < self.g('min_aspect'):
             return None
+        # lying ACROSS the view: both banners run horizontally (top and doormat); the green POLES beside the mouth are
+        # just as long and solid but upright (2026-10-30 photo). plane x = u (level), y = v (camera down)
+        ev, evec = np.linalg.eigh(np.cov(plane.T.astype(np.float64)))
+        long_axis = evec[:, int(np.argmax(ev))]
+        if abs(math.degrees(math.atan2(abs(long_axis[1]), abs(long_axis[0])))) > self.g('max_tilt_deg'):
+            return None
         return {'colour': colour, 'centre_px': centre_px[0].tolist(), 'ray_cam': c, 'area_px': area * ds * ds,
                 'white_frac': round(white_frac, 3), 'solidity': round(solidity, 3), 'aspect': round(aspect, 2),
-                'score': area * solidity, 'hull_small': hull}
+                'white_rim': round(white_rim, 3), 'score': area * solidity * (0.9 + 0.25 * min(1.0, white_rim / 0.35)),
+                'hull_small': hull}
 
     def publish(self, found, m):
         d = found[0]

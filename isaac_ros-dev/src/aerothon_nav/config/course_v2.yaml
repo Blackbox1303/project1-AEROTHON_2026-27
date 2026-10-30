@@ -7,5 +7,5 @@ corridor_nav:
 mission_supervisor:
   ros__parameters:
     takeoff_altitude: 5.0
-    search_altitude: 10.0
+    search_altitude: 9.0     # never above 10 m (airspace, 2026-10-30)
     deliver_altitude: 5.0

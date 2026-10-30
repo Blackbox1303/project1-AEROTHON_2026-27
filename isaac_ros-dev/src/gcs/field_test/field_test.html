@@ -83,8 +83,8 @@ label{font-size:12px;color:var(--muted)}
   <h2>Controls</h2>
   <div class=row><button class=go onclick="cmd('start')">Start on the Jetson</button><button class=stop onclick="cmd('stop')">Stop it</button>
    <button onclick="cmd('status')">Status</button></div>
-  <div class=row><b style="width:84px">Scan</b><button onclick="cmd('detect_qr')">Detect QR codes</button><button onclick="cmd('scan_qr')">Scan QR code</button>
-   <button onclick="cmd('start_qr')">Read START QR</button></div>
+  <div class=row><b style="width:84px">Scan</b><button onclick="cmd('detect_qr')">Detect markers</button><button onclick="cmd('scan_qr')">Scan / match</button>
+   <button onclick="cmd('start_qr')">Read START marker</button></div>
   <div class=row><b style="width:84px"></b><button onclick="cmd('red')">Red zone</button><button onclick="cmd('green')">Green banner</button>
    <button onclick="cmd('blue')">Blue banner</button><button onclick="cmd('obstacle')">Obstacles</button></div>
   <div class=row><b style="width:84px">Walk</b><button class=go onclick="cmd('walk_qr')">QR area search</button><button class=go onclick="cmd('walk_obstacle')">Obstacle nav</button>
@@ -198,7 +198,7 @@ function drawMap(s) {
 }
 
 // the results panel: each check's latest answer -> a verdict word, its colour, the payload read
-const CHECK_NAME = {detect_qr:'Detect QR', scan_qr:'Scan QR (read)', start_qr:'Start QR', walk:'Walk: last board',
+const CHECK_NAME = {detect_qr:'Detect markers', scan_qr:'Scan / match', start_qr:'Start marker', walk:'Walk: last board',
                     red:'Red zone', green:'Green banner', blue:'Blue banner', obstacle:'Obstacles'};
 function verdict(k, r) {
   const t = r.text || '', has = w => t.includes(w);
@@ -206,14 +206,15 @@ function verdict(k, r) {
                t.match(/^(?:QR|board) '([^']*)'/) || [])[1];
   if (!r.ok) return ['FAILED', 'bad', ''];
   if (k === 'detect_qr') { const n = (t.match(/(\d+) board/) || [])[1];
-    return n ? [`${n} QR SEEN`, 'ok', ''] : ['NO QR IN VIEW', 'warn', '']; }
+    return n ? [`${n} SEEN`, 'ok', ''] : ['NONE IN VIEW', 'warn', '']; }
   if (k === 'scan_qr' || k === 'walk') {
-    if (has('no board')) return ['NO QR IN VIEW', 'warn', ''];
+    if (has('no board')) return ['NONE IN VIEW', 'warn', ''];
     if (has('MATCH')) return ['MATCH ✓', 'ok', pay];
-    if (has('not the target') || has('another board')) return ['READ - NOT THE TARGET', 'info', pay];
+    if (has('not the target') || has('another board') || has('another marker')) return ['NOT THE TARGET', 'info', pay];
+    if (has('image unsure') || has('image seen')) return ['UNSURE - come lower', 'warn', ''];
     if (has('NOT decoded') || has('not decoded') || has('unread')) return [has('unsure') ? 'NOT READ - unsure' : 'NOT READ', 'warn', pay];
     if (pay !== undefined) return ['READ', 'info', pay];
-    if (k === 'walk') return [has('seen') ? 'QR SEEN' : has('lost') ? 'QR LOST' : 'board', has('lost') ? 'warn' : 'info', ''];
+    if (k === 'walk') return [has('seen') ? 'SEEN' : has('lost') ? 'LOST' : 'board', has('lost') ? 'warn' : 'info', ''];
     return ['?', '', ''];
   }
   if (k === 'start_qr') return has('set') || has('typed') ? ['SET', 'ok', pay] : ['NOT SET', 'warn', ''];

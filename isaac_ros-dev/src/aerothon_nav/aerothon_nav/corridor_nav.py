@@ -104,8 +104,8 @@ class CorridorNav(Node):
         p('sidestep_lookahead', 0.25)  # m: ... while more than 0.08 m off the altitude_planner's lateral target
         p('goal_ahead', 4.0)
         p('goal_period', 1.0)        # s between goal updates
-        p('min_length', 6.0)         # m before exit detection starts
-        p('max_length', 15.0)        # m (v3 tunnels: 6.7 m)
+        p('min_length', 2.2)         # m before exit detection starts (the supervisor sets 0.6 x the course's length)
+        p('max_length', 8.7)         # m: the 12 ft (3.66 m) tunnels + 5 (2026-10-30; v3: 6.7 m tunnels, 15)
         p('half_width', 1.675)       # m; course v3 tunnels 11 ft (entry_align passes the measured one)
         p('exit_clear', 2.0)         # m of travel with no wall on either side
         p('wall_window', 0.75)       # m along the axis searched for wall cells beside the drone

@@ -33,7 +33,7 @@ Banner detection, on the rectilinear image (a banner is a true quadrilateral the
                     range, and the density of Harris corners of the letters adds confidence
   5. corners        edge lines fitted at full resolution, each corner confirmed by a Harris peak of the banner mask
                     and refined to sub-pixel (cornerSubPix)
-  6. true shape     the banner is --banner-size (11.5 x 1.5 ft, 7.7 : 1): the real aspect of the rectangle the 4
+  6. true shape     the banner is --banner-size (its green field 15.8 : 1, from the 2026-10-30 photo; was 7.7 : 1): the real aspect of the rectangle the 4
                     corners are the perspective image of (known camera matrix, so whatever the viewing angle) must match
                     - this is what rejects bags, boxes and doors with colour + white print. The known size also gives
                     the distance (solvePnP), shown on the label
@@ -489,7 +489,8 @@ def refine_by_lines(quad, how, pts, hull):
 class BannerDetector:
     def __init__(self, args):
         self.a = args
-        self.hsv = {'green': [*args.green_h, args.s_min, args.v_min], 'blue': [*args.blue_h, args.s_min, args.v_min],
+        self.hsv = {'green': [*args.green_h, args.s_min, args.v_min],
+                    'blue': [*args.blue_h, max(args.s_min, args.blue_s_min), args.v_min],   # the sky: S ~100
                     'red': [*args.red_h, args.s_min, args.v_min]}
         self.last_masks = {}
 
@@ -547,6 +548,8 @@ class BannerDetector:
                     d = self.judge(c, mask, img, valid, s, colour)
                     if d is not None:
                         found.append(d)
+                    elif cv2.contourArea(c) > 4 * min_area:
+                        found += self.split(c, mask, img, valid, s, colour, min_area)
         found.sort(key=lambda d: -d['score'])
         kept = []                                             # one detection per banner: the best scoring
         for d in found:
@@ -555,6 +558,27 @@ class BannerDetector:
                        for k in kept):
                 kept.append(d)
         return kept
+
+    def split(self, contour, mask, img, valid, s, colour, min_area):
+        """A blob that is no banner may be a banner joined to something thinner of its colour - the green POLES at the
+        tunnel mouth touch the floor banner (2026-10-30 photo: an L of pole + banner). Opened with growing kernels the
+        thin part goes first; the pieces are judged again (the first size that gives a banner wins)."""
+        blob = np.zeros_like(mask)
+        cv2.drawContours(blob, [contour], -1, 255, -1)
+        blob = cv2.bitwise_and(blob, mask)
+        unit = max(1.0, mask.shape[1] / 640.0)
+        for k in (5, 9, 15, 23, 33):
+            kk = int(k * unit) | 1
+            opened = cv2.morphologyEx(blob, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kk, kk)))
+            got = []
+            for c in cv2.findContours(opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)[0]:
+                if cv2.contourArea(c) >= min_area:
+                    d = self.judge(c, opened, img, valid, s, colour)
+                    if d is not None:
+                        got.append(d)
+            if got:
+                return got
+        return []
 
     def judge(self, contour, mask_small, img, valid, s, colour):
         a = self.a
@@ -604,13 +628,20 @@ class BannerDetector:
         if solid < 0.3:
             return None
         white, white_frac, corner_density = None, 0.0, 0.0
+        v_col = float(np.median(crop_hsv[..., 2][col > 0]))
+        # the thin WHITE BORDER round the banner (course 2026-10-30): white in a band just outside the quad - evidence
+        # only (a far banner's border is under a pixel, a cut-off one is half missing), never a reason to reject
+        band = max(2, int(round(0.12 * short * s)))
+        ring = cv2.subtract(cv2.dilate(inside, np.ones((2 * band + 1, 2 * band + 1), np.uint8)), inside)
+        rim = cv2.bitwise_and(cv2.inRange(crop_hsv, (0, 0, int(max(a.v_min, 0.9 * v_col))), (180, a.white_s_max, 255)),
+                              ring)
+        white_rim = cv2.countNonZero(rim) / max(1, cv2.countNonZero(ring))
         if not a.with_letters:
             # plain banner: its colour fills it (the fitted quad's rim may catch a little background)
             if solid < a.min_solid:
                 return None
         else:
             # white letters: unsaturated and not darker than text_v_ratio x the banner colour (in shade they go grey)
-            v_col = float(np.median(crop_hsv[..., 2][col > 0]))
             white = cv2.inRange(crop_hsv, (0, 0, int(a.text_v_ratio * v_col)), (180, a.white_s_max, 255))
             white = cv2.bitwise_and(white, inside)
             white_frac = cv2.countNonZero(white) / n_in
@@ -651,11 +682,13 @@ class BannerDetector:
             surface = min(1.0, solid / 0.95)
         shape = 1.0 if ratio is None or partial else \
             max(0.0, 1 - abs(math.log(ratio / nominal)) / math.log(a.aspect_tol))
-        conf = fill * surface * (0.8 + 0.05 * n_harris) * (0.7 + 0.3 * shape) * (0.7 if partial else 1.0)
+        conf = fill * surface * (0.8 + 0.05 * n_harris) * (0.7 + 0.3 * shape) * (0.7 if partial else 1.0) * \
+            (0.9 + 0.25 * min(1.0, white_rim / 0.35))         # a white border seen: up to +12 %
         area = cv2.contourArea(quad)
         return {'colour': colour, 'quad': quad, 'centre': quad.mean(axis=0), 'area': area, 'aspect': aspect,
                 'fill': fill, 'solid': solid, 'white_frac': white_frac, 'corners_per_kpx': corner_density,
                 'partial': partial, 'harris_corners': n_harris, 'true_aspect': ratio, 'distance_m': dist,
+                'white_rim': round(white_rim, 3),
                 'conf': float(np.clip(conf, 0, 1)), 'score': float(np.clip(conf, 0, 1)) * math.sqrt(area), 'fit': how}
 
     def text_corners(self, crop, inside, short):
@@ -962,8 +995,11 @@ def parse_args(argv=None):
     g.add_argument('--interp', choices=('auto', 'cubic', 'linear'), default='auto',
                    help='remap interpolation; auto = cubic on the GPU (VPI), linear on the CPU')
     g = p.add_argument_group('detection')
-    g.add_argument('--green-h', type=int, nargs=2, default=[38, 90], metavar=('LO', 'HI'), help='OpenCV hue 0-180')
+    g.add_argument('--green-h', type=int, nargs=2, default=[68, 92], metavar=('LO', 'HI'),
+                   help='OpenCV hue 0-180 (the real banner H 81-86 teal green, grass H 19-46: 2026-10-30 photo)')
     g.add_argument('--blue-h', type=int, nargs=2, default=[95, 135], metavar=('LO', 'HI'))
+    g.add_argument('--blue-s-min', type=int, default=140,
+                   help='blue only: the sky is H ~106, S ~96-113 (2026-10-30 photo) - a printed banner is far more saturated')
     g.add_argument('--red-h', type=int, nargs=2, default=[170, 8], metavar=('LO', 'HI'),
                    help='LO > HI: round hue 0 (H >= LO or H <= HI)')
     g.add_argument('--ground-suppress', action='store_true',
@@ -978,8 +1014,9 @@ def parse_args(argv=None):
                    help='width of the working copy for masking / contours (1/2 scale: banners ~20 m away still ~7 px)')
     g.add_argument('--min-area-frac', type=float, default=0.0002, help='smallest banner, fraction of the image area')
     g.add_argument('--min-fill', type=float, default=0.72, help='blob area / fitted quadrilateral area')
-    g.add_argument('--banner-size', type=float, nargs=2, default=[11.5, 1.5], metavar=('W', 'H'),
-                   help='banner size in feet (default %(default)s): its true aspect is checked, its distance shown')
+    g.add_argument('--banner-size', type=float, nargs=2, default=[11.5, 0.73], metavar=('W', 'H'),
+                   help='ft: the banner coloured field (the white border not counted). The real one (photo 2026-10-30, '
+                        'face-on): 15.8 : 1 - the old 11.5 x 1.5 ft (7.7 : 1) rejected it')
     g.add_argument('--aspect-tol', type=float, default=1.4,
                    help='true aspect may be off by this factor either way (corner noise on small / far banners)')
     g.add_argument('--min-partial-aspect', type=float, default=3.5,

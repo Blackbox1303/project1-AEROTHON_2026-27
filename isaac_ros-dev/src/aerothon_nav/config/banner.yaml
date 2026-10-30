@@ -10,19 +10,19 @@ banner_detector:
     image_topic: /camera/color/image_raw
     info_topic: /camera/color/camera_info
     downscale: 2            # 640 x 360 -> 320 x 180 (the 1640 px Arducam used 4)
-    green.h: [55, 82]
-    green.s_min: 160
+    green.h: [68, 92]       # the real banner (photo 2026-10-30, sun): H 81-86, S 160-237, V 194-205 - teal green; the
+    green.s_min: 110        # grass H 19-46: 0 % in. 55-82 (the sim's) took only 19 % of the real banner
     green.v_min: 30
     orange.h: [7, 24]
     orange.s_min: 160
     orange.v_min: 50
-    blue.h: [100, 125]      # v3: blue = the tunnel NOT to fly into (entry tunnel seen from the zone, exit from the start)
+    blue.h: [100, 125]      # 2026-10-30: blue = the EXIT tunnel seen from the QR / marker area (v3: the other one)
     blue.s_min: 160
     blue.v_min: 30
     white.s_max: 100        # letters: less saturated than this ...
     text_v_ratio: 0.85      # ... and at least this x the banner colour's brightness (grey in shade)
     min_area: 40            # px at 1/downscale (a 3.5 m banner 15 m off: ~54 x 5 px)
     min_solidity: 0.75
-    white_min: 0.03
+    white_min: 0.0          # 2026-10-30: the real banners are plain (thin white border, no letters); 0.03 = letters
     white_max: 0.5
     min_aspect: 1.5

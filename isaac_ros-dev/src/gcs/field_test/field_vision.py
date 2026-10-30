@@ -44,7 +44,7 @@ WS = SRC.parent
 for p in (HERE, SRC / 'aerothon_nav', SRC / 'vio_bringup/calibration'):
     sys.path.insert(0, str(p))
 import field_proto as fp                                  # noqa: E402
-from aerothon_nav import qr_match, qr_tools               # noqa: E402
+from aerothon_nav import aruco_match, aruco_tools, qr_match, qr_tools   # noqa: E402
 from aerothon_nav.fisheye import Fisheye                  # noqa: E402
 
 DATA = WS / 'runs/field_test'
@@ -52,7 +52,10 @@ EARTH = 6378137.0
 SEARCH_ALT, DROP_ALT, SCAN_FLOOR, STEP = 10.0, 5.0, 5.5, 0.5   # m: the mission's QR area heights
 CLIMB = 0.5                                                   # m/s the virtual height changes at
 RED = {'h1': (0, 10), 'h2': (170, 180), 's': 100, 'v': 70, 'ang': 60.0}   # delivery_mapper red_*
-BANNER = {'green': ((55, 82), 160, 30), 'blue': ((100, 125), 160, 30)}   # banner_detector (h, s_min, v_min)
+BANNER = {'green': ((68, 92), 100, 30), 'blue': ((100, 125), 140, 30)}   # (h, s_min, v_min): the real green banner
+#                                                                            is H 81-86 (teal), grass H 19-46, the sky
+#                                                                            H ~106 S ~100 (blue s_min 140); the real camera's
+#                                                                            colours are paler than the sim's (s 160)
 
 
 def wrap(d):
@@ -209,10 +212,22 @@ class Eyes:
         dist = carry_h * math.tan(math.radians(min(off, 80.0)))
         return math.degrees(math.atan2(right, fwd)), off, dist
 
-    # QR boards
+    # QR boards / ArUco markers
     def boards(self, img, conf=0.45):
-        """[{poly, conf, c}]: WeChat's detector on the whole frame (boards carried over: big) + 1/2-scale tiles."""
+        """[{poly, conf, c}]: WeChat's detector on the whole frame (boards carried over: big) + 1/2-scale tiles;
+        --marker aruco: the marker-like squares on undistorted views (aruco_match, as qr_locator: nothing read)."""
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        if self.a.marker == 'aruco':
+            keep = []
+            for ray in aruco_tools.view_rays(55.0, 5):
+                view, meta = self.lens.rectify_patch(gray, ray_d=ray, fov_deg=100.0 if ray is None else 90.0,
+                                                     zoom_scale=1.0, max_size=1100)
+                for q in aruco_match.marker_quads(view):
+                    px = self.lens.patch_px_to_fisheye_px(q, meta)
+                    c = px.mean(axis=0)
+                    if np.isfinite(px).all() and all(np.linalg.norm(k['c'] - c) > 20 for k in keep):
+                        keep.append({'poly': px, 'conf': round(aruco_match.sharpness(view, q), 2), 'c': c})
+            return gray, keep
         found = [(c, p) for c, p in self.net.boxes(gray, conf=conf)]
         half = cv2.resize(gray, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
         found += [(c, p * 2.0) for c, p in self.net.scan(half, conf=conf, multi_scale=False)]
@@ -233,7 +248,10 @@ class Eyes:
         return p
 
     def decode_board(self, gray, poly):
-        """-> (payload, how) or (None, ''): WeChat, then the decoder settings (qr_match.variants), then zbar."""
+        """-> (payload, how) or (None, ''): WeChat, then the decoder settings (qr_match.variants), then zbar. ArUco:
+        never read (matched by image)."""
+        if self.a.marker == 'aruco':
+            return None, ''
         p = self.patch(gray, poly)
         for name, img in qr_match.variants(p):
             hit = qr_tools.wechat_decode(self.wc, img)
@@ -255,7 +273,14 @@ class Eyes:
         return gray[int(max(0, y0 - my)):int(min(h, y1 + my)), int(max(0, x0 - mx)):int(min(w, x1 + mx))]
 
     def signature(self, gray, poly):
-        return qr_match.signature(self.patch(gray, poly))
+        p = self.patch(gray, poly)
+        if self.a.marker != 'aruco':
+            return qr_match.signature(p)
+        qs = aruco_match.marker_quads(p)              # the marker in the straightened patch, nearest its centre
+        if not qs:
+            return None
+        h, w = p.shape[:2]
+        return aruco_match.signature(p, min(qs, key=lambda q: np.hypot(*(q.mean(axis=0) - [w / 2, h / 2]))))
 
     # red zone
     def cone(self, w, h, ang):
@@ -294,14 +319,26 @@ class Eyes:
 
     # banners (D435 colour)
     def banners(self, img, colour, k):
-        """banner_detector's rule (colour blob, solid, white text inside, elongated) on the D435 colour."""
+        """The course banners (2026-10-30: plain green entry / blue exit, a thin white border) on the D435 colour: a
+        solid colour blob, elongated; the white border round it adds confidence (evidence only: thin or far, it's
+        missing), letters inside are allowed (the sim's lettered ones) but not needed."""
         (h_lo, h_hi), s_min, v_min = BANNER[colour]
         ds = 2
         small = cv2.resize(img, (img.shape[1] // ds, img.shape[0] // ds), interpolation=cv2.INTER_AREA)
         mask = cv2.inRange(cv2.cvtColor(small, cv2.COLOR_BGR2HSV), (h_lo, s_min, v_min), (h_hi, 255, 255))
         joined = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
         found = []
-        for c in cv2.findContours(joined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]:
+        blobs = list(cv2.findContours(joined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0])
+        for c in list(blobs):                     # a banner joined to a pole of its colour (the green poles at the
+            if cv2.contourArea(c) < 400:          # mouth touch the doormat): its pieces once the thin part is opened away
+                continue
+            blob = np.zeros_like(joined)
+            cv2.drawContours(blob, [c], -1, 255, -1)
+            for kk in (9, 15):
+                blobs += [p for p in cv2.findContours(cv2.morphologyEx(
+                    cv2.bitwise_and(blob, joined), cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kk, kk))),
+                    cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0] if cv2.contourArea(p) >= 40]
+        for c in blobs:
             area = cv2.contourArea(c)
             if area < 40:
                 continue
@@ -319,9 +356,12 @@ class Eyes:
             white = cv2.inRange(crop, (0, 0, int(0.85 * v_col)), (180, 100, 255))
             n_white = cv2.countNonZero(cv2.bitwise_and(white, hm))
             solidity, wf = (n_col + n_white) / n_hull, n_white / n_hull
-            (_, _), (rw, rh), _ = cv2.minAreaRect(hull)
+            (_, _), (rw, rh), ang = cv2.minAreaRect(hull)
             aspect = max(rw, rh) / max(1e-6, min(rw, rh))
-            ok = solidity >= 0.75 and 0.03 <= wf <= 0.5 and aspect >= 1.5
+            tilt = abs(((ang if rw >= rh else ang + 90.0) + 90.0) % 180.0 - 90.0)   # long side from level: a pole ~90
+            ring = cv2.subtract(cv2.dilate(hm, np.ones((7, 7), np.uint8)), hm)    # just outside the hull
+            rim = cv2.countNonZero(cv2.bitwise_and(white, ring)) / max(1, cv2.countNonZero(ring))
+            ok = solidity >= 0.75 and wf <= 0.5 and aspect >= 4.0 and tilt <= 35.0   # the real ones: 15 : 1 face-on
             m = cv2.moments(hull)
             cx, cy = m['m10'] / m['m00'] * ds, m['m01'] / m['m00'] * ds
             fx, fy, kx, ky = k or (img.shape[1] * 0.9, img.shape[1] * 0.9, img.shape[1] / 2, img.shape[0] / 2)
@@ -329,7 +369,8 @@ class Eyes:
             found.append({'ok': ok, 'az': round(math.degrees(math.atan2(cx - kx, fx))),
                           'el': round(-math.degrees(math.atan2(cy - ky, fy))), 'area': round(share, 2),
                           'white': round(wf, 2), 'solid': round(solidity, 2), 'aspect': round(aspect, 1),
-                          'score': area * solidity, 'hull': (hull * ds).tolist()})
+                          'rim': round(rim, 2), 'score': area * solidity * (0.9 + 0.25 * min(1.0, rim / 0.35)),
+                          'hull': (hull * ds).tolist()})
         found.sort(key=lambda d: (not d['ok'], -d['score']))
         return found
 
@@ -625,17 +666,21 @@ class App:
                 if s >= self.a.match_hi:
                     return 'match', f'MATCH by image ({s:.2f})'
             return 'read', 'no start QR to compare'
+        aruco = self.a.marker == 'aruco'              # matched by image only, the mission's thresholds
+        sim, hi, lo = ((aruco_match.similarity, self.a.aruco_hi, self.a.aruco_lo) if aruco else
+                       (qr_match.similarity, self.a.match_hi, self.a.match_lo))
+        pre, other = ('', 'another marker') if aruco else ('unread, ', 'another board')
         if st['sig'] is None:
-            return 'unsure', 'unread, no start QR image to compare'
-        sc = sorted(qr_match.similarity(st['sig'], x) or -1.0 for x in o['sigs'])
+            return 'unsure', f'{pre}no start {"marker" if aruco else "QR"} image to compare'
+        sc = sorted(sim(st['sig'], x) or -1.0 for x in o['sigs'])
         if len(sc) < 3:
-            return 'unsure', f'unread, image seen {len(sc)}x (needs 3)'
+            return 'unsure', f'{pre}image seen {len(sc)}x (needs 3)'
         s = float(np.median(sc[-3:]))
-        if s >= self.a.match_hi:
-            return 'match', f'unread, image MATCH ({s:.2f})'
-        if s <= self.a.match_lo:
-            return 'different', f'unread, image of another board ({s:.2f})'
-        return 'unsure', f'unread, image unsure ({s:.2f})'
+        if s >= hi:
+            return 'match', f'{pre}image MATCH ({s:.2f})'
+        if s <= lo:
+            return 'different', f'{pre}image of {other} ({s:.2f})'
+        return 'unsure', f'{pre}image unsure ({s:.2f})'
 
     def do_scan_qr(self):
         if self.ard.latest() is None:
@@ -649,7 +694,8 @@ class App:
             parts = []
             for o in res:
                 verdict, why = self.judge(o)
-                read = f'read {o["payload"]!r} ({o["how"]})' if o['payload'] is not None else 'NOT decoded'
+                read = f'read {o["payload"]!r} ({o["how"]})' if o['payload'] is not None else \
+                    'marker' if self.a.marker == 'aruco' else 'NOT decoded'
                 tip = (f' -> height down to {DROP_ALT:g} m and lower the payload' if verdict == 'match' else
                        f' -> height down {STEP:g} m and read again (not below {SCAN_FLOOR:g} m)'
                        if verdict == 'unsure' else '')
@@ -707,12 +753,12 @@ class App:
         if good:
             b = good[0]
             turn = 'ahead' if abs(b['az']) < 5 else f'{abs(b["az"])} deg {"right" if b["az"] > 0 else "left"}'
-            msg = (f'{colour} banner FOUND {turn}, {b["el"]:+d} deg up/down, {b["area"]} % of the view (text '
-                   f'{b["white"]}, solid {b["solid"]}, aspect {b["aspect"]})')
+            msg = (f'{colour} banner FOUND {turn}, {b["el"]:+d} deg up/down, {b["area"]} % of the view (white border '
+                   f'{"seen" if b["rim"] >= 0.2 else "not seen"} {b["rim"]}, solid {b["solid"]}, aspect {b["aspect"]})')
         elif bs:
             b = bs[0]
-            msg = (f'{colour}: colour seen but not a banner (text {b["white"]} needs 0.03-0.5, solid {b["solid"]} '
-                   f'>= 0.75, aspect {b["aspect"]} >= 1.5)')
+            msg = (f'{colour}: colour seen but not a banner (solid {b["solid"]} needs >= 0.75, aspect {b["aspect"]} '
+                   f'>= 4 and level, white inside {b["white"]} <= 0.5)')
         else:
             msg = f'{colour} banner: none in the D435 view'
         self.last[colour] = msg
@@ -1220,6 +1266,10 @@ def main():
     ap.add_argument('--read-frames', type=int, default=5, help='frames of the deep read (the mission: 5)')
     ap.add_argument('--match-hi', type=float, default=0.80, help='image match >= this: the start QR (qr_locator)')
     ap.add_argument('--match-lo', type=float, default=0.50, help='image match <= this: another board')
+    ap.add_argument('--marker', default=os.environ.get('AEROTHON_MARKER', 'aruco'), choices=('aruco', 'qr'),
+                    help='the boards: ArUco markers matched by image (the course since 2026-10-30), or QR codes')
+    ap.add_argument('--aruco-hi', type=float, default=0.80, help='ArUco image match >= this: the start marker')
+    ap.add_argument('--aruco-lo', type=float, default=0.65, help='ArUco image match <= this: another marker')
     ap.add_argument('--lower-s', type=float, default=8.0, help='s the winch takes (the walk-through only)')
     ap.add_argument('--clear-m', type=float, default=1.5, help='m: an obstacle further than this is no obstacle')
     ap.add_argument('--period', type=float, default=0.3, help='s per guidance step')

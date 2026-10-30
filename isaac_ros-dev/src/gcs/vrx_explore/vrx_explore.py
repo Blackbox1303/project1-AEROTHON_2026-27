@@ -28,8 +28,12 @@ Lens (--lens): the analog camera is a B19 (2.1 mm, rated ~130 deg diagonal - ret
 equidistant (fisheye) model fitted to that rating projects pixels to the ground (marker positions, red votes,
 coverage) and ArUco markers are found on undistorted gnomonic views of the frame. --lens pinhole = the old
 --fov-deg pinhole projection. A checkerboard calibration of the real unit should replace the rated FOV.
-ArUco delivery (--marker aruco, default the AEROTHON_MARKER environment variable): the boards carry ArUco markers
-3x3 .. 6x6 (aerothon_nav.aruco_tools, payload e.g. '4X4#23') instead of QR codes; everything after the read is the same.
+ArUco delivery (--marker aruco, default the AEROTHON_MARKER environment variable; user, 2026-10-30: the course has ArUco
+markers only, MATCHED by image, never read): the start marker's image is kept at take-off (aerothon_nav.aruco_match);
+every marker-like square in the video is compared with it - crisp and >= --aruco-hi the target, crisp and <=
+--aruco-lo another marker ('<marker>'), else (blurry / between) a candidate the drone hovers over for the deep read:
+every camera setting (virtual focal length / zoom, FOV, resolution: aruco_match.SETTINGS) x filter (gamma = exposure,
+CLAHE, sharpen, denoise) per frame, the median of the best 3 frames; unsure / too blurry -> 0.5 m lower and again.
 QR AREA (user, 2026-10-28, as the 8080 dashboard): GPS slots arena 4 + QR area 4 + extra 2 (/api/zone_gps), through
 the autopilot's GPS origin; the QR area given, or the arena with its front wall = the line through the take-off point
 parallel to the back wall (the drone is carried into the QR area). Routes never leave it (A* keep-in; home +-2 m).
@@ -59,8 +63,14 @@ from aiohttp import web
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / 'laptop_vrx'))
 import laptop_vrx_mission as base  # noqa: E402
+
+# hand over to the RC pilot (user, 2026-10-30): ArduCopter custom modes for MAV_CMD_DO_SET_MODE; the explorer stops
+HANDOVER = {'loiter': 5, 'poshold': 16, 'alt_hold': 2, 'stabilize': 0, 'brake': 17}
+MAX_ALT = 9.5                  # m: the airspace rule there - never above 10 m (user, 2026-10-30); margin for overshoot
+PILOT_MODES = {'STABILIZE', 'ALT_HOLD', 'LOITER', 'POSHOLD', 'BRAKE', 'ACRO', 'SPORT', 'DRIFT', 'FLOWHOLD', 'ZIGZAG',
+               'MANUAL', 'STABILIZED', 'ALTCTL', 'POSCTL', 'RATTITUDE'}   # seen in flight: the pilot has the drone
 sys.path.insert(0, str(HERE.parents[1] / 'aerothon_nav'))
-from aerothon_nav import aruco_tools, qr_area, qr_match  # noqa: E402
+from aerothon_nav import aruco_match, aruco_tools, qr_area, qr_match  # noqa: E402
 from aerothon_nav.fisheye import Fisheye  # noqa: E402
 LENS_DFOV = {'b19': 130.0}   # rated diagonal FOV, deg
 
@@ -124,8 +134,8 @@ def video_devices():
 class ExploreMap:
     """Grid over the zone: explored, red (camera votes + drawn rectangles), planning, frontiers."""
 
-    def __init__(self, zone, home, res=0.2, red_margin=0.5, min_red_votes=3, red_share=0.5):
-        self.res, self.red_margin = res, red_margin
+    def __init__(self, zone, home, res=0.2, red_margin=0.5, min_red_votes=3, red_share=0.5, start_r=2.5):
+        self.res, self.red_margin, self.start_r = res, red_margin, start_r
         self.min_red_votes, self.red_share = min_red_votes, red_share
         self.set_zone(zone, home)
 
@@ -158,6 +168,11 @@ class ExploreMap:
         hm = np.zeros((self.h, self.w), np.uint8)
         cv2.circle(hm, self.cell(hx, hy), int(2.0 / self.res), 1, -1)
         self.keep = self.in_zone | hm.astype(bool)
+        # the START ZONE is red (course 2026-10-30): the drone takes off from it and lands back on it - the camera's
+        # red votes within start_r of the take-off point are not a red zone (a rectangle drawn there still is)
+        sm = np.zeros((self.h, self.w), np.uint8)
+        cv2.circle(sm, self.cell(hx, hy), int(round(self.start_r / self.res)), 1, -1)
+        self.start = sm.astype(bool)
         self.ver = 0
 
     def cell(self, x, y):
@@ -196,7 +211,7 @@ class ExploreMap:
 
     def red(self):
         cam = (self.red_votes >= self.min_red_votes) & (self.red_votes >= self.red_share * np.maximum(self.seen, 1))
-        return cam | self.drawn
+        return (cam & ~self.start) | self.drawn
 
     def blocked(self, margin=None):
         red = self.red().astype(np.uint8)
@@ -319,11 +334,12 @@ class VrxExplore(base.VrxDeliverySystem):
         super().__init__(argparse.Namespace(qgc=a.qgc, wechat_dir=a.wechat_dir, vrx=a.video, fov_deg=a.fov_deg,
                                             start_qr='', radio=a.link))
         self.a = a
+        a.alt = min(a.alt, MAX_ALT)                # the airspace rule: never above 10 m
         self.alt = a.alt
         self.search_alt = self.takeoff_alt = a.alt              # ground projection fallback on the bench
         self.vmax = a.speed
         self.zone_enu = tuple(a.zone)
-        self.map = ExploreMap(self.zone_enu, (0.0, 0.0), res=a.res, red_margin=a.red_margin)
+        self.map = ExploreMap(self.zone_enu, (0.0, 0.0), res=a.res, red_margin=a.red_margin, start_r=a.start_zone_r)
         self.map_png, self.map_ver = None, -1
         self.goal = None          # {'x', 'y', 'kind'}
         self.path = []
@@ -345,8 +361,8 @@ class VrxExplore(base.VrxDeliverySystem):
         self.gf = {'arena': [], 'qr': [], 'extra': []}   # the GPS slots typed on the page
         self.template, self.templates = None, []         # the start QR's image (qr_match.signature)
         if a.marker == 'aruco':
-            self.aruco = aruco_tools.Detector(raw=False)   # a 4x4-6x6 grid off the dictionaries is a misread
-            print('ArUco delivery: markers 3x3 .. 6x6', flush=True)
+            self.aruco = aruco_match                  # matched by image, never read (user, 2026-10-30)
+            print('ArUco delivery: markers matched by IMAGE to the start marker (no id read)', flush=True)
 
     # ---- the lens: equidistant model of the analog camera at the frame's size
     def lens(self, w, h):
@@ -380,49 +396,68 @@ class VrxExplore(base.VrxDeliverySystem):
         k = zu / (-rays_enu[:, 2])
         return np.array([xe, yn]) + rays_enu[:, :2] * k[:, None], cos_nadir ** 4
 
-    # ---- ArUco boards: the start scan and the full-frame pass use _decode_patch; frames go straight to the detector
-    def aruco_read(self, img):
-        """{payload: corners in frame pixels}: on undistorted views through the lens model, else the raw frame."""
+    # ---- ArUco boards: matched by image (aruco_match), never read
+    def aruco_views(self, img):
+        """[(view, to-frame-px function)]: undistorted views through the lens model (100 deg down + 5 x 90 deg tilted
+        55 deg), else the raw frame."""
         cam = self.lens(img.shape[1], img.shape[0])
         if cam is None:
-            return dict(self.aruco.detect(img))
-        return aruco_tools.detect_fisheye(self.aruco, img, cam, max_size=720)
+            return [(img, lambda q: q)]
+        out = []
+        for ray in aruco_tools.view_rays(55.0, 5):
+            view, meta = cam.rectify_patch(img, ray_d=ray, fov_deg=100.0 if ray is None else 90.0, zoom_scale=1.0,
+                                           max_size=720)
+            out.append((view, lambda q, meta=meta: cam.patch_px_to_fisheye_px(q, meta)))
+        return out
+
+    def aruco_seen(self, img):
+        """[(frame px quad, score vs the start marker or None, sharpness, side px in the view)]: one per marker (the
+        crisper view)."""
+        am, seen = self.aruco, []
+        for view, to_px in self.aruco_views(img):
+            for q in am.marker_quads(view, min_px=8.0):
+                px = to_px(q)
+                if not np.isfinite(px).all():
+                    continue
+                c, side = px.mean(axis=0), am.side_px(px)
+                score = am.similarity(self.template, am.signature(view, q)) if self.template is not None else None
+                sharp = am.sharpness(view, q)
+                k = next((k for k, o in enumerate(seen) if np.linalg.norm(o[0].mean(axis=0) - c) < side / 2), None)
+                if k is None:
+                    seen.append((px, score, sharp, am.side_px(q)))
+                elif sharp > seen[k][2]:
+                    seen[k] = (px, score, sharp, am.side_px(q))
+        return seen
 
     def _decode_patch(self, img):
         if self.aruco is None:
             return super()._decode_patch(img)
-        return self.aruco_read(img)
+        return {}                                     # nothing is read: see aruco_seen
 
     def process_vrx_frame(self, gray, pose_now, rpy_now, now):
         if self.aruco is None:
             return super().process_vrx_frame(gray, pose_now, rpy_now, now)
         h, w = gray.shape[:2]
-        found = self.aruco_read(gray)
-        for payload, poly in found.items():
-            g_pts, weight = self.pixel_to_ground_enu(np.vstack([poly.mean(axis=0), poly]), w, h, pose_now, rpy_now)
+        am, target = self.aruco, self.start_qr or aruco_match.IMAGE_ONLY
+        found, boxes = {}, []
+        for px, score, sharp, side in self.aruco_seen(gray):
+            g_pts, weight = self.pixel_to_ground_enu(np.vstack([px.mean(axis=0), px]), w, h, pose_now, rpy_now)
+            verdict = am.classify(score, sharp, side, self.a.aruco_hi, self.a.aruco_lo)
+            if verdict == 'match':
+                payload = target
+            elif verdict == 'different':
+                payload = '<marker>'
+            else:                                     # blurry / between: hover over it for the deep read
+                if g_pts is not None:
+                    self.add_candidate(float(g_pts[0, 0]), float(g_pts[0, 1]), conf=0.5, now=now)
+                boxes.append((0.5, px, f'marker, unsure {score:.2f}' if score is not None else 'marker'))
+                continue
+            boxes.append((1.0, px, 'TARGET (image match)' if payload == target else 'marker: not the target'))
+            found[payload if payload == target else f'<marker {len(found)}>'] = px
             if g_pts is not None:
                 corners = g_pts[1:]
                 self.add_qr_detection(payload, (float(g_pts[0, 0]), float(g_pts[0, 1])),
                                       [*corners.min(axis=0), *corners.max(axis=0)], weight, now, pose_now)
-        # boards seen but not read (far / blurred / at the frame edge): the detector's own square candidates that are
-        # board-like (contrasty, not inside a read marker) - the batches go by these, as the QR candidates
-        boxes = [(1.0, poly, payload) for payload, poly in found.items()]
-        for q in self.aruco._candidates(gray):
-            q = q.reshape(4, 2).astype(np.float64)
-            c = q.mean(axis=0)
-            side = float(np.mean(np.linalg.norm(q - np.roll(q, 1, axis=0), axis=1)))
-            if side < 8 or any(cv2.pointPolygonTest(p.astype(np.float32), (float(c[0]), float(c[1])), True) > -side
-                               for p in found.values()):
-                continue
-            x0, y0 = np.maximum(q.min(axis=0).astype(int), 0)
-            x1, y1 = q.max(axis=0).astype(int) + 1
-            patch = gray[y0:y1, x0:x1]
-            if patch.size < 16 or float(patch.std()) < self.a.cand_std:
-                continue
-            g_pts, _ = self.pixel_to_ground_enu(np.vstack([c, q]), w, h, pose_now, rpy_now)
-            if g_pts is not None:
-                self.add_candidate(float(g_pts[0, 0]), float(g_pts[0, 1]), conf=0.5, now=now)
-                boxes.append((0.5, q, 'board, not read'))
         return found, boxes, []
 
     def add_candidate(self, cx, cy, conf, now):
@@ -532,6 +567,11 @@ class VrxExplore(base.VrxDeliverySystem):
             ok = self.tel.get('armed') and self.tel.get('mode') == self.offboard_name
             bad_since = None if ok else (bad_since or time.monotonic())
             if bad_since and time.monotonic() - bad_since > 1.5 and not self.abort_reason:
+                if self.tel.get('armed') and self.tel.get('mode') in PILOT_MODES:
+                    # the RC pilot's mode switch / a hand-over button: the failsafe must not put BRAKE / LAND over it
+                    self.offboard_active = False
+                    self.abort_reason = f'operator took over: {self.tel.get("mode")}'
+                    continue
                 self.abort_reason = (f'left {self.offboard_name} (now {self.tel.get("mode")}'
                                      f'{", disarmed" if not self.tel.get("armed") else ""})')
 
@@ -559,9 +599,10 @@ class VrxExplore(base.VrxDeliverySystem):
         super()._update_qr_status(q)
         q['in_zone'] = self.in_zone(q['x'], q['y'])          # the QR area polygon, not its bounding box
         q['status'] = 'found' if q['confirmed'] else 'reading'
-        if (self.start_qr and q['payload'] != self.start_qr and q['payload'] not in self.rejects
+        key = q['payload'] if q['payload'] != '<marker>' else f'<marker {round(q["x"] / 3)},{round(q["y"] / 3)}>'
+        if (self.start_qr and q['payload'] != self.start_qr and key not in self.rejects
                 and q.get('in_zone') and self.mission_running and self.in_flight):
-            self.rejects.add(q['payload'])
+            self.rejects.add(key)
             if self.pose and math.dist(self.pose[:2], (q['x'], q['y'])) < self.a.spin_near:
                 self.spin_due = (q['x'], q['y'])
 
@@ -578,14 +619,16 @@ class VrxExplore(base.VrxDeliverySystem):
         opt = np.array([-flu[1], -flu[0], -flu[2]])                       # FLU -> optical (camera straight down)
         if opt[2] < math.cos(math.radians(60.0)):
             return None
-        return [(f'fov{f:g}', cam.rectify_patch(gray, ray_d=opt, fov_deg=f, zoom_scale=k, max_size=400)[0])
-                for f, k in fovs]
+        return [(f'fov{v[0]:g}' if len(v) == 2 else v[0],          # (FOV, zoom) or aruco_match.SETTINGS rows
+                 cam.rectify_patch(gray, ray_d=opt, fov_deg=v[-3] if len(v) == 4 else v[0],
+                                   zoom_scale=v[-2] if len(v) == 4 else v[1], max_size=v[3] if len(v) == 4 else 400)[0])
+                for v in fovs]
 
     def scan_start_qr_here(self, duration=5.0):
         """The base's read + the board's image for the deep read; a board seen but never decoded (no data) ->
         qr_match.IMAGE_ONLY."""
         if self.aruco is not None:
-            return super().scan_start_qr_here(duration)
+            return self.scan_start_aruco(duration)
         self.templates, stop = [], threading.Event()
 
         def grab():
@@ -616,8 +659,80 @@ class VrxExplore(base.VrxDeliverySystem):
             return qr_match.IMAGE_ONLY
         return got
 
+    def scan_start_aruco(self, duration=5.0):
+        """The start marker's IMAGE (no id read): the marker nearest straight down, the crispest x biggest view of
+        duration s kept as the template; start = aruco_match.IMAGE_ONLY. None if no marker was seen twice."""
+        am, views, last = self.aruco, [], None
+        t_end = time.monotonic() + max(duration, 3.0)
+        while time.monotonic() < t_end:
+            if self.abort_reason:
+                raise RuntimeError(self.abort_reason)
+            with self.lock:
+                gray = self.latest_gray
+            if gray is None or gray is last:
+                time.sleep(0.05)
+                continue
+            last = gray
+            v = self.aruco_views(gray)[0][0]          # straight down
+            qs = am.marker_quads(v, min_px=8.0)
+            if qs:
+                h, w = v.shape[:2]
+                q = min(qs, key=lambda q: np.hypot(*(q.mean(axis=0) - [w / 2, h / 2])))
+                sig = am.signature(v, q)
+                if sig is not None:
+                    side = float(np.mean(np.linalg.norm(q - np.roll(q, 1, axis=0), axis=1)))
+                    views.append((am.sharpness(v, q) * side, sig))
+            time.sleep(0.15)
+        if len(views) < 2:
+            return None
+        self.template = max(views, key=lambda t: t[0])[1]
+        with self.lock:
+            self.start_qr = aruco_match.IMAGE_ONLY
+            for q in self.qrs:
+                self._update_qr_status(q)
+        self.log_mission('READ_START_QR', event=f'start marker image kept ({len(views)} views): matching by image')
+        return aruco_match.IMAGE_ONLY
+
+    def deep_read_aruco(self, x, y):
+        """The ArUco deep read over a candidate: every setting x filter per frame, the best score kept."""
+        am = self.aruco
+        scores, sharp, frames, last, how = [], 0.0, 0, None, ''
+        while frames < self.a.verify_rounds:
+            if self.abort_reason:
+                raise RuntimeError(self.abort_reason)
+            with self.lock:
+                gray, pose, rpy = self.latest_gray, self.pose, self.rpy_ned
+            if gray is None or gray is last:
+                time.sleep(0.05)
+                continue
+            last, frames = gray, frames + 1
+            views = self.view_at(gray, x, y, pose, rpy, fovs=am.SETTINGS)
+            best = None
+            for name, patch in views or []:
+                r = am.best_in_patch(patch, self.template, min_px=8.0)
+                if r is not None and (best is None or r[0] > best[0]):
+                    best = (r[0], r[1], f'{name}/{r[2]}')
+            if best is not None:
+                scores.append(best[0])
+                sharp = max(sharp, best[1])
+                how = best[2] if best[0] >= max(scores) else how
+        if self.template is None or len(scores) < 3:
+            return 'unsure' if self.template is None else 'unseen'
+        s = float(np.median(sorted(scores)[-3:]))
+        res = 'unsure' if sharp < am.BLURRY else 'match' if s >= self.a.aruco_hi else \
+            'different' if s <= self.a.aruco_lo else 'unsure'
+        if res == 'match':
+            self.add_board(self.start_qr or am.IMAGE_ONLY, x, y, pose)
+        elif res == 'different':
+            self.add_board('<marker>', x, y, pose)
+        self.log_mission('EXPLORE', event=f'deep read at ({x:.1f}, {y:.1f}): marker {res} ({s:.2f}, sharpness '
+                                          f'{sharp:.2f}, best {how})')
+        return res
+
     def deep_read(self, x, y):
         """Over an unread candidate: -> 'read' | 'match' | 'different' | 'unsure' | 'unseen'."""
+        if self.aruco is not None:
+            return self.deep_read_aruco(x, y)
         scores, frames, last = [], 0, None
         while frames < self.a.verify_rounds:
             if self.abort_reason:
@@ -667,12 +782,13 @@ class VrxExplore(base.VrxDeliverySystem):
             while True:
                 with self.lock:
                     read = any(math.dist((q['x'], q['y']), (x, y)) < 1.5 for q in self.qrs)
-                if read or self.aruco is not None:
+                if read:
                     return
                 res = self.deep_read(x, y)
                 if res in ('read', 'match', 'different'):
                     return
-                if self.alt - self.a.verify_step < self.a.verify_floor - 1e-6:
+                floor = self.a.alt_min if self.aruco is not None else self.a.verify_floor   # ArUco flies at 1 m
+                if self.alt - self.a.verify_step < floor - 1e-6:
                     self.log_mission('EXPLORE', event=f'deep read at ({x:.1f}, {y:.1f}): {res} down to '
                                                       f'{self.alt:.1f} m - giving up on it')
                     return
@@ -1125,7 +1241,7 @@ def make_app(sc):
     async def api(request):
         what = request.match_info['what']
         body = await request.json() if request.can_read_body else {}
-        if sc.a.read_only and what in ('start', 'hop', 'home', 'abort', 'land'):
+        if sc.a.read_only and (what in ('start', 'hop', 'home', 'abort', 'land') or what in HANDOVER):
             return ok(False, 'read-only mode: no commands to the autopilot (restart without --read-only to fly)')
         if what == 'start':
             if sc.mission_running:
@@ -1158,6 +1274,13 @@ def make_app(sc):
             sc.abort_reason = 'operator took over'
             sc.offboard_active = False
             return ok(True, 'mission handed to the operator' if sc.mission_running else 'no mission running')
+        if what in HANDOVER:                          # the pilot takes over (user, 2026-10-30): the mode, no setpoints
+            sc.abort_reason = 'operator took over'
+            sc.offboard_active = False
+            if sc.autopilot != 'ardupilot':
+                return ok(sc.set_px4_mode('AUTO.LOITER'), 'PX4: AUTO.LOITER (the hand-over modes are ArduCopter)')
+            done = sc.mav_cmd(176, 1, HANDOVER[what])
+            return ok(done, f'{what.upper()} {"set - yours now: fly it on the RC" if done else "NOT acknowledged"}')
         if what in ('land', 'kill'):
             sc.abort_reason = f'Operator {what}'
             sc.offboard_active = False
@@ -1171,7 +1294,7 @@ def make_app(sc):
             except (TypeError, ValueError):
                 return ok(False, 'delta: metres, e.g. -0.5')
             lo = sc.a.alt_min if sc.a.marker == 'aruco' else max(sc.a.alt_min, sc.a.verify_floor)   # QR: above the drop
-            new = round(min(sc.a.alt + 3.0, max(lo, sc.alt + delta)), 2)
+            new = round(min(sc.a.alt + 3.0, MAX_ALT, max(lo, sc.alt + delta)), 2)   # never above 10 m (airspace)
             with sc.lock:
                 sc.alt = new
                 if sc.mission_running and sc.offboard_active and sc.setpoint:
@@ -1251,6 +1374,8 @@ def main():
     ap.add_argument('--hop-alt', type=float, default=1.5, help='hop test (take off / hover / land) height, m')
     ap.add_argument('--hop-hold', type=float, default=10.0, help='hop test hover time, s')
     ap.add_argument('--speed', type=float, default=0.5, help='cruise speed, m/s')
+    ap.add_argument('--start-zone-r', type=float, default=2.5,
+                    help='m: the red START zone round the take-off point (taken off from, landed on): no red zone')
     ap.add_argument('--alt-min', type=float, default=0.8, help='m: the operator\'s height trim never goes below this')
     ap.add_argument('--zone', type=float, nargs=4, default=[1.0, 9.0, -4.0, 4.0], metavar=('X0', 'X1', 'Y0', 'Y1'),
                     help='search zone in m from home (ENU: x east, y north)')
@@ -1282,6 +1407,8 @@ def main():
                     'nor the height trim) - 5 m is the drop height, reached only to lower the payload')
     ap.add_argument('--match-hi', type=float, default=0.80, help='image match: >= this the start QR')
     ap.add_argument('--match-lo', type=float, default=0.50, help='image match: <= this another board')
+    ap.add_argument('--aruco-hi', type=float, default=0.80, help='ArUco image match: >= this the start marker')
+    ap.add_argument('--aruco-lo', type=float, default=0.65, help='ArUco image match: <= this another marker')
     ap.add_argument('--qgc', default='127.0.0.1:14550')
     ap.add_argument('--wechat-dir', default='')
     ap.add_argument('--port', type=int, default=8094)

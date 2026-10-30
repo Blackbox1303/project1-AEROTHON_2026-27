@@ -110,7 +110,7 @@ def generate_launch_description():
         DeclareLaunchArgument('course', default_value='v2', description='config/course_<course>.yaml (real timings)'),
         DeclareLaunchArgument('read_angle', default_value='15.0',
                               description="deg off nadir a QR is read at (the real fisheye: see arducam_calib's px/module)"),
-        DeclareLaunchArgument('search_altitude', default_value='10.0', description='m (for the read radius)'),
+        DeclareLaunchArgument('search_altitude', default_value='9.0', description='m (for the read radius; < 10 m airspace)'),
         DeclareLaunchArgument('corridor_impl', default_value='current',
                               description='current | aerothon (corridor nav + VIO from ~/AeroTHON_2026, its container)'),
         SetEnvironmentVariable('FASTRTPS_DEFAULT_PROFILES_FILE', '/workspaces/isaac_ros-dev/fastdds_udp.xml'),

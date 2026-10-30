@@ -13,10 +13,13 @@ Upgraded with the complete `drone_qr_detector` pipeline:
   5. Strict start-QR payload matching: `/delivery/target` (which triggers the `DELIVER` -> `DROP` winch mechanism
      in `mission_supervisor`) is published ONLY when a confirmed QR inside the delivery zone (and outside red zones)
      has `payload == start_qr`.
-  ArUco mission (parameter `marker` 'aruco', default the AEROTHON_MARKER environment variable): the boards carry
-     ArUco markers 3x3 .. 6x6 instead; they're found on undistorted gnomonic views of the fisheye
-     (aruco_tools.detect_fisheye, straight on the sim's pinhole nadir camera) and the payload is e.g. '4X4#23' -
-     everything after the read (ground position, averaging, zone / red checks, the start match) is the same.
+  ArUco mission (parameter `marker` 'aruco', default the AEROTHON_MARKER environment variable; user, 2026-10-30: the
+     course has ArUco markers only and they are MATCHED, never read): marker-like squares on undistorted gnomonic
+     views of the fisheye (straight on the sim's pinhole nadir camera, aruco_match.marker_quads), each one's image vs
+     the start marker's (qr_reader's .sig.npy): crisp (sharpness >= aruco_match.BLURRY) and >= aruco_hi -> the
+     target (payload = the start's, aruco_match.IMAGE_ONLY); crisp and <= aruco_lo -> another marker ('<marker>');
+     else (blurry / between) -> a candidate: the explorer hovers over it and asks the deep read (7).
+     Everything after (ground position, averaging, zone / red checks) is the same.
   7. DEEP READ of a board that won't decode (user, 2026-10-28; frontier_explorer asks while hovering over it:
      /delivery/verify/request {id, x, y} -> /delivery/verify/result {id, result, payload, score, rounds}): for
      verify_rounds frames, virtual cameras of 3 FOV / zooms along the ray to (x, y) x qr_match.variants filters (raw,
@@ -25,6 +28,11 @@ Upgraded with the complete `drone_qr_detector` pipeline:
      match_hi 'match' (added as the start payload -> the target), <= match_lo 'different' (added as a non-target
      board), else 'unsure' / board not found 'unseen' -> the explorer steps down 0.5 m and asks again.
      Start QR without data (payload qr_match.IMAGE_ONLY): decoded boards are image-matched too.
+     ArUco: no decoding - per frame every setting of aruco_match.SETTINGS (virtual camera focal length / zoom, FOV,
+     output resolution) x aruco_match.filters (gamma = exposure, CLAHE, sharpen, denoise), the best score kept;
+     exposure boost ON for the first half of the rounds, OFF for the rest (both exposures tried). Median of the best
+     3 rounds: >= aruco_hi match, <= aruco_lo different, else unsure; never crisp in any round -> unsure 'too
+     blurry' (the explorer comes 0.5 m lower).
   6. Live HTTP QR HUD on port `8091` (`/`, `/annotated.jpg`, `/frame.jpg`, `/status.json`), integrated into the
      main mission dashboard at port `8080`.
 """
@@ -145,6 +153,8 @@ class QrLocator(Node):
         p('match_hi', 0.80)          # image match (median of the best 3 rounds): >= this the start QR (offline: same
         p('match_lo', 0.50)          # board >= 0.82, another <= 0.73 at 10 m); <= match_lo another board; between: unsure
         p('verify_unseen', 12)       # frames without the board before giving up the deep read ('unseen')
+        p('aruco_hi', 0.80)          # ArUco image match: >= the start marker (synthetic: same >= 0.84 down to 22 px a
+        p('aruco_lo', 0.65)          # side, another <= 0.60); <= aruco_lo another marker; between / blurry: unsure
         p('rate_hz', 3.5)
         p('scales', [1.0, 1.5, 0.75])
         p('ground_z', 0.0)
@@ -190,11 +200,11 @@ class QrLocator(Node):
             self.zone = tuple(g('zone'))
         self.aruco = None
         if g('marker') == 'aruco':
-            from aerothon_nav import aruco_tools
+            from aerothon_nav import aruco_match, aruco_tools
             self.aruco_tools = aruco_tools
-            self.aruco = aruco_tools.Detector(raw=False)   # a 4x4-6x6 grid off the dictionaries is a misread
+            self.aruco = aruco_match                  # match by image, never read (user, 2026-10-30)
             self.zbar = self.wc = self.qnet = None
-            self.get_logger().info('ArUco delivery: markers 3x3 .. 6x6 on the undistorted image')
+            self.get_logger().info('ArUco delivery: markers matched by IMAGE to the start marker (no id read)')
         else:
             self.init_qr()
         self.blob_px = (0.0, [], (1, 1))
@@ -385,12 +395,14 @@ class QrLocator(Node):
 
     def on_verify(self, m):
         d = json.loads(m.data)
-        self.verify = {'id': d['id'], 'x': float(d['x']), 'y': float(d['y']), 'round': 0, 'scores': [], 'miss': 0}
+        self.verify = {'id': d['id'], 'x': float(d['x']), 'y': float(d['y']), 'round': 0, 'scores': [], 'miss': 0,
+                       'boost': True}
         self.boost_pub.publish(Bool(data=True))     # exposure up for the deep read (qr_boost: the Arducam node)
         self.get_logger().info(f'deep read {d["id"]} at ({d["x"]:.1f}, {d["y"]:.1f})')
 
-    def board_patches(self, gray, m, source, x, y):
-        """Undistorted views of the ground point (x, y): [(name, patch)], 3 FOV / zooms; None if not in view."""
+    def board_patches(self, gray, m, source, x, y, settings=None):
+        """Undistorted views of the ground point (x, y): [(name, patch)], 3 FOV / zooms (settings: [(name, FOV, zoom,
+        max px)] instead - aruco_match.SETTINGS); None if not in view."""
         fish = source in ('fisheye', 'fisheye_hd')
         try:
             t = self.tf.lookup_transform(self.g('odom_frame'), m.header.frame_id if fish else 'base_link',
@@ -406,6 +418,9 @@ class QrLocator(Node):
         if fish:
             if self.cam is None or r[2] < math.cos(math.radians(75.0)):
                 return None
+            if settings:
+                return [(name, self.cam.rectify_patch(gray, ray_d=r, fov_deg=fov, zoom_scale=z, max_size=px)[0])
+                        for name, fov, z, px in settings]
             return [(f'fov{fov:g}', self.cam.rectify_patch(gray, ray_d=r, fov_deg=fov, zoom_scale=z, max_size=400)[0])
                     for fov, z in ((22.0, 2.5), (14.0, 4.0), (32.0, 1.8))]
         # the sim's pinhole nadir: rays (-(v - H/2) / f, -(u - W/2) / f, -1) (ground_points), inverted
@@ -660,30 +675,120 @@ class QrLocator(Node):
                 self._update_hud_image(gray, {})
                 return
             if self.aruco is not None:
-                found = self.read_aruco(gray, source)
+                found = self.match_aruco(gray, m, source)
             elif self.qnet is not None and (source in ('fisheye_hd', 'nadir_hd') or not self.g('hd_topic')):
                 found = self.on_hd(gray, m, source, now)
             else:
                 found = self.decode(gray)
-            if self.start_qr == qr_match.IMAGE_ONLY and found:
+            if self.start_qr == qr_match.IMAGE_ONLY and found and self.aruco is None:
                 found = self.image_rekey(found, gray, m, source)
             self.use_reads(found, m, source)
-            if self.verify is not None and source in ('fisheye', 'fisheye_hd', 'nadir_hd') and self.aruco is None:
+            if self.verify is not None and source in ('fisheye', 'fisheye_hd', 'nadir_hd'):
                 try:
-                    self.verify_frame(gray, m, source)
+                    (self.verify_aruco if self.aruco is not None else self.verify_frame)(gray, m, source)
                 except Exception as e:
                     self.get_logger().warn(f'deep read: {e!r}', throttle_duration_sec=5.0)
             self._update_hud_image(gray, found)
         finally:
             self.proc_lock.release()
 
-    def read_aruco(self, gray, source):
-        """{payload: corners in this image's pixels}: undistorted views on the fisheye, straight on the nadir."""
-        if source in ('fisheye', 'fisheye_hd'):
-            if self.cam is None:
-                return {}
-            return self.aruco_tools.detect_fisheye(self.aruco, gray, self.cam)
-        return dict(self.aruco.detect(gray))
+    def aruco_views(self, gray, source):
+        """[(view, to-image-px function)]: the fisheye's undistorted views (100 deg down + 5 x 90 deg tilted 55 deg -
+        no gap out to 70 deg off axis), or the pinhole image as it is."""
+        if source not in ('fisheye', 'fisheye_hd'):
+            return [(gray, lambda q: q)]
+        if self.cam is None:
+            return []
+        out = []
+        for ray in self.aruco_tools.view_rays(55.0, 5):
+            view, meta = self.cam.rectify_patch(gray, ray_d=ray, fov_deg=100.0 if ray is None else 90.0,
+                                                zoom_scale=1.0, max_size=1100)
+            out.append((view, lambda q, meta=meta: self.cam.patch_px_to_fisheye_px(q, meta)))
+        return out
+
+    def match_aruco(self, gray, m, source):
+        """[(payload, corners in this image's pixels)] of the markers matched to the start marker's image (see the
+        docstring): the target (the start's payload), '<marker>' (another one); a blurry / unsure one becomes a
+        candidate for the deep read. Nothing is read."""
+        am, tmpl = self.aruco, self.start_template()
+        seen = []                                     # (image px quad, score, sharpness, side in the 1:1 view)
+        for view, to_px in self.aruco_views(gray, source):
+            for q in am.marker_quads(view):
+                px = to_px(q)
+                if not np.isfinite(px).all():
+                    continue
+                c, side = px.mean(axis=0), am.side_px(px)
+                score = am.similarity(tmpl, am.signature(view, q)) if tmpl is not None else None
+                sharp = am.sharpness(view, q)
+                dup = next((k for k, o in enumerate(seen) if np.linalg.norm(o[0].mean(axis=0) - c) < side / 2), None)
+                if dup is None:
+                    seen.append((px, score, sharp, am.side_px(q)))
+                elif sharp > seen[dup][2]:            # the same marker in two views: the crisper one
+                    seen[dup] = (px, score, sharp, am.side_px(q))
+        target = self.start_qr or am.IMAGE_ONLY
+        found = []
+        for px, score, sharp, side in seen:
+            verdict = am.classify(score, sharp, side, self.g('aruco_hi'), self.g('aruco_lo'))
+            if verdict == 'match':
+                found.append((target, px))
+            elif verdict == 'different':
+                found.append(('<marker>', px))
+            elif self.state == 'SEARCHING':          # blurry / between: the explorer comes over it for the deep read
+                pts = self.ground_points(np.vstack([px.mean(axis=0, keepdims=True)]), m, source)
+                if pts is not None:
+                    cx, cy = float(pts[0][0]), float(pts[0][1])
+                    if self.in_zone(cx, cy) and not self.deep_red(cx, cy) and not self.near_decoded(cx, cy):
+                        self.add_cand(cx, cy, conf=round(float(score), 2) if score is not None else None)
+        self.last_boxes_px = [(1.0 if s is None else max(0.0, s), px, None) for px, s, _, _ in seen
+                              if not any(px is f[1] for f in found)]
+        return found
+
+    def verify_aruco(self, gray, m, source):
+        """One round of the ArUco deep read (see the docstring, 7): every camera setting x filter on the marker at the
+        candidate, the best score of the round kept."""
+        v, am = self.verify, self.aruco
+        tmpl = self.start_template()
+        half = self.g('verify_rounds') // 2
+        if v['round'] == half and v.get('boost', True):   # second half: the normal exposure
+            v['boost'] = False
+            self.boost_pub.publish(Bool(data=False))
+        patches = self.board_patches(gray, m, source, v['x'], v['y'], settings=am.SETTINGS)
+        if not patches:
+            v['miss'] += 1
+            if v['miss'] >= self.g('verify_unseen'):
+                self.verify_done('unseen')
+            return
+        if tmpl is None:
+            self.verify_done('unsure', why='no start marker image stored')
+            return
+        best = None
+        for name, patch in patches:
+            r = am.best_in_patch(patch, tmpl)
+            if r is not None and (best is None or r[0] > best[0]):
+                best = (r[0], r[1], f'{name}/{r[2]}')
+        v['round'] += 1
+        if best is not None:
+            v['scores'].append(best[0])
+            v['sharp'] = max(v.get('sharp', 0.0), best[1])
+            if best[0] >= v.get('best', (-1.0,))[0]:
+                v['best'] = best
+        if v['round'] < self.g('verify_rounds'):
+            return
+        if len(v['scores']) < 3:
+            self.verify_done('unseen', why=f'marker found in {len(v["scores"])} of {v["round"]} frames')
+            return
+        s = float(np.median(sorted(v['scores'])[-3:]))
+        how = v['best'][2] if 'best' in v else ''
+        if v.get('sharp', 0.0) < am.BLURRY:
+            self.verify_done('unsure', score=round(s, 3), why=f'too blurry (sharpness {v.get("sharp", 0):.2f})', how=how)
+        elif s >= self.g('aruco_hi'):
+            self.add_board(self.start_qr or am.IMAGE_ONLY, 'image_match')
+            self.verify_done('match', score=round(s, 3), how=how)
+        elif s <= self.g('aruco_lo'):
+            self.add_board('<marker>', 'image_match')
+            self.verify_done('different', score=round(s, 3), how=how)
+        else:
+            self.verify_done('unsure', score=round(s, 3), how=how)
 
     def on_hd(self, gray, m, source, now):
         """Multi-scale QrNet bounding-box search + virtual camera adjustment (`rectify_patch`) + phase-correlated
@@ -802,7 +907,7 @@ class QrLocator(Node):
         return found
 
     def use_reads(self, found, m, source):
-        for payload, poly in found.items():
+        for payload, poly in (found.items() if isinstance(found, dict) else found):
             pts = self.ground_points(np.vstack([poly.mean(axis=0), poly]), m, source)
             if pts is not None and payload == self.start_qr and self.cam_z is not None \
                     and self.cam_z < self.g('fine_height'):
@@ -915,18 +1020,20 @@ class QrLocator(Node):
                 col = (50, 230, 80) if lbl else (255, 190, 0)
                 cv2.polylines(vis, [pts], True, col, 2)
                 p0 = pts.min(axis=0)
-                tag = f'{lbl} ({conf:.2f})' if lbl else f'QR box {conf:.2f} (adjusting scan)'
+                tag = f'{lbl} ({conf:.2f})' if lbl else (f'marker, unsure {conf:.2f}' if self.aruco is not None
+                                                          else f'QR box {conf:.2f} (adjusting scan)')
                 cv2.putText(vis, tag, (int(p0[0]), max(16, int(p0[1]) - 6)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.45, col, 1, cv2.LINE_AA)
 
             # Draw decoded polygons from full frame
-            for payload, poly in found.items():
+            for payload, poly in (found.items() if isinstance(found, dict) else found):
                 pts = (poly * scale).astype(np.int32)
-                match = (self.start_qr and payload == self.start_qr)
+                match = (self.start_qr and payload == self.start_qr) or payload == qr_match.IMAGE_ONLY
                 col = (40, 255, 40) if match else (40, 180, 255)
                 cv2.polylines(vis, [pts], True, col, 2)
                 p0 = pts.min(axis=0)
-                tag = f'TARGET: {payload}' if match else f'QR: {payload}'
+                tag = ('TARGET (image match)' if self.aruco is not None else f'TARGET: {payload}') if match else \
+                    ('marker: not the target' if self.aruco is not None else f'QR: {payload}')
                 cv2.putText(vis, tag, (int(p0[0]), max(18, int(p0[1]) - 8)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 2, cv2.LINE_AA)
 

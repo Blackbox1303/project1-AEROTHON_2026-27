@@ -81,8 +81,9 @@ class FrontierExplorer(Node):
     def __init__(self):
         super().__init__('frontier_explorer')
         p = self.declare_parameter
-        p('altitude', 10.0)          # m: = the supervisor's search_altitude
+        p('altitude', 9.0)           # m: = the supervisor's search_altitude (under the 10 m airspace limit)
         p('alt_offset', 0.0)         # m: the operator's in-flight trim (dashboard / radio), + up / - down
+        p('alt_max', 9.5)            # m: never above 10 m - the airspace rule there (user, 2026-10-30)
         p('alt_min', 5.5)            # m: the trimmed search height never goes below this. QR area: 5 m is the DROP
         #                              height only - scanning (search, trim, deep read) stays above it (user, 2026-10-30)
         p('clearance', 1.0)          # m from red / boundary cells (the map already has a 1.5 m red margin)
@@ -820,15 +821,16 @@ class FrontierExplorer(Node):
         return best
 
     def search_alt(self):
-        """The search height: `altitude` + the operator's `alt_offset`, not below `alt_min`."""
-        return max(float(self.g('alt_min')), float(self.g('altitude')) + float(self.g('alt_offset')))
+        """The search height: `altitude` + the operator's `alt_offset`, not below `alt_min`, not above `alt_max`."""
+        return min(float(self.g('alt_max')), max(float(self.g('alt_min')),
+                                                 float(self.g('altitude')) + float(self.g('alt_offset'))))
 
     def on_params(self, params):
         """An alt_offset change applies at once: the route being flown takes the new height too."""
         from rcl_interfaces.msg import SetParametersResult
         for prm in params:
             if prm.name == 'alt_offset':
-                alt = max(float(self.g('alt_min')), float(self.g('altitude')) + float(prm.value))
+                alt = min(float(self.g('alt_max')), max(float(self.g('alt_min')), float(self.g('altitude')) + float(prm.value)))
                 if self.path.active:
                     self.path.alt = alt
                 self.get_logger().info(f'search height trim {float(prm.value):+.1f} m: flying at {alt:.1f} m')

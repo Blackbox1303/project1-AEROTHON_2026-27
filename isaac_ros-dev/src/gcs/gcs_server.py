@@ -48,7 +48,7 @@ try:                                                  # not needed in --radio mo
 except ImportError:
     cv2 = np = None
 
-OFFBOARD_ALT = 10.0          # --offboard-alt: the VRX explorer's search height, m (ArUco 8084: 1 m)
+OFFBOARD_ALT = 9.0           # (< 10 m: the airspace rule, 2026-10-30) --offboard-alt: the VRX explorer's search height, m (ArUco 8084: 1 m)
 MARKER = 'qr'                # --marker: what the boards carry, qr | aruco (the 8084 ArUco delivery dashboard)
 RADIO = None                 # --radio: this dashboard runs ON THE LENOVO on the telemetry radio (the final flight)
 AGENT = 194                  # the onboard Jetson's mav_agent (MAV_COMP_ID_ONBOARD_COMPUTER2)
@@ -694,7 +694,7 @@ class Ros(threading.Thread):
         return r.successful, r.reason or 'ok'
 
 
-ALT_TRIM_STEP, ALT_TRIM_MIN, ALT_TRIM_MAX = 0.5, -9.0, 3.0   # m; the explorer also keeps it above its alt_min
+ALT_TRIM_STEP, ALT_TRIM_MIN, ALT_TRIM_MAX = 0.5, -9.0, 0.5   # m: up to 9.5 m (never above 10: airspace); the explorer keeps it above its alt_min
 
 
 def alt_trim(delta):
@@ -905,7 +905,8 @@ GF_FILE = DATA / 'geofence.json'
 GF_CAPS = {'arena': 4, 'qr': 4, 'extra': 2}
 # the course dimensions: the organisers' defaults (user, 2026-10-28), editable when new info comes. Tunnel width /
 # length / gap in m, heights in ft (as given); the gap = wall to wall between the entry and the exit tunnel
-COURSE_DEFAULT = {'tunnel_width': 3.5, 'tunnel_height_ft': 10.0, 'tunnel_ceiling_ft': 8.0, 'tunnel_length': 10.0,
+# tunnel_length: 12 ft = 3.66 m (user, 2026-10-30; was 10 m) - exit detection is on the walls ending, from 0.6 x it
+COURSE_DEFAULT = {'tunnel_width': 3.5, 'tunnel_height_ft': 10.0, 'tunnel_ceiling_ft': 8.0, 'tunnel_length': 3.66,
                   'tunnel_gap': 0.0, 'qr_width': 30.0}
 FT = 0.3048
 
@@ -1502,14 +1503,19 @@ async def api(request):
     raise web.HTTPNotFound()
 
 
-# LAND / RTL / RTH / KILL: MAVLink command (id, params) - ArduCopter (sim and the real drone); fcu:=px4 sims take the same
-# LAND / RTL / KILL, its RTH (custom mode 21) is refused
+# LAND / RTL / RTH / KILL and the hand-over modes: MAVLink command (id, params) - ArduCopter (sim and the real drone);
+# fcu:=px4 sims take the same LAND / RTL / KILL, the ArduCopter custom modes (RTH and the hand-over ones) are refused
 EMERGENCY = {
     'kill': (400, 0, 21196),                          # MAV_CMD_COMPONENT_ARM_DISARM, force: the motors stop in flight
     'land': (21,),                                    # MAV_CMD_NAV_LAND: down where it is
     'rtl': (20,),                                     # MAV_CMD_NAV_RETURN_TO_LAUNCH: climbs to RTL_ALT (15 m), straight home
     'rth': (176, 1, 21),                              # MAV_CMD_DO_SET_MODE SMART_RTL: retraces its own path home
 }
+# hand over to the pilot (user, 2026-10-30): MAV_CMD_DO_SET_MODE, ArduCopter's custom mode number - then the onboard
+# mission stops sending setpoints and the ELRS pilot flies. LOITER / POSHOLD hold position on the GPS / EKF,
+# ALT_HOLD holds only the height, STABILIZE is fully manual, BRAKE stops dead and hovers
+MODES = {'loiter': 5, 'poshold': 16, 'alt_hold': 2, 'stabilize': 0, 'brake': 17}
+EMERGENCY.update({m: (176, 1, n) for m, n in MODES.items()})
 
 
 def radio_api(what, body):
@@ -1523,7 +1529,7 @@ def radio_api(what, body):
         _, sup = MAV.command_ack(AGENT_CMD, 8, comp=AGENT, timeout=4.0)
         return success, f'{what.upper()}: autopilot {ack}; onboard: {sup}'
     if S.tel.get('armed') and what in ('stack_start', 'stack_stop', 'mission_start'):
-        return False, 'the drone is armed: in flight only LAND / RTH / RTL / KILL'
+        return False, 'the drone is armed: in flight only LAND / RTH / RTL / KILL and the hand-over modes'
     if what == 'stack_start':                         # param3: the boards, 0 QR / 1 ArUco (this page's --marker)
         return MAV.command_ack(AGENT_CMD, 1, 0, int(MARKER == 'aruco'), comp=AGENT, timeout=10.0, final_within=240.0)
     if what == 'stack_stop':
@@ -1671,6 +1677,8 @@ def emergency(what):
     else:
         sup_ok, sup = ROS.call(ROS.cli_operator, ROS.Trigger.Request(), timeout=3.0)
     msg = f'{what.upper()}: autopilot {ack}'
+    if what in MODES and success:
+        msg += ' - yours now: fly it on the RC'
     if sup_ok or 'not available' not in sup:
         msg += f'; mission: {sup}'
     if what == 'rth' and not success:

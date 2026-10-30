@@ -136,6 +136,14 @@
         <button class="stop" onclick="ask('RTL now? It climbs to RTL_ALT (15 m) and flies STRAIGHT home - not inside a roofed tunnel!').then(y => y && post('rtl'))">RTL (straight)</button>
         <button class="stop" onclick="ask('KILL MOTORS? The drone falls.').then(y => y && ask('Really kill the motors?')).then(y => y && post('kill'))">KILL</button>
       </div>
+      <div class="row" title="hand the drone to the RC pilot: the flight mode is set on the autopilot, the onboard mission stops sending setpoints (no failsafe flight). Over the radio too.">
+        <b>Take over</b>
+        <button onclick="ask('LOITER: holds position + height (GPS / EKF) - the mission stops, you fly it on the RC?').then(y => y && post('loiter'))">LOITER</button>
+        <button onclick="ask('POSHOLD: holds position, brakes when the sticks are centred - the mission stops, you fly it?').then(y => y && post('poshold'))">POSHOLD</button>
+        <button onclick="ask('ALT_HOLD: holds only the HEIGHT, it will drift - the mission stops, you fly it on the RC?').then(y => y && post('alt_hold'))">ALT_HOLD</button>
+        <button onclick="ask('STABILIZE: fully manual, throttle from the RC sticks at once - the mission stops, you fly it?').then(y => y && ask('STABILIZE: is the RC throttle at hover?')).then(y => y && post('stabilize'))">STABILIZE</button>
+        <button onclick="ask('BRAKE: stops dead and hovers - the mission stops?').then(y => y && post('brake'))">BRAKE</button>
+      </div>
       <div id="msg"></div>
     </div>
   </div>

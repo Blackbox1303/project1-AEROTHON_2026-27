@@ -179,6 +179,7 @@ class EntryAlign(Node):
         p('wall_band', [0.5, 2.4])   # m above ground: the walls below the v3 roof (3.05 m)
         p('corridor_width', 3.353)   # m: course v3, 11 ft (v2: 1.675)
         p('width_tol', 0.35)
+        p('width_tol_wide', 0.8)     # m: the second try when no wall pair fits width_tol (the real width differs)
         p('max_banner_offset', 3.0)  # m: entrance found from the walls must be this close to the banner (it stands
         #                              ~1.5 m before the mouth). 6.0 passed an entrance 5.96 m away, 4.5 m inside the
         #                              return corridor, facing out of it (2026-10-21 sim)
@@ -441,6 +442,14 @@ class EntryAlign(Node):
             return None, f'only {len(xy)} wall-band points'
         xy = np.unique(np.round(xy / 0.05) * 0.05, axis=0)            # 5 cm grid: even density
         pairs = wall_pairs(xy, self.g('corridor_width'), self.g('width_tol'), self.rng)
+        if not pairs and self.g('width_tol_wide') > self.g('width_tol'):
+            # the real tunnel a bit wider / narrower than the course block says (user, 2026-10-30: "the length and
+            # width may vary slightly"): once more with the wide tolerance, the width it found logged
+            pairs = wall_pairs(xy, self.g('corridor_width'), self.g('width_tol_wide'), self.rng)
+            if pairs:
+                c1, c2 = pairs[0][3]
+                self.get_logger().warn(f'wall fit: walls {c2 - c1:.2f} m apart, not the course\'s '
+                                       f'{self.g("corridor_width"):.2f} m (+-{self.g("width_tol"):.2f}): taken')
         self.get_logger().info(f'wall fit: {len(clouds)} clouds, {len(pts)} points, {len(xy)} in the wall band, '
                                f'{len(pairs)} pairs, {time.monotonic() - t0:.1f} s')
         if not pairs:
