@@ -48,7 +48,18 @@ icon sim-qr          "AeroTHON sim testing, QR (Jetson 8080)"    "sim qr"       
 icon fieldtest-cable "AeroTHON field test (cable, props off)"  "fieldtest cable"  "Jetson cameras + guidance by Ethernet"
 icon fieldtest-radio "AeroTHON field test (radio, props off)"  "fieldtest radio"  "Jetson scans + guidance over the SiK radio"
 icon stop            "AeroTHON stop the running app"          "stop"             "Close whichever AeroTHON app is running"
-echo "app icons: switcher, onboard / offboard / sim testing x ArUco / QR, field test cable / radio, stop"
+# THE FINAL MISSION, one click, auto (user, 2026-10-30): a terminal window with the countdown (Ctrl-C there cancels),
+# left open after it ends so its last lines can be read
+cat > ~/.local/share/applications/aerothon-mission.desktop <<DESK
+[Desktop Entry]
+Type=Application
+Name=AeroTHON FINAL MISSION (auto)
+Comment=Radio dashboard + geofence, Launch stack, preflight, 10 s countdown, Start - Ctrl-C in its window cancels
+Exec=bash -c '"$HERE/aerothon" mission; echo; read -p "[aerothon] press Enter to close this window"'
+Terminal=true
+Categories=Utility;
+DESK
+echo "app icons: FINAL MISSION (auto), switcher, onboard / offboard / sim testing x ArUco / QR, field test cable / radio, stop"
 case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) echo "note: ~/.local/bin is not on PATH yet - log out and in, or use $HERE/aerothon";; esac
 if id -nG | tr ' ' '\n' | grep -qx dialout; then
     echo "radio permission: OK (in the dialout group)"
