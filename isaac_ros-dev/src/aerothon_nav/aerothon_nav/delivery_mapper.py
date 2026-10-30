@@ -133,8 +133,9 @@ class DeliveryMapper(Node):
         self.frames = 0
 
     def on_qr_area(self, m):
-        """The supervisor's QR area (cut at the entry tunnel's exit in flight): a new grid; the red votes and rejected
-        QRs are kept when the grid keeps its size (else forgotten: they were seen outside the QR area anyway)."""
+        """The supervisor's QR area (cut at the entry tunnel's exit in flight): a new grid. Rejected QRs are kept (world
+        coordinates; a QR area replaced in mid-search must not send the drone back to them), the red votes only when
+        the grid keeps its size."""
         poly = [tuple(map(float, p)) for p in json.loads(m.data).get('polygon') or []]
         if len(poly) < 3 or poly == self.poly:
             return
@@ -143,7 +144,9 @@ class DeliveryMapper(Node):
         self.set_parameters([rclpy.parameter.Parameter('zone', value=[float(v) for v in qr_area.bbox(poly)])])
         self.reset()
         if (self.ny, self.nx) != shape:
+            rejected = self.rejected
             self.reset(memory=True)
+            self.rejected = rejected
         self.get_logger().info(f'QR area: {len(poly)} corners, grid {self.nx} x {self.ny}')
 
     def on_reset(self, req, res):

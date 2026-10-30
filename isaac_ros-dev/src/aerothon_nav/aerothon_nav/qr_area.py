@@ -4,7 +4,10 @@ line - known only in flight, when the drone leaves the entry tunnel (front_from_
 
 /mission/qr_area (std_msgs/String JSON, latched): {polygon: [[x, y], ...], lock: bool, source}. The supervisor
 publishes it; delivery_mapper / qr_locator / frontier_explorer take the zone from it, offboard_bridge keeps the drone
-inside it while lock is true (from the search start until the exit-tunnel sequence)."""
+inside it while lock is true (from the search start until the exit-tunnel sequence).
+
+The organisers' points may be off (user, 2026-10-30): zone_mismatch() checks them against the tunnel as flown; on a
+mismatch the supervisor drops the geofence for tunnel_zone(): the area measured from the tunnel's exit."""
 import math
 
 TOPIC = '/mission/qr_area'
@@ -50,6 +53,32 @@ def ray_entry(origin, yaw, poly, min_t=0.5):
         if t > min_t and -1e-6 <= u <= 1 + 1e-6 and (best is None or t < best):
             best = t
     return best
+
+
+def zone_mismatch(poly, entrance, yaw, length, depth, across, front_tol, size_tol):
+    """Why the polygon can't be the QR area of a tunnel flown from entrance along yaw for length m, or None if it can:
+    the area starts at the tunnel's exit (within front_tol) and is not more than size_tol short of depth (forward) x
+    across. A polygon larger than that is not an error: the arena's real edges may lie outside the nominal area."""
+    if inside(entrance[0], entrance[1], poly):
+        return 'the QR area covers the tunnel entrance'
+    s = ray_entry(entrance, yaw, poly)
+    if s is None:
+        return 'the tunnel axis never enters the QR area'
+    if abs(s - length) > front_tol:
+        return f'the QR area starts {s:.1f} m along the tunnel axis, the tunnel ended at {length:.1f} m'
+    c, sn = math.cos(yaw), math.sin(yaw)
+    along = [p[0] * c + p[1] * sn for p in poly]
+    side = [-p[0] * sn + p[1] * c for p in poly]
+    d, w = max(along) - min(along), max(side) - min(side)
+    if d < depth - size_tol or w < across - size_tol:
+        return f'the QR area is {d:.1f} x {w:.1f} m, not {depth:g} x {across:g} m'
+    return None
+
+
+def tunnel_zone(exit_pt, yaw, depth, across):
+    """The QR area from the tunnel alone: depth m forward of the exit point, across m wide, centred on the tunnel."""
+    c, sn, h = math.cos(yaw), math.sin(yaw), across / 2
+    return ccw([(exit_pt[0] + f * c - s * sn, exit_pt[1] + f * sn + s * c) for f in (0.0, depth) for s in (-h, h)])
 
 
 def _cross(p, d, a, b):

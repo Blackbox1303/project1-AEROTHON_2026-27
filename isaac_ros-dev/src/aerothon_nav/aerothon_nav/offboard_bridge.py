@@ -132,6 +132,7 @@ class OffboardBridge(Node):
         self.tunnels = []            # corridor boxes (geofence_json): the tunnel ceiling applies there
         self.poly = None             # field_polygon of the ground station's geofence json: THE keep-in when given
         self.fence = self.load_fence()
+        self.poly_given = self.poly  # the supervisor drops it (ignore_geofence) when the tunnel shows it is wrong
         # the QR AREA LOCK (user, 2026-10-28: once in the QR area the drone must not leave it until the exit-tunnel
         # sequence): /mission/qr_area {polygon, lock} from the supervisor - locked, the polygon is a keep-in too
         self.lock = None
@@ -155,6 +156,11 @@ class OffboardBridge(Node):
             self.get_logger().info('QR area lock ' + ('ON: ' + ' '.join(f'({x:.1f},{y:.1f})' for x, y in lock)
                                                       if lock else 'off'))
         self.lock = lock
+        poly = None if d.get('ignore_geofence') else self.poly_given
+        if poly is not self.poly:
+            self.get_logger().warn('field polygon ' + ('ignored: it does not match the tunnel flown' if poly is None
+                                                       else 'back in force'))
+        self.poly = poly
 
     def on_cmd(self, m):
         self.cmd, self.cmd_time = m, self.get_clock().now()

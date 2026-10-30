@@ -36,6 +36,17 @@
   QR-AREA TIME (user, 2026-10-24: <= 9 min in the QR area wherever the red zone / target is): zone_time_limit from
                   entering the zone; the search ends early enough for the drop (deliver_reserve) and the way out
                   (zone_exit_reserve, delivery-only: zone_home_reserve) to fit too
+  COURSE 2026-10-30, later (user): the height estimate can't be trusted near the tunnels, and the geofence points may
+                  be off:
+                  - approach_altitude 6.5 m at most from the banner fix to the standoff, at both tunnels (from above
+                    the roofs): OVERHEAD_GREEN / OVERHEAD_BLUE fix the banner on the floor, line up, and only at
+                    overhead_standoff before the mouth, already on the tunnel's axis, go down for the wall fit
+                  - out of the entry tunnel: climb only into_zone_dist past its end, never flying back towards it (the
+                    top banner)
+                  - the tunnel's end is the distance flown, not the zone's edge. The geofence is checked against it
+                    (qr_area.zone_mismatch), and against a search that keeps flying over seen ground (search_stall_dist):
+                    wrong -> ignored for the rest of the mission (the bridge's keep-in too) and the QR area is
+                    zone_depth (30 m, forward) x zone_across (40 m), centred on the tunnel, from the tunnel's exit
   (start_from search: test entry - after READ_START_QR, DIRECT_TO_SEARCH climbs to search_altitude, above the
                   corridor walls, and flies straight to search_start; no corridors, no geofence, so return_corridor
                   must be false: it lands on the target)
@@ -60,6 +71,9 @@
                   the mission goes on to the exit - the drone still has to come home.
                   Hardware (ArduCopter): vio_bringup/config/ardupilot_vio_params.parm (winch relays); the sim:
                   vio_cuda_ws/sim/ardupilot_sim_params.parm (SITL relay pins, SIM_PIN_MASK shows them).
+  OVERHEAD_BLUE   from the exit approach point at approach_altitude: the Arducam finds the blue floor banner (look
+                  points overhead_exit_lateral across the tunnels), standoff before it, down, wall fit (ALIGN_EXIT,
+                  entry_align's geofence mode); no blue banner from above: ALIGN_EXIT below
   ALIGN_EXIT      /nav/entry/align, colour exit_colour (blue since 2026-10-30; v3 green); the corridor found is checked against the entrance geofence: one
                   whose centre line is within exclude_radius of the entry corridor's IS the entry corridor -> rejected
   ALIGN_GEOFENCE  exit fallback (no exit banner, or it led back to the entry corridor): entry_align mode geofence,
@@ -148,6 +162,8 @@ class MissionSupervisor(Node):
         p('max_altitude', 9.5)       # m: HARD CAP - the airspace rule there: never above 10 m (user, 2026-10-30); 0.5 m
         #                              left for ArduCopter's height overshoot. Every fly() target is clamped to it
         p('takeoff_altitude', 5.0)   # m: take off to 5 m, move 1 m forward, scan the start QR, then descend to align_altitude for corridor VIO
+        p('approach_altitude', 6.5)  # m at most: both tunnels' overhead banner fix + the flight to the standoff (user,
+        #                              2026-10-30: the height isn't known well enough to go lower sooner)
         p('align_altitude', 2.3)     # m: banner search + wall fit outside the tunnels (below 8 ft: no climbing near them)
         p('tunnel_altitude', 1.5)    # m: both tunnels (v3: roofed 10 ft, never above 8 ft = 2.44 m)
         p('entry_speed', 1.0)        # m/s along the entry tunnel (no obstacles)
@@ -167,6 +183,9 @@ class MissionSupervisor(Node):
         #                              top banner projected on the ground from 5 m comes out ~2.5 x longer
         p('overhead_hold_back', 1.5) # m on the start side of the banner where the drone looks from (never over the roof)
         p('overhead_lateral_max', 1.5)  # m: the wall fit's corridor must pass this close to the banner centre
+        p('overhead_standoff', 3.0)  # m before the floor banner (the mouth), on the axis: where the drone goes down
+        p('overhead_exit_lateral', [0.0, 4.0, -4.0, 8.0, -8.0])  # m across the tunnels from the exit approach point: the
+        #                              exit tunnel lies beside the entry tunnel, on a side not known
         p('search_altitude', 9.0)    # delivery zone: under the 10 m airspace limit with margin (was 10 m; 2026-10-30)
         p('deliver_altitude', 5.0)   # m: the drop height
         p('deliver_tol', 0.15)       # m: arrival tolerance over the target (both levels)
@@ -250,7 +269,14 @@ class MissionSupervisor(Node):
         p('mission_budget', 840.0)    # s: the 15 min rule minus 1 min of buffer
         # corridor_nav altitude per corridor: 2D (slam_toolbox map, fixed height) in the entry corridor - it has no
         # obstacles; the 3D altitude planner only in the return corridor's windows / hanging boxes (user, 2026-10-22)
-        p('into_zone_dist', 1.5)      # m past the entry corridor's end (= the zone boundary) where the climb starts
+        p('into_zone_dist', 3.0)      # m past the entry corridor's end where the climb starts, clear of the top banner
+        #                               (~1.5 m off the mouth; user, 2026-10-30)
+        p('zone_depth', 30.0)         # m: the QR area forward of the tunnel exit, and across it (user, 2026-10-30): the
+        p('zone_across', 40.0)        # QR area when the geofence is ignored, and what the geofence is checked against
+        p('geofence_front_tol', 3.0)  # m: the QR area's front edge this far from the tunnel's exit: the geofence is wrong
+        p('geofence_size_tol', 10.0)  # m: the QR area this much smaller than zone_depth x zone_across: wrong too
+        p('search_stall_dist', 60.0)  # m flown in the search showing less than search_stall_area of new ground: the
+        p('search_stall_area', 5.0)   # m2  geofence is wrong (the drone is running over the same area)
         p('exit_approach_dist', 2.5)  # m past the entry corridor's end (its heading): flown with the delivery Nav2.
         #                               v3 (2026-10-24): 2.5 - the exit's green banner is 3.6 m away there, and 6 m put
         #                               the point in the red zone's margin (moved next to the corridors)
@@ -318,7 +344,8 @@ class MissionSupervisor(Node):
         # the QR area (qr_area.py): given by the ground station, or the arena cut at the entry tunnel's exit line
         self.qr_pub = self.create_publisher(String, qr_area.TOPIC, qr_area.QOS)
         self.qr_poly, self.qr_final, self.qr_src = None, False, None
-        self.course, self.arena, self.qr_back = None, [], []
+        self.course, self.arena, self.qr_back, self.field = None, [], [], []
+        self.geofence_off, self.stall = None, None    # why the geofence is ignored; the search's progress
         cli = self.create_client
         self.srv = {name: cli(Trigger, name) for name in (
             '/mission/read_qr', '/nav/entry/align', '/nav/entry/cancel', '/nav/corridor/run', '/nav/corridor/cancel',
@@ -333,7 +360,7 @@ class MissionSupervisor(Node):
         self.px4_command = cli(CommandLong, '/mavros/cmd/command', callback_group=reentrant)
         self.entry_params = cli(SetParameters, '/entry_align/set_parameters')
         self.overhead_params = cli(SetParameters, '/overhead_banner/set_parameters')
-        self.overhead_dets, self.overhead_frames = [], 0
+        self.overhead_dets, self.overhead_frames, self.overhead_colour = [], 0, 'green'
         self.create_subscription(String, '/nav/banner/overhead', self.on_overhead, 10)
         self.corridor_params = cli(SetParameters, '/corridor_nav/set_parameters')
         self.explorer_params = cli(SetParameters, '/frontier_explorer/set_parameters')
@@ -918,6 +945,8 @@ class MissionSupervisor(Node):
             # the SLAM map shows (missing walls called the exit at 4.0 of 6.7 m, 2026-10-24 sim)
             s_zone = self.axis_into_zone((ex, ey), yaw)
             if s_zone is not None:
+                if self.course:                      # a far-off geofence must not push the exit past the tunnel
+                    s_zone = min(s_zone, float(self.course['tunnel_length']))
                 params['min_length'] = max(params['min_length'], s_zone - 1.0)
         gf = self.geofence
         if corridor_state == 'RETURN_CORRIDOR' and gf and gf.get('length_m'):
@@ -1015,21 +1044,21 @@ class MissionSupervisor(Node):
             x, y = self.pose()[:2]
             length = (x - gf['entrance'][0]) * math.cos(yaw) + (y - gf['entrance'][1]) * math.sin(yaw)
         gf['length_measured_m'] = round(length, 2)
-        # the corridor ends where its axis enters the delivery zone (the geofence given on the day): corridor_nav's
-        # measure ran short (4.0 of 6.7 m: walls missing from the SLAM map) - the exit approach point then lay INSIDE
-        # the entry tunnel and the drone came down at its mouth, blind to the exit banner (2026-10-24 sim)
-        s_zone = self.axis_into_zone(gf['entrance'], yaw)
-        if s_zone is not None:
-            if abs(s_zone - length) > 0.5:
-                self.get_logger().warn(f'corridor length: measured {length:.1f} m, zone boundary {s_zone:.1f} m - '
-                                       f'using the zone boundary')
-            length = s_zone
-        elif self.qr_src == 'tunnel_exit' and self.course and abs(length - self.course['tunnel_length']) > 2.0:
-            # the front wall of the QR area is cut here: a short measure (walls missing from the SLAM map) would move it
-            # into the tunnel - the course length (dashboard) instead
-            self.get_logger().warn(f'corridor length: measured {length:.1f} m, course {self.course["tunnel_length"]:g} m'
-                                   f' - using the course length')
-            length = float(self.course['tunnel_length'])
+        if self.course:
+            # the tunnel ends where the flight says, never where the geofence does (its points may be off, user
+            # 2026-10-30). A measure far from the course's (walls missing from the SLAM map: 4.0 of 6.7 m) would move
+            # the end into the tunnel - the course length (dashboard) instead
+            if abs(length - self.course['tunnel_length']) > 2.0:
+                self.get_logger().warn(f'corridor length: measured {length:.1f} m, course '
+                                       f'{self.course["tunnel_length"]:g} m - using the course length')
+                length = float(self.course['tunnel_length'])
+        else:                                        # sim worlds: the zone boundary, known exactly
+            s_zone = self.axis_into_zone(gf['entrance'], yaw)
+            if s_zone is not None:
+                if abs(s_zone - length) > 0.5:
+                    self.get_logger().warn(f'corridor length: measured {length:.1f} m, zone boundary {s_zone:.1f} m - '
+                                           f'using the zone boundary')
+                length = s_zone
         gf['length_m'] = round(length, 2)
         gf['corridor_end'] = [round(gf['entrance'][0] + length * math.cos(yaw), 3),
                               round(gf['entrance'][1] + length * math.sin(yaw), 3)]
@@ -1037,16 +1066,77 @@ class MissionSupervisor(Node):
         if self.qr_src == 'tunnel_exit' and not self.qr_final:
             self.cut_qr_area(gf['corridor_end'], yaw)
             gf['qr_polygon'] = [[round(x, 2), round(y, 2)] for x, y in self.qr_poly] if self.qr_final else None
+        why = self.geofence_off or self.zone_problem(length, yaw)
+        if why:
+            self.use_tunnel_zone(why)
         self.save_geofence()
         try:                                         # the explorer makes no candidate detours next to it
             self.set_params(self.explorer_params, tunnel_end=[float(gf['corridor_end'][0]), float(gf['corridor_end'][1])])
         except Abort as e:
             self.get_logger().warn(f'explorer tunnel_end not set ({e})')
 
+    def zone_problem(self, length, yaw):
+        """What is wrong with the QR area, given the tunnel just flown (qr_area.zone_mismatch), or None."""
+        if self.qr_poly is None:                     # sim world without a polygon: the zone rectangle
+            return None
+        if not self.qr_final:
+            return 'no closed QR area from the arena and the tunnel exit'
+        return qr_area.zone_mismatch(self.qr_poly, self.geofence['entrance'], yaw, length, self.g('zone_depth'),
+                                     self.g('zone_across'), self.g('geofence_front_tol'), self.g('geofence_size_tol'))
+
+    def ignore_geofence(self, why):
+        """The organisers' points don't fit what the drone flew: off for the rest of the mission, the keep-in too."""
+        self.geofence_off = why
+        self.get_logger().error(f'GEOFENCE IGNORED: {why}')
+        self.set_state(self.state, geofence_ignored=why)
+        if self.geofence:
+            self.geofence['geofence_ignored'] = why
+        self.publish_qr_area(False)
+
+    def use_tunnel_zone(self, why):
+        """The QR area measured from the entry tunnel's exit, in place of the geofence's."""
+        gf = self.geofence
+        self.qr_poly = qr_area.tunnel_zone(gf['corridor_end'], math.radians(gf['yaw_deg']), self.g('zone_depth'),
+                                           self.g('zone_across'))
+        self.qr_final, self.qr_src = True, 'tunnel'
+        gf['qr_polygon'] = [[round(x, 2), round(y, 2)] for x, y in self.qr_poly]
+        self.ignore_geofence(why)
+        self.save_geofence()
+
+    def check_field(self, entrance):
+        """The field polygon must hold the tunnel about to be flown and the climb after it: the bridge would stop the
+        drone at a wrong edge, inside the tunnel."""
+        if self.geofence_off or len(self.field) < 3 or not self.course:
+            return
+        (ex, ey), yaw = entrance['entrance'], math.radians(entrance['yaw_deg'])
+        end = float(self.course['tunnel_length']) + self.g('into_zone_dist')
+        for s in np.arange(0.0, end + 0.5, 0.5):
+            if not qr_area.inside(ex + s * math.cos(yaw), ey + s * math.sin(yaw), self.field):
+                self.ignore_geofence(f'the field polygon ends {s:.1f} m along the entry tunnel\'s axis')
+                return
+
+    def search_stalled(self):
+        """True once the search has flown search_stall_dist showing no new ground of the QR area: the geofence points
+        are wrong (not after they were dropped: then the search just goes on until it ends by itself)."""
+        m = self.delivery_map
+        gf = self.geofence
+        if self.geofence_off or m is None or not gf or 'corridor_end' not in gf:
+            return False
+        xy, known = self.pose()[:2], int(np.count_nonzero(np.frombuffer(m.data, np.int8) == 0))
+        s = self.stall
+        if s is None:
+            s = self.stall = {'xy': xy, 'known': known, 'flown': 0.0}
+        s['flown'] += math.dist(xy, s['xy'])
+        s['xy'] = xy
+        if known < s['known'] or known - s['known'] >= self.g('search_stall_area') / m.info.resolution ** 2:
+            s['known'], s['flown'] = known, 0.0      # new ground (or the map was reset)
+        return s['flown'] >= self.g('search_stall_dist')
+
     def load_qr_area(self):
         """The QR area of the ground station's geofence: given (delivery_polygon) or to be cut from the arena at the
         entry tunnel's exit (qr_source tunnel_exit). Sim world files have neither: the zone rectangle as before."""
         self.qr_poly, self.qr_final, self.qr_src, self.arena, self.qr_back = None, False, None, [], []
+        self.field, self.geofence_off, self.stall = [], None, None
         try:
             w = json.load(open(self.g('world_json')))
         except (OSError, ValueError):
@@ -1058,6 +1148,7 @@ class MissionSupervisor(Node):
         self.qr_final = self.qr_src == 'given'
         self.arena = [tuple(map(float, p)) for p in w.get('arena_polygon') or []]
         self.qr_back = [tuple(map(float, p)) for p in w.get('qr_back') or []]
+        self.field = [tuple(map(float, p)) for p in w.get('field_polygon') or []]
         self.publish_qr_area(False)
 
     def publish_qr_area(self, lock):
@@ -1067,7 +1158,8 @@ class MissionSupervisor(Node):
             return
         lock = bool(lock and self.qr_final)
         self.qr_pub.publish(String(data=json.dumps({'polygon': [[round(x, 3), round(y, 3)] for x, y in self.qr_poly],
-                                                    'lock': lock, 'source': self.qr_src, 'final': self.qr_final})))
+                                                    'lock': lock, 'source': self.qr_src, 'final': self.qr_final,
+                                                    'ignore_geofence': bool(self.geofence_off)})))
         self.get_logger().info(f'QR area {"LOCKED" if lock else "published"} ({self.qr_src})')
 
     def cut_qr_area(self, exit_pt, yaw):
@@ -1075,7 +1167,7 @@ class MissionSupervisor(Node):
         poly = qr_area.front_from_tunnel_exit(self.arena, self.qr_back, exit_pt, yaw)
         if poly is None:
             self.get_logger().error(f'QR area: no closed area from the arena {self.arena}, back {self.qr_back} and the '
-                                    f'tunnel exit {exit_pt}: searching the whole arena (no lock)')
+                                    f'tunnel exit {exit_pt}')
             return
         self.qr_poly, self.qr_final = poly, True
         width = math.dist(*self.qr_back)
@@ -1085,20 +1177,22 @@ class MissionSupervisor(Node):
         self.publish_qr_area(False)
 
     def into_zone(self):
-        """Fly straight along the entry corridor's heading until 2 m past its end, at the tunnel height (v3: the roof
-        - climbing starts only out there). A corridor run ending inside the mouth (x 14.8) left the drone behind the
-        delivery map's no-fly boundary ring: the delivery Nav2 found no plan and two sweep lanes were skipped
-        (2026-10-22 sim)."""
+        """Fly straight along the entry corridor's heading until into_zone_dist past its end, at the tunnel height -
+        climbing starts only out there, clear of the roof and the top banner. Forward only: corridor_nav stops ~4 m past
+        the end, and flying back to climb put the drone under the banner. A corridor run ending inside the mouth (x
+        14.8) left the drone behind the delivery map's no-fly boundary ring: the delivery Nav2 found no plan and two
+        sweep lanes were skipped (2026-10-22 sim)."""
         gf = self.geofence
         if not gf or 'corridor_end' not in gf:
             return
         yaw = math.radians(gf['yaw_deg'])
-        # ALWAYS to into_zone_dist past the corridor end (the zone boundary), back if the corridor run overshot: it
-        # used to climb wherever the run ended - 0.3 m from a red zone 4.5 m past the tunnels (2026-10-24 sim)
-        d = self.g('into_zone_dist')
-        tx = gf['corridor_end'][0] + d * math.cos(yaw)
-        ty = gf['corridor_end'][1] + d * math.sin(yaw)
-        if math.dist(self.pose()[:2], (tx, ty)) < 0.5:
+        u = (math.cos(yaw), math.sin(yaw))
+        x, y = self.pose()[:2]
+        end = max(gf['length_m'], float(self.course['tunnel_length']) if self.course else 0.0)  # a short measure too
+        s = max(end + self.g('into_zone_dist'),
+                (x - gf['entrance'][0]) * u[0] + (y - gf['entrance'][1]) * u[1])
+        tx, ty = gf['entrance'][0] + s * u[0], gf['entrance'][1] + s * u[1]
+        if math.dist((x, y), (tx, ty)) < 0.5:
             return
         self.get_logger().info(f'into the zone: ({tx:.1f}, {ty:.1f}) first, at the tunnel height')
         self.fly(tx, ty, min(self.pose()[2], self.g('align_altitude')), self.limit('search'), yaw=yaw, vmax=0.8)
@@ -1175,8 +1269,8 @@ class MissionSupervisor(Node):
                     raise
                 self.get_logger().warn(f'TO_EXIT: {e} at {dist} m past the corridor: nearer')
                 time.sleep(1.0)
-        x, y, _, _ = self.pose()                     # down to the banner-search height here, in the open zone
-        self.fly(x, y, self.g('align_altitude'), self.limit('home'))
+        x, y, _, _ = self.pose()                     # no lower than this before the banner fix (find_exit)
+        self.fly(x, y, self.g('approach_altitude'), self.limit('home'))
 
     def is_entry_corridor(self, found):
         """True if an entry_align result is the entry corridor again (centre line within exclude_radius)."""
@@ -1189,6 +1283,19 @@ class MissionSupervisor(Node):
         parallel = abs(math.cos(math.radians(found['yaw_deg']) - yaw)) > 0.9
         return parallel and abs(dx * n[0] + dy * n[1]) < self.g('exclude_radius')
 
+    def exit_ok(self, found):
+        """An entry_align result for the exit, unless it is the entry corridor again or runs across it."""
+        gf = self.geofence
+        if found and self.is_entry_corridor(found):
+            self.set_state('ALIGN_EXIT', rejected=found['entrance'], reason='that is the entry corridor')
+            return None
+        if found and gf and abs(math.cos(math.radians(found['yaw_deg'] - gf['yaw_deg']))) < \
+                math.cos(math.radians(self.g('exit_parallel_deg'))):
+            self.set_state('ALIGN_EXIT', rejected=found['entrance'], yaw_deg=found['yaw_deg'],
+                           reason='not parallel to the entry corridor')
+            return None
+        return found
+
     def find_exit(self):
         """The return corridor: the exit banner (exit_colour), checked against the entrance geofence; else the geofence."""
         self.publish_qr_area(False)                  # the exit-tunnel sequence: the QR area may be left now
@@ -1196,6 +1303,12 @@ class MissionSupervisor(Node):
         gf = self.geofence
         axis_yaw = math.radians(gf['yaw_deg']) if gf else float('nan')
         if gf:
+            if self.g('overhead_banner') and 'corridor_end' in gf:
+                found = self.exit_ok(self.overhead_exit())
+                if found:
+                    return found
+            x, y, _, _ = self.pose()                 # no fix from above: the D435 banner search, in the open zone
+            self.fly(x, y, self.g('align_altitude'), self.limit('align'))
             found = self.align('ALIGN_EXIT', colour=self.g('exit_colour'), mode='banner', axis_yaw=axis_yaw,
                                banner_exclude=True,
                                exclude_x=gf['entrance'][0], exclude_y=gf['entrance'][1],
@@ -1203,14 +1316,7 @@ class MissionSupervisor(Node):
         else:
             found = self.align('ALIGN_EXIT', colour=self.g('exit_colour'), mode='banner', axis_yaw=axis_yaw,
                                banner_exclude=False)
-        if found and self.is_entry_corridor(found):
-            self.set_state('ALIGN_EXIT', rejected=found['entrance'], reason='that is the entry corridor')
-            found = None
-        if found and gf and abs(math.cos(math.radians(found['yaw_deg'] - gf['yaw_deg']))) < \
-                math.cos(math.radians(self.g('exit_parallel_deg'))):
-            self.set_state('ALIGN_EXIT', rejected=found['entrance'], yaw_deg=found['yaw_deg'],
-                           reason='not parallel to the entry corridor')
-            found = None
+        found = self.exit_ok(found)
         if found:
             return found
         gf = self.geofence
@@ -1229,7 +1335,7 @@ class MissionSupervisor(Node):
         d = json.loads(m.data)
         if d.get('colour') == 'none':
             self.overhead_frames += 1
-        elif d.get('colour') == 'green':            # 2026-10-30: no banner marks the other tunnel any more, and
+        elif d.get('colour') == self.overhead_colour:   # 2026-10-30: no banner marks the other tunnel any more, and
             #                                           the start zone is a red area under the drone: red is ignored
             self.overhead_dets = (self.overhead_dets + [d])[-200:]
 
@@ -1242,7 +1348,7 @@ class MissionSupervisor(Node):
         return np.array([origin[0] + t * ray[0], origin[1] + t * ray[1]])
 
     def overhead_look(self):
-        """Hover overhead_look s -> (green fix or None, red centres). A green fix: the floor banner's centre and the
+        """Hover overhead_look s -> the fix of overhead_colour's banner or None: the floor banner's centre and the
         direction of its long edge (mod 180 deg) on the ground, from its corner rays (the lower banner lies flat at the
         mouth like a doormat - user, 2026-10-30)."""
         self.overhead_dets, self.overhead_frames = [], 0
@@ -1253,112 +1359,139 @@ class MissionSupervisor(Node):
                 raise Abort(self.abort_reason)
             time.sleep(0.05)
         lo, hi = self.g('overhead_banner_len')
-        greens, reds, seen = [], [], []
+        fixes, seen = [], []
         for d in self.overhead_dets:
             c = self.ground(d['origin'], d['ray'])
             if c is None:
                 continue
-            if d['colour'] == 'red':
-                reds.append(c)
-                continue
             q = [self.ground(d['origin'], r) for r in d.get('corner_rays') or []]
             if len(q) != 4 or any(v is None for v in q):
-                seen.append(f'green@({c[0]:.1f},{c[1]:.1f}) corners {len(q)}')
+                seen.append(f'({c[0]:.1f},{c[1]:.1f}) corners {len(q)}')
                 continue
             edges = [q[(i + 1) % 4] - q[i] for i in range(4)]
             k = 0 if np.linalg.norm(edges[0]) + np.linalg.norm(edges[2]) >= \
                 np.linalg.norm(edges[1]) + np.linalg.norm(edges[3]) else 1
             e = edges[k] - edges[k + 2]                   # the two long edges run opposite ways round the quad
             length = np.linalg.norm(e) / 2
-            seen.append(f'green@({c[0]:.1f},{c[1]:.1f}) {length:.1f}m')
+            seen.append(f'({c[0]:.1f},{c[1]:.1f}) {length:.1f}m')
             if lo <= length <= hi:
-                greens.append((d['score'], c, math.atan2(e[1], e[0]), length))
-        self.get_logger().info(f'overhead look: {self.overhead_frames} frames, {len(reds)} red, '
-                               f'green {seen[:6]}')
-        if not greens:
-            return None, reds
-        best = max(greens, key=lambda g: g[0])
-        near = [g for g in greens if np.linalg.norm(g[1] - best[1]) < 1.0]
+                fixes.append((d['score'], c, math.atan2(e[1], e[0]), length))
+        self.get_logger().info(f'overhead look: {self.overhead_frames} frames, {self.overhead_colour} {seen[:6]}')
+        if not fixes:
+            return None
+        best = max(fixes, key=lambda g: g[0])
+        near = [g for g in fixes if np.linalg.norm(g[1] - best[1]) < 1.0]
         a2 = sum(math.cos(2 * g[2]) for g in near), sum(math.sin(2 * g[2]) for g in near)
         return {'centre': np.mean([g[1] for g in near], axis=0), 'across': math.atan2(a2[1], a2[0]) / 2,
-                'length': float(np.mean([g[3] for g in near])), 'n': len(near)}, reds
+                'length': float(np.mean([g[3] for g in near])), 'n': len(near)}
 
-    def overhead_green(self, home, yaw0):
-        """OVERHEAD_GREEN (see the docstring) -> an entry_align result (the D435 wall fit from the overhead fix), or
-        None: then the D435 banner search as before."""
-        alt = self.g('takeoff_altitude')
-        deadline = self.limit('align')
-        self.set_state('OVERHEAD_GREEN')
+    def overhead_fix(self, colour, looks, axis_of, deadline):
+        """At approach_altitude, the look points (x, y, yaw) in turn until colour's floor banner is seen, then again from
+        overhead_hold_back on the near side of it (almost straight down, so a wrong height hardly moves the fix) ->
+        (banner centre, tunnel axis = axis_of(fix)), or None."""
+        alt = self.g('approach_altitude')
+        self.overhead_colour = colour
         try:
             self.set_params(self.overhead_params, active=True)
         except Abort as e:
-            self.get_logger().warn(f'OVERHEAD_GREEN: overhead_banner not reachable ({e})')
+            self.get_logger().warn(f'{self.state}: overhead_banner not reachable ({e})')
             return None
         try:
-            if self.qr_poly is not None:              # towards the QR area (the tunnels lie between)
-                cx, cy = np.mean(self.qr_poly, axis=0)
-                head = math.atan2(cy - home[1], cx - home[0])
-            else:
-                head = yaw0
-            u, n = np.array([math.cos(head), math.sin(head)]), np.array([-math.sin(head), math.cos(head)])
-            x0, y0, _, _ = self.pose()
-            fix, reds = None, []
-            for lat in self.g('overhead_lateral'):
-                s = 0.0
-                while fix is None and s <= self.g('overhead_search_dist') + 1e-6:
-                    tx, ty = np.array([x0, y0]) + s * u + lat * n
-                    self.fly(tx, ty, alt, deadline, yaw=head)
-                    fix, r = self.overhead_look()
-                    reds += r
-                    s += self.g('overhead_step')
+            fix = None
+            for x, y, yaw in looks:
+                self.fly(x, y, alt, deadline, yaw=yaw)
+                fix = self.overhead_look()
                 if fix is not None:
                     break
             if fix is None:
-                self.set_state('OVERHEAD_GREEN', result='no green banner seen from above')
+                self.set_state(self.state, result=f'no {colour} banner seen from above')
                 return None
-            # the tunnel axis: across the banner's long edge, pointing away from home
             for _ in range(3):
-                axis = fix['across'] + math.pi / 2
-                if math.cos(axis) * (fix['centre'][0] - home[0]) + math.sin(axis) * (fix['centre'][1] - home[1]) < 0:
-                    axis += math.pi
-                a = np.array([math.cos(axis), math.sin(axis)])
-                look = fix['centre'] - self.g('overhead_hold_back') * a     # start side: never over the roof
-                self.fly(*look, alt, deadline, yaw=axis)
-                again, r = self.overhead_look()
-                reds += r
+                axis = axis_of(fix)
+                look = fix['centre'] - self.g('overhead_hold_back') * np.array([math.cos(axis), math.sin(axis)])
+                self.fly(*look, alt, deadline, yaw=axis)                   # short of the mouth: never over the roof
+                again = self.overhead_look()
                 if again is None:
                     break
                 moved = float(np.linalg.norm(again['centre'] - fix['centre']))
                 fix = again
                 if moved < 0.3:
                     break
-            axis = fix['across'] + math.pi / 2
-            if math.cos(axis) * (fix['centre'][0] - home[0]) + math.sin(axis) * (fix['centre'][1] - home[1]) < 0:
-                axis += math.pi
-            a = np.array([math.cos(axis), math.sin(axis)])
-            c = fix['centre']
-            red = [q for q in reds if np.linalg.norm(q - c) > 1.5]
-            red_c = np.mean(red, axis=0) if red else None
-            self.set_state('OVERHEAD_GREEN', banner=[round(float(v), 2) for v in c], yaw_deg=round(math.degrees(axis), 1),
-                           banner_len_m=round(fix['length'], 2), looks=fix['n'],
-                           red=[round(float(v), 2) for v in red_c] if red_c is not None else None)
+            axis, c = axis_of(fix), fix['centre']
+            self.set_state(self.state, banner=[round(float(v), 2) for v in c], yaw_deg=round(math.degrees(axis), 1),
+                           banner_len_m=round(fix['length'], 2), looks=fix['n'])
+            return c, axis
         finally:
             try:
                 self.set_params(self.overhead_params, active=False)
             except Abort:
                 pass
-        # standoff before the mouth at 5 m, THEN down below 8 ft (outside the tunnel), then the D435 wall fit
-        so = c - 3.0 * a
-        self.fly(*so, alt, deadline, yaw=axis)
+
+    def fit_tunnel(self, state, c, axis, exclude, exclude_yaw):
+        """From the banner fix: overhead_standoff before the mouth at approach_altitude, facing in, THEN straight down
+        (never lower sooner: the height isn't known well enough near the tunnel) and the D435 wall fit there, in
+        entry_align's geofence mode -> its result or None."""
+        a = np.array([math.cos(axis), math.sin(axis)])
+        so = c - self.g('overhead_standoff') * a
+        deadline = self.limit('align')
+        self.fly(*so, self.g('approach_altitude'), deadline, yaw=axis)
         self.fly(*so, self.g('align_altitude'), deadline, yaw=axis)
-        ex = red_c if red_c is not None else c - 1000.0 * a          # far away: nothing excluded
-        found = self.align('ALIGN_GREEN', mode='geofence', predict_x=float(c[0]), predict_y=float(c[1]),
-                           predict_yaw=axis, exclude_x=float(ex[0]), exclude_y=float(ex[1]), exclude_yaw=axis,
+        found = self.align(state, mode='geofence', predict_x=float(c[0]), predict_y=float(c[1]), predict_yaw=axis,
+                           exclude_x=float(exclude[0]), exclude_y=float(exclude[1]), exclude_yaw=exclude_yaw,
                            exclude_radius=self.g('exclude_radius'), geofence_max_lateral=self.g('overhead_lateral_max'))
         if found:
             found.setdefault('banner', [round(float(c[0]), 3), round(float(c[1]), 3), 0.0])
             found['overhead'] = True
         return found
+
+    def overhead_green(self, home, yaw0):
+        """OVERHEAD_GREEN (see the docstring) -> an entry_align result (the D435 wall fit from the overhead fix), or
+        None: then the D435 banner search as before."""
+        self.set_state('OVERHEAD_GREEN')
+        if self.qr_poly is not None:                  # towards the QR area (the tunnels lie between)
+            cx, cy = np.mean(self.qr_poly, axis=0)
+            head = math.atan2(cy - home[1], cx - home[0])
+        else:
+            head = yaw0
+        u, n = np.array([math.cos(head), math.sin(head)]), np.array([-math.sin(head), math.cos(head)])
+        x0, y0, _, _ = self.pose()
+
+        def looks():
+            for lat in self.g('overhead_lateral'):
+                s = 0.0
+                while s <= self.g('overhead_search_dist') + 1e-6:
+                    yield (*(np.array([x0, y0]) + s * u + lat * n), head)
+                    s += self.g('overhead_step')
+
+        def axis_of(fix):                             # across the banner's long edge, pointing away from home
+            axis = fix['across'] + math.pi / 2
+            if math.cos(axis) * (fix['centre'][0] - home[0]) + math.sin(axis) * (fix['centre'][1] - home[1]) < 0:
+                axis += math.pi
+            return axis
+
+        res = self.overhead_fix('green', looks(), axis_of, self.limit('align'))
+        if res is None:
+            return None
+        c, axis = res
+        far = c - 1000.0 * np.array([math.cos(axis), math.sin(axis)])    # nothing excluded
+        return self.fit_tunnel('ALIGN_GREEN', c, axis, far, axis)
+
+    def overhead_exit(self):
+        """OVERHEAD_BLUE: as overhead_green, from the exit approach point. The axis is the entry tunnel's, reversed (the
+        tunnels are parallel, and walls give it better than a banner's edge seen from above) -> an entry_align result or
+        None, with the drone back over the approach point if the banner wasn't seen."""
+        gf = self.geofence
+        yaw = math.radians(gf['yaw_deg'])
+        self.set_state('OVERHEAD_BLUE')
+        x0, y0, _, _ = self.pose()
+        n = (-math.sin(yaw), math.cos(yaw))
+        looks = ((x0 + lat * n[0], y0 + lat * n[1], yaw + math.pi) for lat in self.g('overhead_exit_lateral'))
+        deadline = self.limit('align')
+        res = self.overhead_fix(self.g('exit_colour'), looks, lambda fix: yaw + math.pi, deadline)
+        if res is None:
+            self.fly(x0, y0, self.g('approach_altitude'), deadline)
+            return None
+        return self.fit_tunnel('ALIGN_EXIT', res[0], res[1], gf['entrance'], yaw)
 
     def apply_course(self):
         """The course dimensions of the ground station's geofence (dashboard Course: the organisers' defaults, editable -
@@ -1482,6 +1615,7 @@ class MissionSupervisor(Node):
                 if not entrance:
                     raise Abort(f'ALIGN_GREEN: {self.entry_state}')
                 self.record_entrance(entrance)
+                self.check_field(entrance)
                 self.record_corridor_end(self.run_corridor(entrance, 'ENTRY_CORRIDOR'))
 
             if mode == 'tunnel':
@@ -1521,8 +1655,17 @@ class MissionSupervisor(Node):
                 # the target read ends the search (QR area only: then home and land; whole mission: the drop, then the
                 # exit corridor), and so do all qr_count boards read - the target among them was missed then
                 all_read = lambda: len(self.qr_read) >= self.g('qr_count') and not self.target_seen  # noqa: E731
-                self.wait(lambda: self.target is not None or all_read() or self.explore_state.startswith('DONE')
-                          or out_of_time(), deadline, 0.5)
+                ended = lambda: self.target is not None or all_read() or self.explore_state.startswith('DONE') \
+                    or out_of_time()  # noqa: E731
+                self.stall = None
+                self.wait(lambda: ended() or (mode != 'delivery' and self.search_stalled()), deadline, 0.5)
+                if not ended():                          # running over the same area: the geofence is wrong
+                    self.trigger('/delivery/explore/stop', required=False)
+                    self.use_tunnel_zone(f'{self.g("search_stall_dist"):g} m flown in the search with no new ground')
+                    self.publish_qr_area(True)
+                    self.trigger('/delivery/map/reset')
+                    self.trigger('/delivery/explore/start')
+                    self.wait(ended, deadline, 0.5)
                 self.trigger('/delivery/explore/stop', required=False)
                 delivered = False
                 if self.target is not None and not drop:
