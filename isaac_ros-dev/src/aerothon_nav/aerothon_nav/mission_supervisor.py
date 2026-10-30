@@ -47,6 +47,10 @@
                     (qr_area.zone_mismatch), and against a search that keeps flying over seen ground (search_stall_dist):
                     wrong -> ignored for the rest of the mission (the bridge's keep-in too) and the QR area is
                     zone_depth (30 m, forward) x zone_across (40 m), centred on the tunnel, from the tunnel's exit
+  (start_from hop: the test app's first flight (user, 2026-10-31): arm, TAKEOFF to takeoff_altitude, HOVER hop_hold s,
+                  LAND, DONE. No marker, no search.)
+  (start_from delivery, GPS too poor for the flight to the zone (gps_err above gps_max_err, before or on the way):
+                  no DIRECT_TO_ZONE - the search starts where the drone is, the fence as its area (use_fence_zone).)
   (start_from search: test entry - after READ_START_QR, DIRECT_TO_SEARCH climbs to search_altitude, above the
                   corridor walls, and flies straight to search_start; no corridors, no geofence, so return_corridor
                   must be false: it lands on the target)
@@ -235,7 +239,9 @@ class MissionSupervisor(Node):
         p('retrace_speed', 0.3)       # m/s back along them
         p('no_timeout', True)         # disable state and mission time limits
         p('autopilot', os.environ.get('AEROTHON_AUTOPILOT', 'ardupilot'))   # px4 | ardupilot (offboard_bridge too)
-        p('start_from', 'takeoff')    # takeoff (full mission) | delivery (delivery only) | tunnel (tunnels + banners
+        p('hop_hold', 5.0)            # s hovering in the hop test
+        p('gps_max_err', 2.5)         # m: horizontal error above this: no flying to the zone by GPS
+        p('start_from', 'takeoff')    # takeoff (full mission) | delivery (delivery only) | hop | tunnel (tunnels + banners
         #                               only: entry corridor, straight to the exit corridor, home) | search | exit (tests)
         p('qr_count', 5)              # boards in the QR area: once that many are read the search ends, target or not
         p('drop', True)               # False: the QR area without the drop - explore + read everything, then out
@@ -1133,6 +1139,42 @@ class MissionSupervisor(Node):
             s['known'], s['flown'] = known, 0.0      # new ground (or the map was reset)
         return s['flown'] >= self.g('search_stall_dist')
 
+    def gps_err(self):
+        """m: the horizontal error of the GPS fix (1 sigma), inf without one, None if it isn't reported."""
+        g = self.gps
+        if g is None or g.status.status < 0:
+            return math.inf
+        if g.position_covariance_type == 0:
+            return None
+        return math.sqrt(max(g.position_covariance[0], g.position_covariance[4]))
+
+    def gps_poor(self):
+        e = self.gps_err()
+        return e is not None and e > self.g('gps_max_err')
+
+    def fly_to_zone(self, target, deadline):
+        """To the zone in 3 m legs, the GPS checked before each. Too poor: stop trusting it, search from here."""
+        alt = self.g('search_altitude')
+        while True:
+            x, y = self.pose()[:2]
+            left = math.dist(target, (x, y))
+            if left < 0.5:
+                return
+            if self.gps_poor():
+                self.use_fence_zone(f'GPS error {self.gps_err():.1f} m')
+                return
+            k = min(1.0, 3.0 / left)
+            self.fly(x + k * (target[0] - x), y + k * (target[1] - y), alt, deadline, vmax=1.5)
+
+    def use_fence_zone(self, why):
+        """Bad GPS on the way to the zone (user, 2026-10-31): the search starts where the drone is, 1 m past the start
+        marker, and the fence is its area: offboard_bridge's keep-in stays on, so does the QR-area lock on that polygon."""
+        if len(self.field) < 3:
+            raise Abort(f'{why}, and no fence to search in')
+        self.qr_poly, self.qr_src, self.qr_final = list(self.field), 'fence', True
+        self.set_state(self.state, fallback=f'{why}: searching from here, inside the fence')
+        self.publish_qr_area(False)                  # the mapper and the explorer take the new area from this
+
     def load_qr_area(self):
         """The QR area of the ground station's geofence: given (delivery_polygon) or to be cut from the arena at the
         entry tunnel's exit (qr_source tunnel_exit). Sim world files have neither: the zone rectangle as before."""
@@ -1556,6 +1598,15 @@ class MissionSupervisor(Node):
             self.wait(lambda: self.mav.mode == self.modes['offboard'], deadline)
             x, y, _, _ = self.pose()
             self.fly(x, y, alt, deadline)
+            if self.g('start_from') == 'hop':
+                self.set_state('HOVER')
+                end = self.clock_s() + self.g('hop_hold')
+                while self.clock_s() < end:
+                    self.check(deadline)
+                    self.flight.hold(0.2, alt)
+                self.land()
+                self.set_state('DONE', time_s=round(self.clock_s() - self.t_start, 1))
+                return
 
             # READ_START_QR: 1 m forward and read. Not seen: the QR may be behind us (the cameras look forward and
             # down) - the take-off heading isn't guaranteed (after a failsafe landing the drone faced 124 deg and
@@ -1599,7 +1650,7 @@ class MissionSupervisor(Node):
                 inside = self.zone_point((x, y), inset=1.0)
                 if math.dist(inside, (x, y)) > 0.5:
                     self.set_state('DIRECT_TO_ZONE', to=[round(v, 2) for v in inside])
-                    self.fly(*inside, self.g('search_altitude'), deadline, vmax=1.5)
+                    self.fly_to_zone(inside, deadline)
             elif mode == 'search':
                 # test entry: straight to the delivery zone (a test-only route: above the walls)
                 if self.g('return_corridor'):

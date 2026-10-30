@@ -63,7 +63,7 @@
   body.mode-real .offonly, body.mode-offboard .seg-full, body.mode-offboard .onlyros { display:none; }
   body.mode-radio .simonly, body.mode-radio .realonly, body.mode-radio .offonly, body.mode-radio .noradio { display:none; }
   body:not(.mode-radio) .radioonly { display:none; }
-  body.mode-radio .mainhide, body.mode-radio:not(.testapp) .altblock { display:none; }   /* the final mission: one Start, one Stop */
+  body.mode-radio .mainhide, body.mode-radio:not(.testapp) .altblock, body:not(.testapp) .testonly { display:none; }   /* the final mission: one Start, one Stop */
   body.simple .simplehide { display:none !important; }   /* 8084: world, segment, one Start, one Stop */
   #gfcard.top { margin:10px; } #autolog { width:100%; font:12px/1.4 ui-monospace, monospace; color:var(--dim); white-space:pre-wrap; }
   body.mode-radio.inflight .noflight { display:none !important; }   /* armed over the radio: MANUAL + LAND/RTL/KILL only */
@@ -90,11 +90,14 @@
     <option value="qr">QR area only (no drop)</option>
     <option value="tunnel" class="seg-full">Tunnels + banners only</option>
     <option value="qr_drop">QR area + payload drop</option>
+    <option value="hop">Arm, take off, land</option>
   </select>
   <select id="codever" class="noradio simplehide" title="which mission code flies (the supervisor, explorer and the other mission nodes): the working tree, or a committed version - a known-good one to fall back to without reverting files"><option value="">code: current (working tree)</option></select>
   <select id="corridor" class="noradio onlyros simplehide" onchange="corridorUi()" title="who flies the tunnels. current: our corridor_nav / entry_align on the flight controller's estimate + 2D SLAM (D435 depth, emitter on). AeroTHON: the ~/AeroTHON_2026/vio_cuda_ws code in its own container - cuVSLAM VIO on the D435 IR pair + the Pixhawk IMU, its corridor_nav (gap follower, Nav2), entry_align, obstacle_scan; banners still by drone_qr_detector's detector on the Arducam">
     <option value="current">corridor: current</option><option value="aerothon">corridor: AeroTHON (cuVSLAM stereo + IMU)</option></select>
   <label class="pill noradio onlyros simplehide" id="viofcwrap" title="AeroTHON corridor only: send its VIO velocity to ArduPilot EKF3 and fly the tunnels on it (source set 2, switched at the entrance, back to GPS at the exit). The sim gets the params itself; the REAL flight controller needs EK3_SRC2_VELXY 6 + VISO_TYPE 1 set first (vio_bringup/config) - off: VIO is only computed and checked"><input type="checkbox" id="viofc"> VIO → EKF3</label>
+  <select id="testrun" class="testonly noflight" title="what this Start flies">
+    <option value="hop">Arm, take off, land</option><option value="qr_drop">Start marker + marker area + drop</option><option value="full">Whole mission</option></select>
   <button class="go big radioonly noflight" id="autostart" onclick="startAuto()">▶ Start</button>
   <button class="stop big radioonly noflight" onclick="post('auto_stop')">■ Stop</button>
   <button class="go noflight mainhide" id="launchbtn" onclick="launchStack()" title="Gazebo + autopilot SITL + MAVROS + the mission nodes (sim), or the drone's whole stack (real); 1-3 min">▶ Launch stack</button>
@@ -226,7 +229,7 @@
     <div class="checks" id="checks"></div>
   </div>
   <div class="card noflight simplehide" id="gfcard">
-    <h2>Geofence (GPS)</h2>
+    <h2><span class="testonly">Test geofence (not the mission's): </span>Geofence (GPS)</h2>
     <div class="d">The organisers' 6 points: fill the arena OR the QR area (whichever their 4 corners are), the other 2 in
       Extra. Arena only: the QR area's back + side walls are the arena's, its front wall = the entry tunnel's exit line (found in flight).</div>
     <div class="row"><b>Arena</b> <span class="d" id="narena"></span>
@@ -291,6 +294,7 @@ function fmt(v, d = 1) { return v === null || v === undefined ? '–' : (typeof 
 function mmss(s) { if (s == null) return '–'; s = Math.max(0, s); return `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`; }
 
 const SEG_LABEL = {full: 'WHOLE mission (tunnels + QR area + drop + exit)', qr: 'QR AREA ONLY (search + read, no drop, home, land)',
+  hop: 'ARM, TAKE OFF, HOVER, LAND',
   tunnel: 'TUNNELS + BANNERS ONLY (entry tunnel, exit tunnel, home, land)', qr_drop: 'QR AREA + DROP (search, drop on the target, home, land)'};
 function launchStack() {
   $('launchbtn').disabled = true;                    // one click: the stack takes 2-3 min (phase in the pill)
@@ -494,9 +498,10 @@ function altRender(s) {
 }
 function startAuto() {
   const test = snap && snap.test, h = Object.fromEntries(ALT_KEYS.map(k => [k, parseFloat(val('alt_' + k))]));
-  ask((test ? `TEST: start marker ${h.takeoff} m, tunnels ${h.tunnel} m, QR area ${h.search} m. ` : '') +
-      'Start the WHOLE mission? Preflight, then a 10 s countdown (Stop cancels), then it flies by itself.')
-    .then(y => y && post('auto_start', test ? {alts: h} : {}));
+  const seg = val('testrun');
+  ask((test ? (seg === 'hop' ? `TEST: arm, take off to ${h.takeoff} m, hover 5 s, land.` : `TEST: ${$('testrun').selectedOptions[0].textContent}: start marker ${h.takeoff} m, tunnels ${h.tunnel} m, QR area ${h.search} m.`) : 'Start the WHOLE mission?') +
+      ' Preflight, then a 10 s countdown (Stop cancels), then it flies by itself.')
+    .then(y => y && post('auto_start', test ? {alts: h, segment: seg} : {}));
 }
 async function altSet() { const j = await post('alt_plan', Object.fromEntries(ALT_KEYS.map(k => [k, parseFloat(val('alt_' + k))]))); if (j.ok) altDirty = false; }
 

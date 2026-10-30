@@ -56,7 +56,7 @@ TEST = False                 # --test: the radio dashboard's test copy (aerothon
 PORT = 8080
 AGENT = 194                  # the onboard Jetson's mav_agent (MAV_COMP_ID_ONBOARD_COMPUTER2)
 AGENT_CMD = 31010            # its MAV_CMD_USER_1; param1: 1 launch 2 stop 5 abort 6 status 7 start segment 8 operator
-SEG_CODE = {'full': 1, 'qr': 2, 'tunnel': 3, 'qr_drop': 4}
+SEG_CODE = {'full': 1, 'qr': 2, 'tunnel': 3, 'qr_drop': 4, 'hop': 5}
 
 WS = Path.home() / 'workspaces/isaac_ros-dev'
 DATA = WS / 'runs/gcs'
@@ -72,6 +72,7 @@ FSM = {
     'qr_drop': ['TAKEOFF', 'READ_START_QR', 'DIRECT_TO_ZONE', 'SEARCH_DELIVERY', 'DELIVER', 'DROP', 'ZONE_EXIT',
                 'RETURN_HOME', 'LAND', 'DONE'],
     'qr': ['TAKEOFF', 'READ_START_QR', 'DIRECT_TO_ZONE', 'SEARCH_DELIVERY', 'ZONE_EXIT', 'RETURN_HOME', 'LAND', 'DONE'],
+    'hop': ['TAKEOFF', 'HOVER', 'LAND', 'DONE'],
     'tunnel': ['TAKEOFF', 'READ_START_QR', 'OVERHEAD_GREEN', 'ALIGN_GREEN', 'GEOFENCE', 'ENTRY_CORRIDOR', 'TO_EXIT', 'OVERHEAD_BLUE', 'ALIGN_EXIT',
                'RETURN_CORRIDOR', 'RETURN_HOME', 'LAND', 'DONE'],
 }
@@ -81,6 +82,7 @@ SEGMENTS = {
     'qr': {'start_from': 'delivery', 'drop': False, 'return_corridor': False},
     'qr_drop': {'start_from': 'delivery', 'drop': True, 'return_corridor': False},
     'tunnel': {'start_from': 'tunnel', 'drop': False, 'return_corridor': True},
+    'hop': {'start_from': 'hop', 'drop': False, 'return_corridor': False},   # arm, take off, land (user, 2026-10-31)
 }
 SEGMENT_ALIAS = {'delivery': 'qr_drop'}
 # the commanded-vs-actual and bench panels: msg id, Hz - ATTITUDE, LOCAL_POSITION_NED, SERVO_OUTPUT_RAW,
@@ -2237,7 +2239,7 @@ def start_mission(kind, payload='', read_qr=True, override=False, alts=None):
         alts = load_alts() if alts is None else checked_alts(alts)
     except (TypeError, KeyError, ValueError) as e:
         return False, f'altitudes: {e}'
-    s2, m2 = push_alts(alts, search=kind != 'tunnel')   # never start on heights other than the bars show
+    s2, m2 = push_alts(alts, search=kind not in ('tunnel', 'hop'))   # never start on heights other than the bars show
     if not s2:
         return False, f'altitudes: {m2}'
     success, msg = ROS.call(ROS.cli_start, ROS.Trigger.Request())
@@ -2290,6 +2292,10 @@ def auto_start(body):
         return False, 'the drone is ARMED'
     cmd = [sys.executable, '-u', str(HERE / 'auto_mission.py'), '--url', f'http://127.0.0.1:{PORT}']
     if TEST:
+        seg = body.get('segment', 'full')
+        if seg not in SEG_CODE:
+            return False, 'run: ' + ' | '.join(SEG_CODE)
+        cmd += ['--segment', seg]
         try:
             a = checked_alts(body.get('alts'))
         except (TypeError, KeyError, ValueError) as e:
@@ -2325,7 +2331,7 @@ async def index(request):
     html = html.replace('<title>AeroTHON Ground Station</title>', f'<title>AeroTHON {"TEST app" if TEST else "ArUco Delivery"}</title>')
     if TEST:
         html = html.replace('<body>', '<body><div style="background:#b45309;color:#fff;font:700 14px system-ui;padding:6px 10px">'
-                            'TEST APP: flies the heights set below, not the mission heights</div>', 1)
+                            'TEST APP: its own geofence file and the heights set below, not the mission\'s</div>', 1)
     html = html.replace('<option>competition</option><option>comp_far1</option>',
                         '<option>competition_aruco</option><option>comp_far1_aruco</option>')
     # every segment, as the QR mission had them: the whole mission (start marker, tunnels, the marker area, the drop,
@@ -2353,8 +2359,10 @@ def main():
     ap.add_argument('--offboard-alt', type=float, default=10.0,
                     help='offboard (VRX): search height, m - the drop is at min(5 m, this)')
     args = ap.parse_args()
-    global RADIO, MARKER, OFFBOARD_ALT, TEST, PORT
+    global RADIO, MARKER, OFFBOARD_ALT, TEST, PORT, GF_FILE
     MARKER, OFFBOARD_ALT, TEST, PORT = args.marker, args.offboard_alt, args.test, args.port
+    if TEST:                                          # its own corners: the mission's file is never touched
+        GF_FILE = DATA / 'geofence_test.json'
     STACK.marker = MARKER
     RADIO = args.radio or None
     DATA.mkdir(parents=True, exist_ok=True)
