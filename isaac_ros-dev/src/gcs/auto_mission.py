@@ -97,8 +97,22 @@ def main():
     if not r.get('ok'):
         raise SystemExit('[mission] the geofence did not reach the drone - check the radio and run again')
 
-    # 3. the stack
+    # 3. a clean start: the last run's files / memory cleared (the stack must be stopped for that), then the stack
     phase = st.get('message', '')
+    if phase not in ('stopped', 'ready'):
+        say(f'stack: {phase} - waiting for it to settle')
+        st = wait(page, 'the stack to be stopped or ready', lambda s: (s.get('message') in ('stopped', 'ready'),
+                                                                        s.get('message')), 240, every=10)
+        phase = st.get('message', '')
+    if phase == 'ready':
+        say('the stack is already up from before: Stop stack, then reset (a clean start)')
+        page.post('stack_stop', {})
+        wait(page, 'the stack to stop', lambda s: (s.get('message') == 'stopped', s.get('message')), 180, every=10)
+        phase = 'stopped'
+    r = page.post('mission_reset', {})
+    say(f'reset: {"OK" if r.get("ok") else "FAILED"} {r.get("message", "")}')
+    if not r.get('ok'):
+        raise SystemExit('[mission] the reset did not go through - nothing launched')
     if phase != 'ready':
         say('Launch stack (ArUco) - 1 to 3 min')
         r = page.post('stack_start', {'mode': 'real'})

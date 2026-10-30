@@ -50,7 +50,7 @@ from pymavlink import mavutil  # noqa: E402
 COMP = 194                       # MAV_COMP_ID_ONBOARD_COMPUTER2
 CMD = 31010                      # MAV_CMD_USER_1
 ACTIONS = {1: 'launch', 2: 'stop', 3: 'full', 4: 'delivery', 5: 'abort', 6: 'status', 7: 'segment', 8: 'operator',
-           9: 'geofence', 10: 'alt_trim', 11: 'field'}
+           9: 'geofence', 10: 'alt_trim', 11: 'field', 12: 'reset'}
 FIELD_SH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'field_test', 'field_test.sh')
 FIELD_URL = 'http://127.0.0.1:8097'   # field_test/field_vision.py
 T_FIELD = 32820                  # out: the field test's guidance (field_test/field_proto.py)
@@ -185,7 +185,7 @@ class Agent:
     async def run_action(self, action, p2, p3=0, p4=0):
         if action == 'launch':
             body = {'mode': 'sim', 'world': 'competition'} if int(p2) == 1 else {'mode': 'real', 'link': self.a.link}
-            body['marker'] = 'aruco' if int(p3) == 1 else 'qr'
+            body['marker'] = 'aruco'                  # the course has ArUco markers only (2026-10-30), whatever p3
             return await self.api('stack_start', body)
         if action == 'stop':
             return await self.api('stack_stop', {})
@@ -198,6 +198,8 @@ class Agent:
             if seg is None:
                 return False, f'segment code {p2}: 1 full 2 qr 3 tunnel 4 qr_drop'
             return await self.api('mission_start', {'type': seg})
+        if action == 'reset':                         # 12: a clean start (the last mission's files + memory)
+            return await self.api('mission_reset', {})
         if action == 'operator':                      # the ground's LAND / RTH / RTL / KILL: no failsafe flight over it
             return await self.api('operator', {})
         if action == 'status':

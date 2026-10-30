@@ -52,6 +52,11 @@ It stays saved on this PC. Close it (`aerothon stop`).
    start zone.
 5. After landing: **■ Stop stack** on the page, `aerothon stop`.
 
+**Reset:** `aerothon mission` RESETS by itself before every launch (stops a stack left up, clears the last run's start
+marker, marker-area memory - red zones and markers rejected as not the target - and tunnel entrance). By hand: the
+**↺ Reset mission** button in the Mission card (stack stopped, drone disarmed). Saving the geofence never launches
+anything.
+
 ## 3. The page while it flies (8080)
 
 Once the drone is armed the page shows only these (the rest is hidden):

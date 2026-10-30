@@ -124,6 +124,7 @@
       <div class="row noflight">
         <button class="go big mbtn" id="startbtn" onclick="startMission(val('segment'))" title="start the segment chosen at the top (the sim starts it by itself after Launch)">▶ Start</button>
         <button class="stop big noradio" onclick="ask('Abort the mission? (failsafe: hold, then land in place)').then(y => y && post('mission_abort'))">■ Abort</button>
+        <button title="a clean start for the next attempt: clears the last mission's start marker, the marker-area memory (red zones, markers rejected as not the target), the tunnel entrance, this page's track and log. Stack stopped, drone disarmed. aerothon mission does it by itself before every launch." onclick="ask('Reset the mission? Clears the last run\'s start marker, marker memory, tunnel entrance and this page\'s track / log (stack stopped, disarmed only).').then(y => y && post('mission_reset'))">↺ Reset mission</button>
       </div>
       <div class="row noflight" title="search height trim, in flight: the explorer flies its search height + the trim at once (never below its minimum); back to 0 at the next search start. Over the radio in the final mission.">
         <b>Search height</b>

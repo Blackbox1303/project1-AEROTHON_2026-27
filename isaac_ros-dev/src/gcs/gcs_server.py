@@ -1491,6 +1491,8 @@ async def api(request):
         return ok(True, stack_phase(), mode=STACK.mode, run=STACK.run, state=S.ros.get('state'))
     if what == 'stack_stop':
         return ok(*(await loop.run_in_executor(None, STACK.stop)))
+    if what == 'mission_reset':                       # the Reset button / radio action 12 / aerothon mission
+        return ok(*(await loop.run_in_executor(None, mission_reset)))
     if what == 'alt_trim':                            # the search height +-0.5 m in flight (also from the radio)
         return ok(*(await loop.run_in_executor(None, alt_trim, body.get('delta'))))
     if what == 'mission_start':                       # full | qr | qr_drop | tunnel
@@ -1527,6 +1529,43 @@ MODES = {'loiter': 5, 'poshold': 16, 'alt_hold': 2, 'stabilize': 0, 'brake': 17}
 EMERGENCY.update({m: (176, 1, n) for m, n in MODES.items()})
 
 
+MISSION_FILES = '~/.ros/aerothon_*'   # in the dev container: start marker, marker-area memory, entrance geofence
+
+
+def clear_ui():
+    """This page's view of the last mission: track, log, messages, timers."""
+    S.ros.update(track=[], log=[], qrs=[], target=None, candidates=[])
+    S.tel_track, S.statustext = [], []
+    S.mission_t0 = S.zone_t0 = None
+
+
+def mission_reset():
+    """A clean start for the next attempt (user, 2026-10-30): the files the last mission left in the dev container
+    (~/.ros/aerothon_*: the start marker's image, the marker-area memory - red zones AND the markers rejected as not the
+    target, reloaded at the next launch while the geofence is the same: another start marker next time would never be
+    matched -, the tunnel entrance) and this page's track / log. Disarmed and the stack stopped only."""
+    if S.tel.get('armed'):
+        return False, 'the drone is ARMED: no reset in flight'
+    if STACK.running():
+        return False, 'Stop stack first (the mission nodes hold the memory)'
+    c = 'isaac_ros_dev-aarch64-pyzbar-container'
+    try:
+        up = subprocess.run(['docker', 'container', 'inspect', '-f', '{{.State.Running}}', c], capture_output=True,
+                            text=True, timeout=10).stdout.strip() == 'true'
+        if not up:
+            subprocess.run(['docker', 'start', c], capture_output=True, timeout=60, check=True)
+        r = subprocess.run(['docker', 'exec', '-u', 'admin', c, 'bash', '-c',
+                            f'ls {MISSION_FILES} 2>/dev/null; rm -f {MISSION_FILES}'],
+                           capture_output=True, text=True, timeout=30)
+        if not up:
+            subprocess.run(['docker', 'stop', '-t', '5', c], capture_output=True, timeout=60)
+    except Exception as e:
+        return False, f'reset: the dev container ({e})'
+    gone = [os.path.basename(f) for f in r.stdout.split()]
+    clear_ui()
+    return True, f'mission reset: {len(gone)} file(s) cleared ({", ".join(gone) or "none left"}), the page\'s track / log too'
+
+
 def radio_api(what, body):
     """--radio (the final flight, on the Lenovo): only what the radio carries. Before take-off: launch / stop the
     onboard stack, start a segment (mav_agent, 1/194); any time: LAND / RTH / RTL / KILL straight to ArduCopter
@@ -1550,6 +1589,11 @@ def radio_api(what, body):
         return MAV.command_ack(AGENT_CMD, 7, SEG_CODE[seg], comp=AGENT, timeout=10.0, final_within=30.0)
     if what == 'mission_abort':
         return MAV.command_ack(AGENT_CMD, 5, comp=AGENT, timeout=10.0, final_within=15.0)
+    if what == 'mission_reset':                       # agent action 12: the drone's reset, then this page's view
+        ok_, msg = MAV.command_ack(AGENT_CMD, 12, comp=AGENT, timeout=10.0, final_within=90.0)
+        if ok_:
+            clear_ui()
+        return ok_, msg
     if what == 'apply':
         return radio_apply_gf()
     if what == 'alt_trim':                            # in flight too: agent action 10, param2 = the step (m)
