@@ -826,14 +826,19 @@ class FrontierExplorer(Node):
                                                  float(self.g('altitude')) + float(self.g('alt_offset'))))
 
     def on_params(self, params):
-        """An alt_offset change applies at once: the route being flown takes the new height too."""
+        """An altitude / alt_offset change applies at once: the route being flown takes the new height too."""
         from rcl_interfaces.msg import SetParametersResult
         for prm in params:
-            if prm.name == 'alt_offset':
-                alt = min(float(self.g('alt_max')), max(float(self.g('alt_min')), float(self.g('altitude')) + float(prm.value)))
+            if prm.name in ('alt_offset', 'altitude'):
+                base, trim = float(self.g('altitude')), float(self.g('alt_offset'))
+                if prm.name == 'altitude':
+                    base = float(prm.value)
+                else:
+                    trim = float(prm.value)
+                alt = min(float(self.g('alt_max')), max(float(self.g('alt_min')), base + trim))
                 if self.path.active:
                     self.path.alt = alt
-                self.get_logger().info(f'search height trim {float(prm.value):+.1f} m: flying at {alt:.1f} m')
+                self.get_logger().info(f'search height {base:.1f} m, trim {trim:+.1f} m: flying at {alt:.1f} m')
         return SetParametersResult(successful=True)
 
     def now_s(self):

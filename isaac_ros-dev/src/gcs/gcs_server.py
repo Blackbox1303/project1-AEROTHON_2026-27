@@ -65,11 +65,11 @@ EARTH_R = 6378137.0
 # the supervisor's FSM, in mission order (for the dashboard's pipeline)
 FSM = {
     'full': ['TAKEOFF', 'READ_START_QR', 'OVERHEAD_GREEN', 'ALIGN_GREEN', 'GEOFENCE', 'ENTRY_CORRIDOR', 'SEARCH_DELIVERY', 'DELIVER',
-             'DROP', 'TO_EXIT', 'ALIGN_EXIT', 'RETURN_CORRIDOR', 'RETURN_HOME', 'LAND', 'DONE'],
+             'DROP', 'TO_EXIT', 'OVERHEAD_BLUE', 'ALIGN_EXIT', 'RETURN_CORRIDOR', 'RETURN_HOME', 'LAND', 'DONE'],
     'qr_drop': ['TAKEOFF', 'READ_START_QR', 'DIRECT_TO_ZONE', 'SEARCH_DELIVERY', 'DELIVER', 'DROP', 'ZONE_EXIT',
                 'RETURN_HOME', 'LAND', 'DONE'],
     'qr': ['TAKEOFF', 'READ_START_QR', 'DIRECT_TO_ZONE', 'SEARCH_DELIVERY', 'ZONE_EXIT', 'RETURN_HOME', 'LAND', 'DONE'],
-    'tunnel': ['TAKEOFF', 'READ_START_QR', 'OVERHEAD_GREEN', 'ALIGN_GREEN', 'GEOFENCE', 'ENTRY_CORRIDOR', 'TO_EXIT', 'ALIGN_EXIT',
+    'tunnel': ['TAKEOFF', 'READ_START_QR', 'OVERHEAD_GREEN', 'ALIGN_GREEN', 'GEOFENCE', 'ENTRY_CORRIDOR', 'TO_EXIT', 'OVERHEAD_BLUE', 'ALIGN_EXIT',
                'RETURN_CORRIDOR', 'RETURN_HOME', 'LAND', 'DONE'],
 }
 # the mission segments: supervisor parameters. 'delivery' = the old name of qr_drop (mav_agent, radio GCS)
@@ -80,6 +80,9 @@ SEGMENTS = {
     'tunnel': {'start_from': 'tunnel', 'drop': False, 'return_corridor': True},
 }
 SEGMENT_ALIAS = {'delivery': 'qr_drop'}
+# the commanded-vs-actual and bench panels: msg id, Hz - ATTITUDE, LOCAL_POSITION_NED, SERVO_OUTPUT_RAW,
+# NAV_CONTROLLER_OUTPUT, ESC_TELEMETRY_1_TO_4
+PANEL_STREAMS = ((30, 5), (32, 5), (36, 5), (62, 5), (11030, 2))
 CAMERAS = {
     'qr_hud': 'http://127.0.0.1:8091/annotated.jpg',
     'arducam': '/arducam/image_raw',
@@ -142,6 +145,9 @@ class State:
         self.zone_t0 = None
         self.alt_offset = 0.0        # the operator's search-height trim (m), as last set on the explorer
         self.sim_clock = None        # (sim s, monotonic when received) from /clock: the sim's mission clock
+        self.setpoint = None         # the last /mavros/setpoint_raw/local (ENU), what the Jetson asks the autopilot for
+        self.alt_cmd = None          # (m, monotonic) offboard_bridge's altitude target, from /nav/bridge_state
+        self.obst, self.obst_ver = {}, 0   # /vio/obstacle_scan hits in odom: (grid cell) -> hits, for the map
 
 
 def clock_s():
@@ -290,6 +296,9 @@ class Mavlink(threading.Thread):
                 self.last_req = now
                 self.request(49)                      # GPS_GLOBAL_ORIGIN
                 self.request(242)                     # HOME_POSITION
+                if not self.radio:                    # the commanded-vs-actual + motors panels (not on the SiK radio)
+                    for msg_id, hz in PANEL_STREAMS:
+                        self.command(511, msg_id, 1e6 / hz)   # MAV_CMD_SET_MESSAGE_INTERVAL: this link only
             if msg is None:
                 continue
             t = msg.get_type()
@@ -315,6 +324,7 @@ class Mavlink(threading.Thread):
                 elif t == 'SYS_STATUS':
                     tel.update(batt_v=msg.voltage_battery / 1000 if msg.voltage_battery != 65535 else None,
                                batt_pct=msg.battery_remaining if msg.battery_remaining >= 0 else None,
+                               batt_a=msg.current_battery / 100 if msg.current_battery >= 0 else None,
                                sensors_health=msg.onboard_control_sensors_health,
                                sensors_enabled=msg.onboard_control_sensors_enabled)
                 elif t == 'BATTERY_STATUS':
@@ -323,14 +333,23 @@ class Mavlink(threading.Thread):
                 elif t == 'ATTITUDE':
                     tel.update(roll=math.degrees(msg.roll), pitch=math.degrees(msg.pitch), yaw=math.degrees(msg.yaw))
                     tel['yaw_enu'] = math.pi / 2 - msg.yaw            # NED heading -> ENU yaw
+                    tel['yaw_rate'] = -math.degrees(msg.yawspeed)     # deg/s, ENU like the bridge's yaw_rate
                 elif t == 'VFR_HUD':
                     tel.update(groundspeed=msg.groundspeed, climb=msg.climb, throttle=msg.throttle)
                 elif t == 'LOCAL_POSITION_NED':
                     tel.update(local_x=msg.y, local_y=msg.x, local_z=-msg.z)      # ENU
+                    tel.update(vel_e=msg.vy, vel_n=msg.vx, vel_u=-msg.vz)
                     S.tel_pose = (msg.y, msg.x, -msg.z, tel.get('yaw_enu', 0.0))
                     tr = S.tel_track
                     if not tr or math.dist(tr[-1], (msg.y, msg.x)) > 0.3:
                         S.tel_track = (tr + [(round(msg.y, 2), round(msg.x, 2))])[-3000:]
+                elif t == 'NAV_CONTROLLER_OUTPUT':                # the autopilot's own attitude target, height error
+                    tel.update(nav_roll=msg.nav_roll, nav_pitch=msg.nav_pitch, nav_yaw=msg.nav_bearing % 360,
+                               alt_error=msg.alt_error)
+                elif t == 'SERVO_OUTPUT_RAW':
+                    tel['servo'] = [msg.servo1_raw, msg.servo2_raw, msg.servo3_raw, msg.servo4_raw]
+                elif t == 'ESC_TELEMETRY_1_TO_4':                 # only if the ESCs report (BDShot / telemetry)
+                    tel['rpm'] = list(msg.rpm)
                 elif t == 'GPS_GLOBAL_ORIGIN':
                     S.origin = (msg.latitude / 1e7, msg.longitude / 1e7, msg.altitude / 1e3)
                 elif t == 'HOME_POSITION':
@@ -401,7 +420,7 @@ class Ros(threading.Thread):
         from rclpy.node import Node
         from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
         from geometry_msgs.msg import PoseStamped
-        from mavros_msgs.msg import State as MavState
+        from mavros_msgs.msg import PositionTarget, State as MavState
         from nav_msgs.msg import OccupancyGrid, Odometry
         from rcl_interfaces.srv import SetParameters
         from sensor_msgs.msg import Image
@@ -522,7 +541,27 @@ class Ros(threading.Thread):
                            ('vio', '/vio/health'), ('ekf_source', '/vio/ekf_source_state')):
             n.create_subscription(String, topic, on_node_state(key), 10)
         from sensor_msgs.msg import LaserScan
-        n.create_subscription(LaserScan, '/vio/obstacle_scan', lambda m: stamp('scan'), qos_profile_sensor_data)
+
+        def on_scan(m):
+            stamp('scan')
+            add_obstacles(m)
+
+        def on_setpoint(m):
+            sp = {'t': time.monotonic(), 'velocity': bool(m.type_mask & PositionTarget.IGNORE_PX)}
+            if sp['velocity']:
+                sp.update(ve=m.velocity.x, vn=m.velocity.y, vu=m.velocity.z, yaw_rate=math.degrees(m.yaw_rate))
+            else:
+                sp.update(x=m.position.x, y=m.position.y, z=m.position.z)
+            S.setpoint = sp
+
+        def on_bridge(m):
+            part = m.data.partition('alt target ')[2]
+            if part and not m.data.startswith('idle'):
+                S.alt_cmd = (float(part.split(';')[0]), time.monotonic())
+
+        n.create_subscription(LaserScan, '/vio/obstacle_scan', on_scan, qos_profile_sensor_data)
+        n.create_subscription(PositionTarget, '/mavros/setpoint_raw/local', on_setpoint, 10)
+        n.create_subscription(String, '/nav/bridge_state', on_bridge, 10)
 
         def on_vio_pose(m):                           # cuVSLAM (corridor:=aerothon): its own frame, where it started
             p = m.pose.pose.position
@@ -536,6 +575,7 @@ class Ros(threading.Thread):
         self.cli_operator = n.create_client(Trigger, '/mission/operator')
         self.cli_params = n.create_client(SetParameters, '/mission_supervisor/set_parameters')
         self.cli_explore_params = n.create_client(SetParameters, '/frontier_explorer/set_parameters')
+        self.ParamService = SetParameters
         self.pub_qr = n.create_publisher(String, '/mission/start_qr', latched)
         self.set_camera('qr_hud')
         ex = MultiThreadedExecutor()
@@ -676,22 +716,25 @@ class Ros(threading.Thread):
         return self.call(self.cli_params, req)
 
 
-    def set_alt_offset(self, offset):
-        """The explorer's search-height trim (alt_offset, m) -> (ok, message)."""
+    def set_doubles(self, cli, who, **kv):
+        """Float parameters on a node -> (ok, message): the node's own answer for each, not just 'it replied'."""
         from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
-        req = self.SetParameters.Request(parameters=[Parameter(name='alt_offset', value=ParameterValue(
-            type=ParameterType.PARAMETER_DOUBLE, double_value=float(offset)))])
-        cli = self.cli_explore_params
+        req = self.SetParameters.Request(parameters=[Parameter(name=k, value=ParameterValue(
+            type=ParameterType.PARAMETER_DOUBLE, double_value=float(v))) for k, v in kv.items()])
         if not cli.wait_for_service(timeout_sec=3.0):
-            return False, 'the explorer is not running (mission stack up?)'
+            return False, f'{who} is not running (mission stack up?)'
         fut = cli.call_async(req)
         end = time.monotonic() + 5.0
         while not fut.done() and time.monotonic() < end:
             time.sleep(0.05)
         if not fut.done():
-            return False, 'the explorer did not answer'
-        r = fut.result().results[0]
-        return r.successful, r.reason or 'ok'
+            return False, f'{who} did not answer'
+        bad = [r.reason or 'refused' for r in fut.result().results if not r.successful]
+        return not bad, '; '.join(bad) or 'ok'
+
+    def set_alt_offset(self, offset):
+        """The explorer's search-height trim (alt_offset, m) -> (ok, message)."""
+        return self.set_doubles(self.cli_explore_params, 'the explorer', alt_offset=offset)
 
 
 ALT_TRIM_STEP, ALT_TRIM_MIN, ALT_TRIM_MAX = 0.5, -9.0, 0.5   # m: up to 9.5 m (never above 10: airspace); the explorer keeps it above its alt_min
@@ -711,6 +754,241 @@ def alt_trim(delta):
         return False, f'height trim: {msg}'
     S.alt_offset = new
     return True, f'search height trim {new:+.1f} m'
+
+
+# ---- the dashboard's altitude bars (user, 2026-10-30): kept across restarts, pushed again before every Start.
+# key: (supervisor parameter, default, lowest, highest). 9.5 m: the airspace cap; tunnel 2.0: the supervisor's own cap
+# (8 ft ceiling - 0.14 - 0.3) and altitude_planner's z_max; search 5.5: the explorer's alt_min (5 m is the drop height)
+ALT_FILE = DATA / 'altitudes.json'
+ALT_PLAN = {'takeoff': ('takeoff_altitude', 5.0, 2.0, 9.5), 'tunnel': ('tunnel_altitude', 1.5, 0.8, 2.0),
+            'search': ('search_altitude', 9.0, 5.5, 9.5)}
+
+
+def load_alts():
+    try:
+        saved = json.loads(ALT_FILE.read_text())
+    except (OSError, ValueError):
+        saved = {}
+    return {k: float(saved.get(k, d[1])) for k, d in ALT_PLAN.items()}
+
+
+def push_alts(alts, search=True):
+    """To the nodes -> (ok, message). The search height is two parameters: the supervisor flies to it, but the explorer
+    holds its own `altitude` during the search and nothing passes it across."""
+    success, msg = ROS.set_doubles(ROS.cli_params, 'the supervisor', **{ALT_PLAN[k][0]: v for k, v in alts.items()})
+    if success and search:
+        success, msg = ROS.set_doubles(ROS.cli_explore_params, 'the explorer', altitude=alts['search'])
+    return success, msg
+
+
+def set_alts(body):
+    """The bars' Set -> (ok, message). Out of range is refused, not clamped: the bar must show what will fly."""
+    alts = load_alts()
+    for k, (_, _, lo, hi) in ALT_PLAN.items():
+        if k in body:
+            try:
+                v = round(float(body[k]), 2)
+            except (TypeError, ValueError):
+                return False, f'{k}: metres'
+            if not lo <= v <= hi:
+                return False, f'{k} {v} m: allowed {lo} - {hi} m'
+            alts[k] = v
+    ALT_FILE.write_text(json.dumps(alts))
+    success, msg = push_alts(alts)
+    text = ' · '.join(f'{k} {v:.1f} m' for k, v in alts.items())
+    return True, f'{text}: set on the drone' if success else f'{text}: saved, sent at Start ({msg})'
+
+
+# ---- the obstacles the D435 scan has seen, for the map
+OBST_CELL, OBST_MIN_HITS, OBST_MAX = 0.25, 3, 20000      # m, scans a cell must be hit in, cells kept
+_obst_t = 0.0
+
+
+def add_obstacles(m):
+    """2 Hz: /vio/obstacle_scan (angles in the drone's body frame, like offboard_bridge.safe) into odom cells."""
+    global _obst_t
+    now = time.monotonic()
+    p = drone_pose()[0]
+    if p is None or now - _obst_t < 0.5:
+        return
+    _obst_t = now
+    px, py, _, yaw = p
+    hit = set()
+    for i, r in enumerate(m.ranges):
+        if m.range_min <= r < m.range_max:
+            a = yaw + m.angle_min + i * m.angle_increment
+            hit.add((round((px + r * math.cos(a)) / OBST_CELL), round((py + r * math.sin(a)) / OBST_CELL)))
+    with S.lock:
+        for c in hit:
+            if c in S.obst or len(S.obst) < OBST_MAX:
+                S.obst[c] = S.obst.get(c, 0) + 1
+                S.obst_ver += S.obst[c] == OBST_MIN_HITS
+
+
+# ---- what the map's Actual side and the commanded-vs-actual panel show
+_truth = (None, None)
+
+
+def world_truth():
+    """Sim only: where everything really is, from the world file (world ENU, the spawn at the origin = odom). None on the
+    real drone: nothing knows the truth there."""
+    global _truth
+    if STACK.mode != 'sim':
+        return None
+    if _truth[0] != STACK.world:
+        try:
+            w = json.load(open(WORLDS / f'{STACK.world}.json'))
+        except (OSError, ValueError):
+            return None
+        z = w['delivery_zone']
+        _truth = (STACK.world, {
+            'zone': [[z['x_from'], z['y_from']], [z['x_to'], z['y_from']], [z['x_to'], z['y_to']], [z['x_from'], z['y_to']]],
+            'tunnels': [{'x0': c['x_from'], 'x1': c['x_to'], 'y': c['centre_y'], 'w': c['width']} for c in w['corridors']],
+            'obstacles': [{'x': p['x'], 'y': p['y'], 'sx': p['size_x'], 'sy': p['size_y'], 'kind': o.get('kind', '')}
+                          for c in w['corridors'] for o in c.get('obstacles', []) for p in o.get('parts', [o])],
+            'red': [{'x0': r['x_from'], 'x1': r['x_to'], 'y0': r['y_from'], 'y1': r['y_to']} for r in w.get('red_zones', [])],
+            'boards': [{'x': q['x'], 'y': q['y'], 'payload': q['payload'], 'target': bool(q.get('target'))}
+                       for q in w.get('delivery_qrs', [])]})
+    return _truth[1]
+
+
+def commanded():
+    """Commanded vs actual rows: [label, unit, commanded, actual, warn, bad, wraps at 360]. Commanded = None: nothing is
+    being asked for that (no fresh setpoint, or disarmed for the autopilot's attitude target)."""
+    t, now = S.tel, time.monotonic()
+    sp = S.setpoint if S.setpoint and now - S.setpoint['t'] < 1.0 else {}
+    vel = sp if sp.get('velocity') else {}
+    nav = t if t.get('armed') and fresh('NAV_CONTROLLER_OUTPUT', 2, S.tel_time) else {}
+    alt = t.get('local_z', t.get('alt_rel'))
+    alt_cmd = S.alt_cmd[0] if S.alt_cmd and now - S.alt_cmd[1] < 1.0 else None
+    if alt_cmd is None and nav and alt is not None:   # take-off / the autopilot's own modes: no bridge target
+        alt_cmd = alt + nav.get('alt_error', 0.0)
+    rows = [['Altitude', 'm', alt_cmd, alt, 0.3, 0.6, False],
+            ['Velocity east', 'm/s', vel.get('ve'), t.get('vel_e'), 0.3, 0.7, False],
+            ['Velocity north', 'm/s', vel.get('vn'), t.get('vel_n'), 0.3, 0.7, False],
+            ['Climb rate', 'm/s', vel.get('vu'), t.get('vel_u'), 0.3, 0.7, False],
+            ['Yaw rate', '°/s', vel.get('yaw_rate'), t.get('yaw_rate'), 10, 25, False],
+            ['Roll', '°', nav.get('nav_roll'), t.get('roll'), 3, 8, False],
+            ['Pitch', '°', nav.get('nav_pitch'), t.get('pitch'), 3, 8, False],
+            ['Heading', '°', nav.get('nav_yaw'), (t['yaw'] % 360) if 'yaw' in t else None, 5, 15, True]]
+    if 'x' in sp:
+        rows[1:1] = [['Hold east', 'm', sp['x'], t.get('local_x'), 0.4, 1.0, False],
+                     ['Hold north', 'm', sp['y'], t.get('local_y'), 0.4, 1.0, False]]
+    return {'rows': rows, 'source': 'velocity' if vel else 'hold' if sp else None}
+
+
+# ---- the bench test: PROPS OFF, disarmed. Motors by MAV_CMD_DO_MOTOR_TEST, one at a time (ArduCopter has no other way
+# to spin them unarmed); the winch the way the mission's drop does it (DO_AUX_FUNCTION on RC5's relay).
+BENCH_MOTORS = {1: 'FR', 2: 'RR', 3: 'RL', 4: 'FL'}   # test sequence A..D: clockwise from the front right
+BENCH_OUTPUT = (0, 3, 1, 2)                           # those four in SERVO_OUTPUT_RAW (quad X: 1 FR, 2 RL, 3 FL, 4 RR)
+BENCH_MAX_THR, BENCH_MAX_S, BENCH_ALL_S = 25.0, 10.0, 5.0   # %, s one motor, s each in the all-four run
+BENCH_WINCH_S, RC5_AUX = 60.0, 28                     # RC5_AUX: the supervisor's rc5_aux_function
+
+
+class Bench:
+    def __init__(self):
+        self.until = 0.0              # the running motor test ends (monotonic); ArduCopter says armed until then
+        self.motor, self.throttle = None, 0.0
+        self.winch_until = 0.0
+        self.lock = threading.Lock()
+
+    def blocked(self, body):
+        """Why nothing may spin now, or None. Heartbeats report armed during ArduCopter's own test, so 'armed' only
+        counts outside one - and the autopilot refuses a test when really armed anyway."""
+        if RADIO:
+            return 'bench test: on the Jetson dashboard only'
+        if body.get('props_off') is not True:
+            return 'tick PROPS ARE OFF first'
+        if not fresh('HEARTBEAT', 3, S.tel_time):
+            return 'no autopilot link'
+        if S.tel.get('armed') is not False and time.monotonic() > self.until:
+            return f'the drone must be DISARMED (armed {S.tel.get("armed")})'
+        return None
+
+    def run_motor(self, body):
+        why = self.blocked(body)
+        if why:
+            return False, why
+        try:
+            seq, thr, secs = int(body.get('motor', 0)), float(body.get('throttle', 10)), float(body.get('seconds', 3))
+        except (TypeError, ValueError):
+            return False, 'motor 0-4, throttle %, seconds'
+        if seq not in (0, *BENCH_MOTORS):
+            return False, 'motor: 0 (all) or 1-4'
+        if not 0 < thr <= BENCH_MAX_THR:
+            return False, f'throttle: up to {BENCH_MAX_THR:g} %'
+        limit = BENCH_ALL_S if seq == 0 else BENCH_MAX_S
+        if not 0 < secs <= limit:
+            return False, f'seconds: up to {limit:g}'
+        success, msg = MAV.command_ack(209, seq or 1, 0, thr, secs, 4 if seq == 0 else 1, 0, 0)
+        if not success:
+            return False, f'motor test: autopilot {msg} (see the FCU messages)'
+        # all four: each motor runs secs, then 50 % of that at zero before the next (ArduCopter motor_test.cpp)
+        self.motor, self.throttle = seq, thr
+        self.until = time.monotonic() + (secs * 1.5 * 4 if seq == 0 else secs) + 2.0
+        return True, f'{BENCH_MOTORS.get(seq, "all four")} at {thr:g} % for {secs:g} s{" each" if seq == 0 else ""}'
+
+    def stop_motor(self):
+        """Throttle 0, timeout 0: the autopilot ends the test on its next loop, sequence included. Sent only while a test
+        runs: this same command starts one otherwise."""
+        if time.monotonic() > self.until:
+            return True, 'motors: no test running'
+        success, msg = MAV.command_ack(209, 1, 0, 0, 0, 1, 0, 0)
+        self.motor = None
+        return success, f'motors stop: autopilot {msg}'
+
+    def run_winch(self, body):
+        why = self.blocked(body)
+        if why:
+            return False, why
+        try:
+            secs = float(body.get('seconds', 5))
+        except (TypeError, ValueError):
+            return False, 'seconds'
+        if not 0 < secs <= BENCH_WINCH_S:
+            return False, f'seconds: up to {BENCH_WINCH_S:g}'
+        if time.monotonic() < self.winch_until:
+            return False, 'the winch is already running'
+        success, msg = MAV.command_ack(218, RC5_AUX, 2)
+        if not success:
+            return False, f'winch: autopilot {msg}'
+        self.winch_until = time.monotonic() + secs
+        threading.Thread(target=self.winch_watch, daemon=True).start()
+        return True, f'winch relay ON for {secs:g} s'
+
+    def winch_watch(self):
+        """Relay off at the end - and at once if the drone arms outside a motor test."""
+        while time.monotonic() < self.winch_until:
+            if S.tel.get('armed') and time.monotonic() > self.until:
+                break
+            time.sleep(0.1)
+        self.stop_winch()
+
+    def stop_winch(self):
+        with self.lock:                               # the watcher and the Stop button: one low command
+            if not self.winch_until:
+                return True, 'winch: already off'
+            self.winch_until = 0.0
+        success, msg = MAV.command_ack(218, RC5_AUX, 0)
+        return success, f'winch relay OFF: autopilot {msg}'
+
+    def active(self):
+        return time.monotonic() < max(self.until, self.winch_until)
+
+    def status(self):
+        now = time.monotonic()
+        tel, ok_servo = S.tel, fresh('SERVO_OUTPUT_RAW', 2, S.tel_time)
+        servo = tel.get('servo') if ok_servo else None
+        rpm = tel.get('rpm') if fresh('ESC_TELEMETRY_1_TO_4', 3, S.tel_time) else None
+        if rpm and servo and not any(rpm) and max(servo) > 1150:   # the message with no real ESC behind it (SITL reads 0
+            rpm = None                                             # at 1588 us): 'no RPM', not 'stopped'
+        return {'motors': [{'name': BENCH_MOTORS[k + 1], 'pwm': servo[i] if servo else None,
+                            'rpm': rpm[i] if rpm else None} for k, i in enumerate(BENCH_OUTPUT)],
+                'motor_left': round(max(0.0, self.until - 2.0 - now), 1), 'winch_left': round(max(0.0, self.winch_until - now), 1),
+                'max_throttle': BENCH_MAX_THR}
+
+
+BENCH = Bench()
 
 
 # ---------------------------------------------------------------- the stack (sim / real)
@@ -908,7 +1186,7 @@ GF_CAPS = {'arena': 4, 'qr': 4, 'extra': 2}
 # tunnel_length: 20 ft 5 in = 6.22 m (user, 2026-10-30, "given inaccuracies"; was 10 m) - exit detection is on the walls
 # ending, from 0.6 x it; the hard stop at the length + 5 m
 COURSE_DEFAULT = {'tunnel_width': 3.5, 'tunnel_height_ft': 10.0, 'tunnel_ceiling_ft': 8.0, 'tunnel_length': 6.22,
-                  'tunnel_gap': 0.0, 'qr_width': 30.0}
+                  'tunnel_gap': 0.0, 'qr_width': 40.0}   # qr_width: across; 30 m forward of the tunnel (user, 2026-10-30)
 FT = 0.3048
 
 
@@ -1321,7 +1599,9 @@ def snapshot():
                       'up_s': round(time.time() - STACK.started) if STACK.started and STACK.running() else None},
             'camera': ROS.camera_topic, 'preflight': preflight(mode), 'alerts': alerts(),
             'statustext': S.statustext[-15:],
-            'alt_offset': S.alt_offset,
+            'alt_offset': S.alt_offset, 'alts': load_alts(),
+            'alt_limits': {k: d[2:] for k, d in ALT_PLAN.items()},
+            'cva': commanded(), 'bench': BENCH.status(), 'truth': world_truth(), 'obst_ver': S.obst_ver,
             'vio_pose': {'xyz': S.ros.get('vio_pose'), 'health': S.ros['states'].get('vio', ''),
                          'age': round(time.monotonic() - S.ros_time['vio_pose'], 1) if 'vio_pose' in S.ros_time else None},
             'ages': {k: round(time.monotonic() - t, 1) for k, t in S.ros_time.items()},
@@ -1371,6 +1651,12 @@ async def costmap(request):
     if png is None:
         raise web.HTTPNotFound()
     return web.Response(body=png, content_type='image/png', headers={'Cache-Control': 'no-store'})
+
+
+async def obstacles(request):
+    with S.lock:
+        cells = [[c[0] * OBST_CELL, c[1] * OBST_CELL] for c, n in S.obst.items() if n >= OBST_MIN_HITS]
+    return web.json_response({'cell': OBST_CELL, 'cells': cells}, headers={'Cache-Control': 'no-store'})
 
 
 async def mjpeg(request):
@@ -1506,6 +1792,16 @@ async def api(request):
         return ok(*(await loop.run_in_executor(None, mission_reset)))
     if what == 'alt_trim':                            # the search height +-0.5 m in flight (also from the radio)
         return ok(*(await loop.run_in_executor(None, alt_trim, body.get('delta'))))
+    if what == 'alt_plan':                            # the altitude bars: start marker, tunnels, QR area
+        return ok(*(await loop.run_in_executor(None, set_alts, body)))
+    if what == 'bench_motor':                         # PROPS OFF: see Bench
+        return ok(*(await loop.run_in_executor(None, BENCH.run_motor, body)))
+    if what == 'bench_winch':
+        return ok(*(await loop.run_in_executor(None, BENCH.run_winch, body)))
+    if what == 'bench_stop':                          # the page's Stop: never gated, it only stops things
+        m1 = await loop.run_in_executor(None, BENCH.stop_motor)
+        m2 = await loop.run_in_executor(None, BENCH.stop_winch)
+        return ok(m1[0] and m2[0], f'{m1[1]}; {m2[1]}')
     if what == 'mission_start':                       # full | qr | qr_drop | tunnel
         S.alt_offset = 0.0                            # the explorer drops its trim at the search start too
         return ok(*(await loop.run_in_executor(None, lambda: start_mission(
@@ -1547,6 +1843,7 @@ def clear_ui():
     """This page's view of the last mission: track, log, messages, timers."""
     S.ros.update(track=[], log=[], qrs=[], target=None, candidates=[])
     S.tel_track, S.statustext = [], []
+    S.obst, S.obst_ver = {}, S.obst_ver + 1
     S.mission_t0 = S.zone_t0 = None
 
 
@@ -1691,6 +1988,8 @@ def sim_place_at_zone(world):
 def start_mission(kind, payload='', read_qr=True, override=False):
     """Preflight gate, the segment's supervisor parameters, /mission/start -> (ok, message)."""
     kind = SEGMENT_ALIAS.get(kind, kind)
+    if BENCH.active():
+        return False, 'a bench test is running: stop it first'
     if stack_phase() != 'ready':
         return False, f'stack not ready ({stack_phase()}) - wait for READY'
     if kind not in SEGMENTS:
@@ -1723,12 +2022,16 @@ def start_mission(kind, payload='', read_qr=True, override=False):
     s1, m1 = ROS.set_supervisor(**SEGMENTS[kind], read_start_qr=bool(read_qr) or not payload)
     if not s1:
         return False, f'supervisor parameters: {m1}'
+    s2, m2 = push_alts(load_alts(), search=kind != 'tunnel')   # never start on heights other than the bars show
+    if not s2:
+        return False, f'altitudes: {m2}'
     success, msg = ROS.call(ROS.cli_start, ROS.Trigger.Request())
     if success:
         with S.lock:
             S.mission_type, S.mission_t0, S.zone_t0 = kind, None, None
             S.ros.update(track=[], log=[])
             S.tel_track = []                          # the map shows this mission's flight path only
+            S.obst, S.obst_ver = {}, S.obst_ver + 1
     return success, f'{kind}: {msg}'
 
 
@@ -1798,6 +2101,7 @@ def main():
     app.router.add_get('/', index)
     app.router.add_get('/ws', ws_handler)
     app.router.add_get('/costmap.png', costmap)
+    app.router.add_get('/obstacles.json', obstacles)
     app.router.add_get('/camera.mjpg', mjpeg)
     app.router.add_post('/api/{what}', api)
     app.router.add_static('/static/', HERE / 'static')
@@ -1808,6 +2112,7 @@ def main():
     # active exception', apport crash dump), so a stop + relaunch found the old process still on the port
     # (2026-10-27). Bounded to 2 s after SIGINT / SIGTERM.
     async def exit_soon(_app):
+        BENCH.stop_winch()                            # never leave the relay on behind a stopped dashboard
         threading.Timer(2.0, os._exit, args=(0,)).start()
     app.on_shutdown.append(exit_soon)
     web.run_app(app, host='0.0.0.0', port=args.port, print=None, shutdown_timeout=2.0)

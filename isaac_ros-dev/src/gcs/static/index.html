@@ -23,7 +23,17 @@
   main { display:grid; grid-template-columns: minmax(0, 1fr) 380px; gap:10px; padding:10px; }
   .card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px; min-width:0; }
   .card h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--dim); margin:0 0 8px; }
-  #mapwrap { position:relative; } canvas#map { width:100%; height:560px; background:#0b0f13; border-radius:6px; display:block; }
+  #mapwrap { position:relative; } canvas.map { width:100%; height:560px; background:#0b0f13; border-radius:6px; display:block; }
+  .maps { display:flex; flex-wrap:wrap; gap:8px; } .maps > div { flex:1 1 420px; min-width:0; }
+  .maps h3 { font-size:12px; font-weight:600; margin:0 0 4px; } .maps h3 span { color:var(--dim); font-weight:400; }
+  #cva { width:100%; font-variant-numeric:tabular-nums; } #cva th { text-align:right; color:var(--dim); font-weight:500; padding:2px 6px; }
+  #cva td { text-align:right; padding:2px 6px; } #cva th:first-child, #cva td:first-child { text-align:left; }
+  .cvagrid { display:grid; grid-template-columns:minmax(0, 1fr) minmax(0, 1fr); gap:12px; }
+  canvas#altchart { width:100%; height:190px; background:#0b0f13; border-radius:6px; display:block; }
+  .altbar { display:grid; grid-template-columns:96px 1fr 62px; gap:6px; align-items:center; margin:4px 0; } .altbar input[type=range] { width:100%; }
+  .benchgrid { display:grid; grid-template-columns:minmax(0, 1fr) 300px minmax(0, 1fr); gap:12px; }
+  canvas#motors { width:100%; height:260px; background:#0b0f13; border-radius:6px; display:block; }
+  #benchwarn { background:#3a1517; color:#ffb4b4; border:1px solid #a3343a; border-radius:5px; padding:6px 8px; font-weight:600; }
   .legend { display:flex; flex-wrap:wrap; gap:10px; color:var(--dim); margin-top:6px; font-size:12px; }
   .legend i { display:inline-block; width:10px; height:10px; margin-right:4px; vertical-align:-1px; border-radius:2px; }
   .tiles { display:grid; grid-template-columns: repeat(3, 1fr); gap:6px; }
@@ -55,7 +65,7 @@
   body:not(.mode-radio) .radioonly { display:none; }
   body.mode-radio.inflight .noflight { display:none !important; }   /* armed over the radio: MANUAL + LAND/RTL/KILL only */
   #vrxframe { width:100%; height:620px; border:0; border-radius:6px; background:#000; }
-  @media (max-width: 1100px) { main, .bottom { grid-template-columns: 1fr; } }
+  @media (max-width: 1100px) { main, .bottom, .cvagrid, .benchgrid { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
@@ -95,15 +105,28 @@
 </header>
 
 <main>
+  <div>
   <div class="card" id="mapwrap">
     <h2>Region · costmap · track</h2>
-    <canvas id="map"></canvas>
+    <div class="maps">
+      <div><h3>Discovered <span>what the drone has mapped so far</span></h3><canvas id="map" class="map"></canvas></div>
+      <div><h3>Actual <span id="truthnote"></span></h3><canvas id="truemap" class="map"></canvas></div>
+    </div>
     <div class="legend">
       <span><i style="background:var(--field)"></i>arena / keep-in</span><span><i style="background:var(--zone)"></i>QR area</span><span><i style="background:#c58cff"></i>extra</span>
       <span><i style="background:rgb(235,0,0)"></i>red zone</span><span><i style="background:rgba(230,90,90,.45)"></i>no-fly margin / boundary</span><span><i style="background:rgba(40,160,70,.5)"></i>searched</span>
       <span><i style="background:rgba(255,150,0,.9)"></i>rejected QR</span><span><i style="background:#3fbf6f"></i>target</span>
-      <span><i style="background:#fff"></i>drone + track</span>
+      <span><i style="background:#fff"></i>drone + track</span><span><i style="background:#c58cff"></i>obstacle (seen / actual)</span>
+      <span><i style="background:#3f8fe0"></i>commanded velocity</span><span><i style="background:#c9742e"></i>actual velocity</span>
     </div>
+  </div>
+  <div class="card noradio onlyros" style="margin-top:10px">
+    <h2>Commanded vs actual</h2>
+    <div class="cvagrid">
+      <div><table id="cva"></table><div class="d" id="cvanote" style="margin-top:4px; color:var(--dim); font-size:11px"></div></div>
+      <div><canvas id="altchart"></canvas></div>
+    </div>
+  </div>
   </div>
 
   <div>
@@ -132,6 +155,13 @@
         <span id="trimv" class="pill">trim +0.0 m</span>
         <button onclick="post('alt_trim', {delta: 0.5})">▲ 0.5 m</button>
       </div>
+      <div class="noradio onlyros" style="margin:8px 0" title="the heights the mission flies. Start marker and tunnels apply the next time that phase begins; the QR area applies at once. Kept across restarts.">
+        <b>Altitudes</b>
+        <div class="altbar"><span>Start marker</span><input type="range" id="alt_takeoff" step="0.1" oninput="altShow()"><b id="altv_takeoff"></b></div>
+        <div class="altbar"><span>Tunnels</span><input type="range" id="alt_tunnel" step="0.1" oninput="altShow()"><b id="altv_tunnel"></b></div>
+        <div class="altbar"><span>QR area scan</span><input type="range" id="alt_search" step="0.1" oninput="altShow()"><b id="altv_search"></b></div>
+        <div class="row"><button class="go" id="altset" onclick="altSet()">Set altitudes</button><span class="d" id="altnote" style="color:var(--dim)"></span></div>
+      </div>
       <div class="row" title="straight to the autopilot; the mission stops and hands the drone to you (no failsafe flight)">
         <button class="stop" onclick="ask('LAND now, where it is (autopilot LAND)?').then(y => y && post('land'))">LAND</button>
         <button class="stop" onclick="ask('RTH now? SmartRTL: the drone flies its own path back home (through the tunnels it came by) and lands.').then(y => y && post('rth'))">RTH (retrace)</button>
@@ -145,6 +175,28 @@
     </div>
   </div>
 </main>
+
+<div class="card noradio onlyros" style="margin:0 10px 10px">
+  <h2>Bench test · props off</h2>
+  <div class="benchgrid">
+    <div>
+      <div id="benchwarn">Real motors spin. Remove every prop first.</div>
+      <div class="row"><label><input type="checkbox" id="propsoff" onchange="benchUi()"> PROPS ARE OFF</label></div>
+      <div class="altbar"><span>Throttle</span><input type="range" id="b_thr" min="1" max="25" step="1" value="10" oninput="benchUi()"><b id="b_thrv"></b></div>
+      <div class="row"><span>Seconds</span><input id="b_secs" type="number" min="1" max="10" step="1" value="3" style="width:64px"></div>
+      <div class="row">
+        <button class="bbtn" onclick="benchMotor(1)">FR</button><button class="bbtn" onclick="benchMotor(2)">RR</button>
+        <button class="bbtn" onclick="benchMotor(3)">RL</button><button class="bbtn" onclick="benchMotor(4)">FL</button>
+        <button class="bbtn" onclick="benchMotor(0)">All, in turn</button>
+      </div>
+      <div class="row"><span>Winch</span><input id="b_winch" type="number" min="1" max="60" step="1" value="5" style="width:64px"><span>s</span><button class="bbtn" onclick="benchWinch()">Run winch</button></div>
+      <div class="row"><button class="stop big" style="flex:1" onclick="post('bench_stop')">■ STOP motors + winch</button></div>
+    </div>
+    <div><canvas id="motors"></canvas></div>
+    <div><div class="tiles" id="benchtiles"></div>
+      <div class="d" id="benchnote" style="margin-top:6px; color:var(--dim); font-size:11px"></div></div>
+  </div>
+</div>
 
 <div class="bottom">
   <div class="card noradio">
@@ -286,21 +338,29 @@ document.querySelectorAll('#tcourse input').forEach(e => e.oninput = () => gfDir
 function readCourse() { const c = {}; $('tcourse').querySelectorAll('input').forEach(e => { if (isFinite(parseFloat(e.value))) c[e.dataset.c] = parseFloat(e.value); }); return c; }
 async function saveGf() { const j = await post('geofence', {arena: readRows('arena'), qr: readRows('qr'), extra: readRows('extra'), course: readCourse(), world: val('world')}); if (j.ok) gfDirty = false; return j; }
 
-// ---- map
-function drawMap(s) {
-  const cv = $('map'), ctx = cv.getContext('2d');
-  const W = cv.clientWidth, H = cv.clientHeight; cv.width = W * devicePixelRatio; cv.height = H * devicePixelRatio;
-  ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0); ctx.clearRect(0, 0, W, H);
-  const loc = s.geofence_local, cm = s.costmap, pose = s.ros.pose;
-  const pts = [];
-  if (loc) { pts.push(...loc.field, ...loc.delivery, ...loc.extra); }
-  if (cm) { pts.push([cm.x0, cm.y0], [cm.x0 + cm.w, cm.y0 + cm.h]); }
+// ---- map: the same view twice, so the two sides line up. Discovered = the drone's own picture; Actual = the world file (sim)
+let obstCells = [], obstVer = -1, obstBusy = false;
+const CMD_COL = '#3f8fe0', ACT_COL = '#c9742e';
+const heading = t => t.heading ?? (t.yaw == null ? null : (t.yaw + 360) % 360);
+function cvaVal(s, label, col) { const r = s.cva && s.cva.rows.find(x => x[0] === label); return r ? r[col] : null; }
+function mapBounds(s) {
+  const loc = s.geofence_local, cm = s.costmap, pose = s.ros.pose, tr = s.truth, pts = [];
+  if (loc) pts.push(...loc.field, ...loc.delivery, ...loc.extra);
+  if (cm) pts.push([cm.x0, cm.y0], [cm.x0 + cm.w, cm.y0 + cm.h]);
   if (pose) pts.push([pose[0], pose[1]]);
+  if (tr) { pts.push(...tr.zone); tr.tunnels.forEach(t => pts.push([t.x0, t.y - t.w / 2], [t.x1, t.y + t.w / 2])); }
   s.ros.track.forEach(p => pts.push(p));
   if (!pts.length) pts.push([-5, -5], [5, 5]);
-  let x0 = Math.min(...pts.map(p => p[0])), x1 = Math.max(...pts.map(p => p[0]));
-  let y0 = Math.min(...pts.map(p => p[1])), y1 = Math.max(...pts.map(p => p[1]));
-  const pad = 3; x0 -= pad; x1 += pad; y0 -= pad; y1 += pad;
+  const pad = 3;
+  return [Math.min(...pts.map(p => p[0])) - pad, Math.max(...pts.map(p => p[0])) + pad,
+          Math.min(...pts.map(p => p[1])) - pad, Math.max(...pts.map(p => p[1])) + pad];
+}
+function drawMap(s, id, actual) {
+  const cv = $(id), ctx = cv.getContext('2d');
+  const W = cv.clientWidth, H = cv.clientHeight; cv.width = W * devicePixelRatio; cv.height = H * devicePixelRatio;
+  ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0); ctx.clearRect(0, 0, W, H);
+  const loc = s.geofence_local, cm = s.costmap, pose = s.ros.pose, truth = s.truth;
+  const [x0, x1, y0, y1] = mapBounds(s);
   const sc = Math.min(W / (x1 - x0), H / (y1 - y0));
   const ox = (W - (x1 - x0) * sc) / 2, oy = (H - (y1 - y0) * sc) / 2;
   const X = x => ox + (x - x0) * sc, Y = y => H - (oy + (y - y0) * sc);     // ENU: y up
@@ -308,26 +368,141 @@ function drawMap(s) {
   ctx.strokeStyle = '#1b222a'; ctx.lineWidth = 1;
   for (let g = Math.ceil(x0 / 5) * 5; g < x1; g += 5) { ctx.beginPath(); ctx.moveTo(X(g), Y(y0)); ctx.lineTo(X(g), Y(y1)); ctx.stroke(); }
   for (let g = Math.ceil(y0 / 5) * 5; g < y1; g += 5) { ctx.beginPath(); ctx.moveTo(X(x0), Y(g)); ctx.lineTo(X(x1), Y(g)); ctx.stroke(); }
-  if (cm && costImg && costImg.complete) ctx.drawImage(costImg, X(cm.x0), Y(cm.y0 + cm.h), cm.w * sc, cm.h * sc);
+  if (!actual && cm && costImg && costImg.complete) ctx.drawImage(costImg, X(cm.x0), Y(cm.y0 + cm.h), cm.w * sc, cm.h * sc);
   const poly = (p, col, dash) => { if (!p || p.length < 2) return; ctx.setLineDash(dash || []); ctx.strokeStyle = col; ctx.lineWidth = 2;
     ctx.beginPath(); p.forEach((q, i) => i ? ctx.lineTo(X(q[0]), Y(q[1])) : ctx.moveTo(X(q[0]), Y(q[1]))); ctx.closePath(); ctx.stroke(); ctx.setLineDash([]);
     p.forEach((q, i) => { ctx.fillStyle = col; ctx.fillText(i + 1, X(q[0]) + 3, Y(q[1]) - 3); }); };
   if (loc) { poly(loc.field, '#3fd0d0'); poly(loc.delivery, '#e8c547', [6, 4]);
     loc.extra.forEach((q, i) => { ctx.strokeStyle = '#c58cff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(X(q[0]), Y(q[1]), 5, 0, 7); ctx.stroke();
       ctx.fillStyle = '#c58cff'; ctx.fillText('E' + (i + 1), X(q[0]) + 6, Y(q[1]) - 6); }); }
-  // QRs
-  (s.ros.qrs || []).forEach(q => { const c = q.status === 'target' ? '#3fbf6f' : q.status === 'rejected' ? '#ff9600' : '#e8c547';
-    ctx.fillStyle = c; ctx.fillRect(X(q.x) - 4, Y(q.y) - 4, 8, 8); ctx.fillText(String(q.payload).split('-')[1] || '', X(q.x) + 6, Y(q.y) + 4); });
-  if (s.ros.target) { const [tx, ty] = s.ros.target; ctx.strokeStyle = '#3fbf6f'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(X(tx), Y(ty), 9, 0, 7); ctx.stroke(); }
+  const box = (x, y, sx, sy) => ctx.fillRect(X(x - sx / 2), Y(y + sy / 2), sx * sc, sy * sc);
+  if (actual && truth) {
+    poly(truth.zone, '#e8c547', [6, 4]);
+    ctx.strokeStyle = '#6b7a88'; ctx.lineWidth = 1.5;
+    truth.tunnels.forEach(t => ctx.strokeRect(X(t.x0), Y(t.y + t.w / 2), (t.x1 - t.x0) * sc, t.w * sc));
+    ctx.fillStyle = '#c58cff'; truth.obstacles.forEach(o => box(o.x, o.y, o.sx, o.sy));
+    ctx.fillStyle = 'rgb(235,0,0)'; truth.red.forEach(r => ctx.fillRect(X(r.x0), Y(r.y1), (r.x1 - r.x0) * sc, (r.y1 - r.y0) * sc));
+    truth.boards.forEach(b => { const q = (s.ros.qrs || []).find(k => k.payload === b.payload);
+      ctx.strokeStyle = ctx.fillStyle = b.target ? '#3fbf6f' : '#e8c547'; ctx.lineWidth = 2;
+      if (q) ctx.fillRect(X(b.x) - 4, Y(b.y) - 4, 8, 8); else ctx.strokeRect(X(b.x) - 4, Y(b.y) - 4, 8, 8);
+      ctx.fillStyle = '#dfe6ee'; ctx.fillText(b.payload + (q ? ` · off ${Math.hypot(q.x - b.x, q.y - b.y).toFixed(1)} m` : ''), X(b.x) + 7, Y(b.y) + 4); });
+  }
+  if (!actual) {
+    ctx.fillStyle = '#c58cff'; obstCells.forEach(c => ctx.fillRect(X(c[0]) - 1.5, Y(c[1]) - 1.5, 3, 3));
+    // the boards as read (ArUco: the whole id, QR: the part after the dash)
+    (s.ros.qrs || []).forEach(q => { const c = q.status === 'target' ? '#3fbf6f' : q.status === 'rejected' ? '#ff9600' : '#e8c547';
+      ctx.fillStyle = c; ctx.fillRect(X(q.x) - 4, Y(q.y) - 4, 8, 8); ctx.fillText(String(q.payload).split('-')[1] || q.payload, X(q.x) + 6, Y(q.y) + 4); });
+    if (s.ros.target) { const [tx, ty] = s.ros.target; ctx.strokeStyle = '#3fbf6f'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(X(tx), Y(ty), 9, 0, 7); ctx.stroke(); }
+  }
   // track
   const tr = s.ros.track; if (tr.length > 1) { ctx.strokeStyle = 'rgba(255,255,255,.55)'; ctx.lineWidth = 1.5; ctx.beginPath();
     tr.forEach((p, i) => i ? ctx.lineTo(X(p[0]), Y(p[1])) : ctx.moveTo(X(p[0]), Y(p[1]))); ctx.stroke(); }
   // home (origin) and drone
   ctx.fillStyle = '#4aa3ff'; ctx.beginPath(); ctx.arc(X(0), Y(0), 4, 0, 7); ctx.fill(); ctx.fillText('H', X(0) + 6, Y(0) + 4);
-  if (pose) { const [px, py, pz, yaw] = pose; ctx.save(); ctx.translate(X(px), Y(py)); ctx.rotate(-yaw);
+  if (pose) { const [px, py, pz, yaw] = pose;
+    if (actual) {                                     // 1 m/s = 2 m of arrow
+      const arrow = (ve, vn, col) => { if (ve == null || vn == null) return; ctx.strokeStyle = col; ctx.lineWidth = 3; ctx.beginPath();
+        ctx.moveTo(X(px), Y(py)); ctx.lineTo(X(px + 2 * ve), Y(py + 2 * vn)); ctx.stroke(); };
+      arrow(cvaVal(s, 'Velocity east', 2), cvaVal(s, 'Velocity north', 2), CMD_COL);
+      arrow(cvaVal(s, 'Velocity east', 3), cvaVal(s, 'Velocity north', 3), ACT_COL);
+      const hx = cvaVal(s, 'Hold east', 2), hy = cvaVal(s, 'Hold north', 2);
+      if (hx != null) { ctx.strokeStyle = CMD_COL; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(X(hx), Y(hy), 6, 0, 7); ctx.stroke(); }
+    }
+    ctx.save(); ctx.translate(X(px), Y(py)); ctx.rotate(-yaw);
     ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.moveTo(12, 0); ctx.lineTo(-7, 6); ctx.lineTo(-4, 0); ctx.lineTo(-7, -6); ctx.closePath(); ctx.fill(); ctx.restore();
     ctx.fillStyle = '#fff'; ctx.fillText(`${pz.toFixed(1)} m`, X(px) + 12, Y(py) - 10); }
   ctx.fillStyle = '#5c6b79'; ctx.fillText(`5 m grid · x east, y north (odom) · drone from ${s.ros.pose_src || '–'}`, 8, H - 8);
+  if (actual) {                                       // the motors + attitude on the map, moving or on the bench
+    const t = s.tel, m = s.bench && s.bench.motors;
+    if (m && m.some(k => k.pwm != null)) { ctx.fillStyle = 'rgba(11,15,19,.88)'; ctx.fillRect(W - 176, 6, 170, 170); drawMotors(ctx, W - 91, 84, 44, m); }
+    ctx.fillStyle = '#dfe6ee';
+    ctx.fillText(`alt ${fmt(t.local_z ?? t.alt_rel, 2)} m · yaw ${fmt(heading(t), 0)}° · roll ${fmt(t.roll, 0)}° · pitch ${fmt(t.pitch, 0)}°`, 8, 14);
+  }
+}
+// quad X from above, nose up: PWM as a ring around each motor, the numbers beside it
+function drawMotors(ctx, cx, cy, r, motors) {
+  const at = {FR: [1, -1], RR: [1, 1], RL: [-1, 1], FL: [-1, -1]};
+  ctx.strokeStyle = '#2a333d'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(cx - r, cy - r); ctx.lineTo(cx + r, cy + r); ctx.moveTo(cx + r, cy - r); ctx.lineTo(cx - r, cy + r); ctx.stroke();
+  ctx.fillStyle = '#8b98a6'; ctx.textAlign = 'center'; ctx.fillText('nose', cx, cy - r - 24);
+  motors.forEach(m => { const [dx, dy] = at[m.name], x = cx + dx * r, y = cy + dy * r, R = Math.max(10, r * 0.42);
+    const pct = m.pwm == null ? 0 : Math.max(0, Math.min(1, (m.pwm - 1000) / 1000));
+    ctx.strokeStyle = '#2a333d'; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(x, y, R, 0, 7); ctx.stroke();
+    if (pct > 0) { ctx.strokeStyle = ACT_COL; ctx.beginPath(); ctx.arc(x, y, R, -Math.PI / 2, -Math.PI / 2 + pct * 2 * Math.PI); ctx.stroke(); }
+    ctx.fillStyle = '#dfe6ee'; ctx.fillText(m.name, x, y + 4);
+    ctx.fillStyle = '#8b98a6'; ctx.fillText(m.pwm == null ? 'no data' : `${m.pwm} µs`, x, y + dy * (R + 10) + (dy > 0 ? 4 : 0));
+    if (m.rpm != null) ctx.fillText(`${m.rpm} rpm`, x, y + dy * (R + 21) + (dy > 0 ? 4 : 0)); });
+  ctx.textAlign = 'left';
+}
+
+// ---- commanded vs actual: the table + the last 60 s of altitude (this browser's own memory)
+const altHist = []; let altHover = null;
+function cvaRender(s) {
+  const c = s.cva; if (!c) return;
+  $('cva').innerHTML = '<tr><th></th><th>Commanded</th><th>Actual</th><th>Error</th></tr>' + c.rows.map(([k, u, cmd, act, warn, bad, wrap]) => {
+    let e = cmd == null || act == null ? null : cmd - act;
+    if (e != null && wrap) e = ((e + 540) % 360) - 180;
+    const lvl = e == null ? '' : Math.abs(e) >= bad ? 'bad' : Math.abs(e) >= warn ? 'warn' : 'ok';
+    const mark = {bad: '✗ ', warn: '! ', ok: '✓ ', '': ''}[lvl], d = u === 'm' || u === 'm/s' ? 2 : 1;
+    return `<tr><td>${k} <span style="color:var(--dim)">${u}</span></td><td>${fmt(cmd, d)}</td><td>${fmt(act, d)}</td><td class="${lvl}">${mark}${fmt(e, d)}</td></tr>`; }).join('');
+  $('cvanote').textContent = c.source ? `Commanded: the Jetson's ${c.source} setpoint, the autopilot's attitude target. Actual: the autopilot's estimate.`
+    : 'Nothing commanded right now: the Jetson sends setpoints in flight only. Actual: the autopilot\'s estimate.';
+  const now = s.time, alt = c.rows[0];
+  if (!altHist.length || now - altHist[altHist.length - 1][0] > 0.4) altHist.push([now, alt[2], alt[3]]);
+  while (altHist.length && now - altHist[0][0] > 60) altHist.shift();
+  const cv = $('altchart'), ctx = cv.getContext('2d'), W = cv.clientWidth, H = cv.clientHeight;
+  cv.width = W * devicePixelRatio; cv.height = H * devicePixelRatio; ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+  const vals = altHist.flatMap(a => [a[1], a[2]]).filter(v => v != null);
+  let lo = vals.length ? Math.min(...vals) : 0, hi = vals.length ? Math.max(...vals) : 1;
+  if (hi - lo < 1) { const m = (hi + lo) / 2; lo = m - 0.5; hi = m + 0.5; }
+  const L = 34, R = 8, T = 22, B = 18, X = t => L + (W - L - R) * (1 - (now - t) / 60), Y = v => T + (H - T - B) * (hi - v) / (hi - lo);
+  ctx.font = '11px system-ui'; ctx.strokeStyle = '#1b222a'; ctx.fillStyle = '#8b98a6'; ctx.lineWidth = 1;
+  for (let i = 0; i <= 2; i++) { const v = lo + (hi - lo) * i / 2; ctx.beginPath(); ctx.moveTo(L, Y(v)); ctx.lineTo(W - R, Y(v)); ctx.stroke(); ctx.fillText(v.toFixed(1), 4, Y(v) + 4); }
+  ctx.fillText('60 s ago', L, H - 4); ctx.fillText('now', W - R - 22, H - 4);
+  const line = (k, col, dash) => { ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.setLineDash(dash); ctx.beginPath(); let on = false;
+    altHist.forEach(a => { if (a[k] == null) { on = false; return; } on ? ctx.lineTo(X(a[0]), Y(a[k])) : ctx.moveTo(X(a[0]), Y(a[k])); on = true; }); ctx.stroke(); ctx.setLineDash([]); };
+  line(1, CMD_COL, [6, 4]); line(2, ACT_COL, []);
+  ctx.fillStyle = '#dfe6ee'; ctx.fillText('Altitude, m', L, 13);
+  ctx.strokeStyle = CMD_COL; ctx.setLineDash([6, 4]); ctx.beginPath(); ctx.moveTo(W - 182, 9); ctx.lineTo(W - 160, 9); ctx.stroke(); ctx.setLineDash([]); ctx.fillText('commanded', W - 156, 13);
+  ctx.strokeStyle = ACT_COL; ctx.beginPath(); ctx.moveTo(W - 78, 9); ctx.lineTo(W - 56, 9); ctx.stroke(); ctx.fillText('actual', W - 52, 13);
+  if (altHover != null && altHist.length) { const t = now - 60 * (1 - (altHover - L) / (W - L - R));
+    const a = altHist.reduce((p, q) => Math.abs(q[0] - t) < Math.abs(p[0] - t) ? q : p); ctx.strokeStyle = '#6b7a88'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(X(a[0]), T); ctx.lineTo(X(a[0]), H - B); ctx.stroke();
+    const txt = `${(now - a[0]).toFixed(0)} s ago · commanded ${fmt(a[1], 2)} · actual ${fmt(a[2], 2)}`, tw = ctx.measureText(txt).width + 10, bx = Math.min(W - tw - 2, Math.max(2, X(a[0]) - tw / 2));
+    ctx.fillStyle = '#222b35'; ctx.fillRect(bx, T, tw, 18); ctx.fillStyle = '#dfe6ee'; ctx.fillText(txt, bx + 5, T + 13); }
+}
+$('altchart').addEventListener('mousemove', e => { altHover = e.offsetX; });
+$('altchart').addEventListener('mouseleave', () => { altHover = null; });
+
+// ---- altitude bars
+let altDirty = false;
+const ALT_KEYS = ['takeoff', 'tunnel', 'search'];
+function altShow() { altDirty = true; ALT_KEYS.forEach(k => $('altv_' + k).textContent = Number(val('alt_' + k)).toFixed(1) + ' m'); }
+function altRender(s) {
+  if (!s.alts) return;
+  ALT_KEYS.forEach(k => { const e = $('alt_' + k), [lo, hi] = s.alt_limits[k]; e.min = lo; e.max = hi;
+    if (!altDirty) { e.value = s.alts[k]; $('altv_' + k).textContent = s.alts[k].toFixed(1) + ' m'; } });
+  $('altnote').textContent = altDirty ? 'not set yet' : '';
+}
+async function altSet() { const j = await post('alt_plan', Object.fromEntries(ALT_KEYS.map(k => [k, parseFloat(val('alt_' + k))]))); if (j.ok) altDirty = false; }
+
+// ---- bench test. The tick is never remembered: it starts clear on every page load
+function benchUi() { const on = chk('propsoff'); document.querySelectorAll('.bbtn').forEach(b => b.disabled = !on); $('b_thrv').textContent = val('b_thr') + ' %'; }
+function benchBody() { return {props_off: chk('propsoff'), throttle: parseFloat(val('b_thr')), seconds: parseFloat(val('b_secs'))}; }
+function benchMotor(m) {
+  const name = {0: 'ALL FOUR, one after the other', 1: 'FRONT RIGHT', 2: 'REAR RIGHT', 3: 'REAR LEFT', 4: 'FRONT LEFT'}[m];
+  ask(`Spin ${name} at ${val('b_thr')} % for ${val('b_secs')} s${m ? '' : ' each'}? Every prop must be off.`).then(y => y && post('bench_motor', {...benchBody(), motor: m}));
+}
+function benchWinch() { ask(`Run the winch for ${val('b_winch')} s? Keep hands and the line clear.`).then(y => y && post('bench_winch', {props_off: chk('propsoff'), seconds: parseFloat(val('b_winch'))})); }
+function benchRender(s) {
+  const b = s.bench, t = s.tel; if (!b) return;
+  const cv = $('motors'), ctx = cv.getContext('2d'), W = cv.clientWidth, H = cv.clientHeight;
+  cv.width = W * devicePixelRatio; cv.height = H * devicePixelRatio; ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+  ctx.font = '11px system-ui'; drawMotors(ctx, W / 2, H / 2 + 6, 62, b.motors);
+  $('benchtiles').innerHTML = [['Roll', fmt(t.roll, 1) + '°'], ['Pitch', fmt(t.pitch, 1) + '°'], ['Heading', fmt(heading(t), 0) + '°'],
+    ['Altitude', fmt(t.local_z ?? t.alt_rel, 2) + ' m'], ['Battery', fmt(t.batt_a, 1) + ' A'], ['Voltage', fmt(t.batt_v, 2) + ' V'],
+    ['Motor test', b.motor_left ? b.motor_left.toFixed(0) + ' s left' : 'off'], ['Winch', b.winch_left ? b.winch_left.toFixed(0) + ' s left' : 'off'], ['Armed', t.armed === undefined ? '–' : t.armed ? 'ARMED' : 'disarmed']]
+    .map(([k, v]) => `<div class="tile"><span>${k}</span><b>${esc(v)}</b></div>`).join('');
+  $('benchnote').textContent = (b.motors.some(m => m.rpm != null) ? 'RPM from the ESCs. ' : 'No ESC RPM reported: this shows the output sent to each motor, not its speed. ') +
+    'The winch has no speed sensor: watch the battery current. ArduCopter spins one motor at a time.';
 }
 
 // ---- render
@@ -401,7 +576,11 @@ function render(s) {
   // costmap image
   if (s.costmap && s.costmap.ver !== costVer) { costVer = s.costmap.ver; const im = new Image(); im.onload = () => costImg = im; im.src = '/costmap.png?v=' + costVer; }
   if ($('camsel').value !== s.camera && document.activeElement !== $('camsel')) $('camsel').value = s.camera;
-  drawMap(s);
+  if (s.obst_ver !== obstVer && !obstBusy) { obstBusy = true; const v = s.obst_ver;
+    fetch('/obstacles.json').then(r => r.json()).then(j => { obstCells = j.cells; obstVer = v; }).catch(() => {}).finally(() => setTimeout(() => obstBusy = false, 1000)); }
+  $('truthnote').textContent = s.truth ? 'the sim world: boards hollow until found, drone from the autopilot' : 'no ground truth on a real drone: geofence + flown track';
+  drawMap(s, 'map', false); drawMap(s, 'truemap', true);
+  cvaRender(s); altRender(s); benchRender(s);
   // log
   const lines = (s.ros.log || []).map(l => { const {time, state, ...rest} = l; return `<div>${new Date(time * 1000).toLocaleTimeString()} <b>${esc(state)}</b> ${esc(JSON.stringify(rest))}</div>`; });
   const px4 = (s.statustext || []).map(([tt, sev, tx]) => `<div class="${sev <= 3 ? 'bad' : 'd'}">${new Date(tt * 1000).toLocaleTimeString()} FCU ${esc(tx)}</div>`);
@@ -444,6 +623,7 @@ function corridorUi() {
 }
 try { $('corridor').value = localStorage.getItem('gcs_corridor') || 'current'; } catch (e) {}
 corridorUi();
+benchUi();
 
 function setMode(m) {
   $('mode').value = m;
