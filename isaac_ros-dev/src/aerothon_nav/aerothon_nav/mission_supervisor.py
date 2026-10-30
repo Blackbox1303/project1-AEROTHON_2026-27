@@ -46,6 +46,8 @@
                   from now on can be the target), /delivery/explore/start; wait for /delivery/target
   DELIVER         Nav2 (delivery) to the target, descend to deliver_altitude, settle deliver_hold s, DROP with
                   drop_mechanism:
+                  rc5 (default, 2026-10-30): the transmitter's channel 5 - RC5_OPTION 28 Relay On/Off (RELAY1) -
+                  switched by MAV_CMD_DO_AUX_FUNCTION high, rc5_drop_hold 45 s at the drop height, then low.
                   winch (default): N20 gear motor on a Cytron MDD20A, 6 m nylon line, passive hook that lets go when
                   the payload sits on the ground and the line goes slack. Two ArduPilot relays (MAV_CMD_DO_SET_RELAY
                   over /mavros/cmd/command): RELAY1 -> MDD20A PWM1 (run / brake), RELAY2 -> DIR1. Pays out
@@ -189,7 +191,10 @@ class MissionSupervisor(Node):
         # Winch: Cytron MDD20A channel 1 driven by two ArduPilot relays (FMU outputs as GPIO, MAV_CMD_DO_SET_RELAY):
         # PWM1 = run (low = brake), DIR1 = direction. Open loop: paid-out length = winch_speed x run time (the N20's
         # hall encoder is not read - the Pixhawk can't count it in Copter).
-        p('drop_mechanism', 'winch')  # winch | gripper (servo gripper, MAV_CMD_DO_GRIPPER)
+        p('drop_mechanism', 'rc5')    # rc5 (the transmitter's channel 5: relay 1 via DO_AUX_FUNCTION, 2026-10-30) |
+        #                               winch (the relay-driven N20 winch) | gripper (servo gripper, MAV_CMD_DO_GRIPPER)
+        p('rc5_aux_function', 28)     # RC5_OPTION on the Pixhawk (read 2026-10-30): 28 = Relay On/Off (RELAY1, pin 54)
+        p('rc5_drop_hold', 45.0)      # s at the drop height after RC5 high: the winch + drop mechanism (user, 2026-10-30)
         p('winch_relay_run', 0)       # ArduPilot relay instance (0 = RELAY1) on MDD20A PWM1
         p('winch_relay_dir', 1)       # relay instance (1 = RELAY2) on MDD20A DIR1
         p('winch_dir_down', 1)        # DIR level that unwinds (pays out) the line: swap to 0 if it winds the wrong way
@@ -607,9 +612,51 @@ class MissionSupervisor(Node):
 
     def drop(self, deadline):
         """The payload drop with the configured mechanism (drop_mechanism) -> released?"""
+        if self.g('drop_mechanism') == 'rc5':
+            return self.drop_rc5(deadline)
         if self.g('drop_mechanism') == 'winch':
             return self.drop_winch(deadline)
         return self.drop_gripper(deadline)
+
+    def aux(self, function, pos):
+        """MAV_CMD_DO_AUX_FUNCTION (218): the autopilot does what an RC switch for that aux function would - param1
+        the function (RCx_OPTION number), param2 the switch position 0 low / 1 middle / 2 high. -> (ok, message)"""
+        req = CommandLong.Request(command=218, param1=float(function), param2=float(pos))
+        r = self.call(self.px4_command, req, timeout=self.g('mav_timeout'))
+        if not r.success and r.result != 0:
+            return False, f'aux function {int(function)} {"high" if pos == 2 else "low"}: ' \
+                          f'{self.ACK_TEXT.get(r.result, str(r.result))}'
+        return True, f'aux function {int(function)} {"high" if pos == 2 else "low"}'
+
+    def drop_rc5(self, deadline):
+        """The drop on the transmitter's channel 5 (user, 2026-10-30): RC5 is RC5_OPTION 28 = Relay On/Off (RELAY1,
+        pin 54) on this Pixhawk - the mission switches it the way RC5 high does (DO_AUX_FUNCTION rc5_aux_function,
+        high), holds the drop height rc5_drop_hold s (the winch and drop mechanism need 45 s), then low. -> released?
+        An abort / hand-over during the hold leaves the relay as it is: the pilot's RC5 switch decides."""
+        alt, fn = self.g('deliver_altitude'), self.g('rc5_aux_function')
+        for attempt in range(1, int(self.g('drop_retries')) + 1):
+            self.check(deadline)
+            try:
+                ok, msg = self.aux(fn, 2)
+            except Abort as e:                       # MAVROS command service missing / timed out
+                ok, msg = False, str(e)
+            self.set_state('DROP', attempt=attempt, result=msg, mechanism='RC5 (relay 1)')
+            if ok:
+                break
+            self.flight.hold(1.0, alt)
+        else:
+            self.set_state('DROP_FAILED', reason=msg)
+            return False
+        end = self.clock_s() + self.g('rc5_drop_hold')   # node clock: sim time in the sim
+        while self.clock_s() < end:
+            self.check(deadline)
+            self.flight.hold(0.2, alt)
+        try:
+            ok, msg = self.aux(fn, 0)
+        except Abort as e:
+            ok, msg = False, str(e)
+        self.set_state('DROP', done=f'held {self.g("rc5_drop_hold"):.0f} s', result=msg)
+        return True
 
     def drop_gripper(self, deadline):
         """Release the payload, wait drop_wait holding altitude, close the gripper again. -> released?"""
