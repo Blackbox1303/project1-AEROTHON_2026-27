@@ -84,7 +84,8 @@ def main():
 
     # 2. the geofence
     gf = st.get('gf') or {}
-    if gf.get('arena', 0) < 4 and gf.get('qr', 0) < 4:
+    hop = a.segment == 'hop'                          # arm, take off, land: no geofence at all
+    if not hop and gf.get('arena', 0) < 4 and gf.get('qr', 0) < 4:
         raise SystemExit(f'[mission] no geofence saved on this PC (arena {gf.get("arena", 0)}, QR area {gf.get("qr", 0)} '
                          'points): fill the Geofence card on http://127.0.0.1:8080 and press Save, then run again')
     say(f'geofence: arena {gf.get("arena")}, QR area {gf.get("qr")}, extra {gf.get("extra")} points')
@@ -92,11 +93,14 @@ def main():
         say(f'check done: radio, Jetson and geofence OK; stack {st.get("message")}; preflight failing: '
             f'{"; ".join(st.get("failing") or []) or "none"} - nothing was sent to the drone')
         return
-    say('geofence -> Apply (up the radio)')
-    r = page.post('apply', {'mode': 'real'})
-    say(f'apply: {"OK" if r.get("ok") else "FAILED"} {r.get("message", "")}')
-    if not r.get('ok'):
-        raise SystemExit('[mission] the geofence did not reach the drone - check the radio and run again')
+    if hop:
+        say('arm, take off, land: the geofence is ignored')
+    else:
+        say('geofence -> Apply (up the radio)')
+        r = page.post('apply', {'mode': 'real'})
+        say(f'apply: {"OK" if r.get("ok") else "FAILED"} {r.get("message", "")}')
+        if not r.get('ok'):
+            raise SystemExit('[mission] the geofence did not reach the drone - check the radio and run again')
 
     # 3. a clean start: the last run's files / memory cleared (the stack must be stopped for that), then the stack
     phase = st.get('message', '')
@@ -114,6 +118,11 @@ def main():
     say(f'reset: {"OK" if r.get("ok") else "FAILED"} {r.get("message", "")}')
     if not r.get('ok'):
         raise SystemExit('[mission] the reset did not go through - nothing launched')
+    if a.segment == 'hop':                            # the reset cleared it; arm-take-off-land needs no cameras
+        r = page.post('hop_preflight', {})
+        say(f'short preflight for the hop: {"OK" if r.get("ok") else "FAILED"} {r.get("message", "")}')
+        if not r.get('ok'):
+            raise SystemExit('[mission] the Jetson did not take the short preflight')
     if phase != 'ready':
         say('Launch stack (ArUco) - 1 to 3 min')
         r = page.post('stack_start', {'mode': 'real'})

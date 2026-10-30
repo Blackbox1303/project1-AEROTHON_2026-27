@@ -85,9 +85,10 @@ SEGMENTS = {
     'hop': {'start_from': 'hop', 'drop': False, 'return_corridor': False},   # arm, take off, land (user, 2026-10-31)
 }
 SEGMENT_ALIAS = {'delivery': 'qr_drop'}
-# the commanded-vs-actual and bench panels: msg id, Hz - ATTITUDE, LOCAL_POSITION_NED, SERVO_OUTPUT_RAW,
-# NAV_CONTROLLER_OUTPUT, ESC_TELEMETRY_1_TO_4
-PANEL_STREAMS = ((30, 5), (32, 5), (36, 5), (62, 5), (11030, 2))
+# what this dashboard reads, asked for itself: without a stack nothing else asks, and the preflight read 'no GPS, no
+# battery' on a healthy drone and alerted GPS FIX LOST (2026-10-31). Msg id, Hz - SYS_STATUS, GPS_RAW_INT,
+# GLOBAL_POSITION_INT, ATTITUDE, LOCAL_POSITION_NED, SERVO_OUTPUT_RAW, NAV_CONTROLLER_OUTPUT, ESC_TELEMETRY_1_TO_4
+PANEL_STREAMS = ((1, 1), (24, 1), (33, 2), (30, 5), (32, 5), (36, 5), (62, 5), (11030, 2))
 CAMERAS = {
     'qr_hud': 'http://127.0.0.1:8091/annotated.jpg',
     'arducam': '/arducam/image_raw',
@@ -147,6 +148,7 @@ class State:
         self.mission_type = 'full'
         self.red_check = None        # why the red map is not the one 10 ft red zone (red_sanity), None = fine
         self.red_boxes = []          # the red zones as [x0, y0, x1, y1] in odom: what fits on the radio (red_boxes)
+        self.hop_only = False        # the next start is the hop: its short preflight (HOP_NOT_NEEDED)
         self.mission_t0 = None
         self.zone_t0 = None
         self.alt_offset = 0.0        # the operator's search-height trim (m), as last set on the explorer
@@ -1572,6 +1574,14 @@ def preflight_radio():
     return [{'name': n, 'ok': bool(ok), 'detail': d, 'critical': c} for n, ok, d, c in checks]
 
 
+# the hop (arm, take off, land) flies on the autopilot alone: none of these is needed for it (user, 2026-10-31: Arducam
+# unplugged, the GPS drifting, the geofence ignored). Link, a GPS fix, battery and the supervisor stay must-pass. Set by
+# the test app, cleared by every reset and start, so a mission never inherits it
+HOP_NOT_NEEDED = ('Camera', 'Delivery search (Nav2 + explorer) up', 'Corridor navigation up', 'Delivery costmap',
+                  'Forward depth (D435 scan)', 'GPS satellites >= 8', 'Arena and/or QR area: 4 corners each',
+                  'QR area inside the arena', 'Geofence applied', 'Drone inside the field boundary')
+
+
 def preflight(mode):
     if RADIO:
         return preflight_radio()
@@ -1620,7 +1630,8 @@ def preflight(mode):
         ('Jetson RAM free >= 1 GB', mem is not None and mem >= 1024, f'{mem} MB', False),
         ('Jetson temperature < 85 C', temp is None or temp < 85, f'{temp} C', False),
     ]
-    return [{'name': n, 'ok': bool(ok), 'detail': d, 'critical': c} for n, ok, d, c in checks]
+    return [{'name': n, 'ok': bool(ok), 'detail': d, 'critical': c and not (S.hop_only and n in HOP_NOT_NEEDED)}
+            for n, ok, d, c in checks]
 
 
 # the course has ONE red zone, 10 ft x 10 ft. Red mapped beyond one such square (a second zone, or one far too big)
@@ -1992,6 +2003,9 @@ async def api(request):
         return ok(*(await loop.run_in_executor(None, mission_reset)))
     if what == 'alt_trim':                            # the search height +-0.5 m in flight (also from the radio)
         return ok(*(await loop.run_in_executor(None, alt_trim, body.get('delta'))))
+    if what == 'hop_preflight':                       # mav_agent action 14
+        S.hop_only = True
+        return ok(True, 'hop: short preflight until the next reset or start')
     if what == 'alt_plan':                            # the altitude bars: start marker, tunnels, QR area
         return ok(*(await loop.run_in_executor(None, set_alts, body)))
     if what == 'bench_motor':                         # PROPS OFF: see Bench
@@ -2048,6 +2062,7 @@ def clear_ui():
     S.tel_track, S.statustext = [], []
     S.obst, S.obst_ver = {}, S.obst_ver + 1
     S.red_boxes = []
+    S.hop_only = False
     S.mission_t0 = S.zone_t0 = None
 
 
@@ -2108,6 +2123,10 @@ def radio_api(what, body):
         return ok_, msg
     if what == 'apply':
         return radio_apply_gf()
+    if what == 'hop_preflight':                       # aerothon test, after the reset: the hop's short checklist
+        if not TEST:
+            return False, 'the test app only (aerothon test)'
+        return MAV.command_ack(AGENT_CMD, 14, comp=AGENT, timeout=8.0, final_within=10.0)
     if what == 'alts_send':                           # aerothon test: the heights of the next start only
         if not TEST:
             return False, 'heights: the test app only (aerothon test)'
@@ -2243,6 +2262,7 @@ def start_mission(kind, payload='', read_qr=True, override=False, alts=None):
     if not s2:
         return False, f'altitudes: {m2}'
     success, msg = ROS.call(ROS.cli_start, ROS.Trigger.Request())
+    S.hop_only = False
     if success:
         with S.lock:
             S.mission_type, S.mission_t0, S.zone_t0 = kind, None, None

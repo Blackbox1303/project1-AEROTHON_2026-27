@@ -48,7 +48,7 @@
                     wrong -> ignored for the rest of the mission (the bridge's keep-in too) and the QR area is
                     zone_depth (30 m, forward) x zone_across (40 m), centred on the tunnel, from the tunnel's exit
   (start_from hop: the test app's first flight (user, 2026-10-31): arm, TAKEOFF to takeoff_altitude, HOVER hop_hold s,
-                  LAND, DONE. No marker, no search.)
+                  LAND, DONE. No marker, no search, no geofence: the autopilot holds the hover, offboard_bridge never flies.)
   (start_from delivery, GPS too poor for the flight to the zone (gps_err above gps_max_err, before or on the way):
                   no DIRECT_TO_ZONE - the search starts where the drone is, the fence as its area (use_fence_zone).)
   (start_from search: test entry - after READ_START_QR, DIRECT_TO_SEARCH climbs to search_altitude, above the
@@ -1592,21 +1592,21 @@ class MissionSupervisor(Node):
             else:
                 self.takeoff_px4(alt, deadline)
             self.check(deadline)
+            if self.g('start_from') == 'hop':        # the autopilot holds it: never the bridge, whose keep-in would fly
+                self.set_state('HOVER')              # back to a fence the GPS drift says it left (user, 2026-10-31)
+                end = self.clock_s() + self.g('hop_hold')
+                while self.clock_s() < end:
+                    self.check(deadline)
+                    time.sleep(0.2)
+                self.land()
+                self.set_state('DONE', time_s=round(self.clock_s() - self.t_start, 1))
+                return
             r = self.call(self.offboard, SetBool.Request(data=True))
             if not r.success:
                 raise Abort(f'offboard refused: {r.message}')
             self.wait(lambda: self.mav.mode == self.modes['offboard'], deadline)
             x, y, _, _ = self.pose()
             self.fly(x, y, alt, deadline)
-            if self.g('start_from') == 'hop':
-                self.set_state('HOVER')
-                end = self.clock_s() + self.g('hop_hold')
-                while self.clock_s() < end:
-                    self.check(deadline)
-                    self.flight.hold(0.2, alt)
-                self.land()
-                self.set_state('DONE', time_s=round(self.clock_s() - self.t_start, 1))
-                return
 
             # READ_START_QR: 1 m forward and read. Not seen: the QR may be behind us (the cameras look forward and
             # down) - the take-off heading isn't guaranteed (after a failsafe landing the drone faced 124 deg and

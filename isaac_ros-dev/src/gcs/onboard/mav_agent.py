@@ -15,6 +15,7 @@ MAVROS is 191) on mavlink-router's agent endpoint (UDP 14660: router/sim.conf, o
                  height + the trim at once, never below its alt_min (user, 2026-10-28)
               13 test heights for the NEXT start only (param2 start marker, param3 tunnels, param4 QR area, m): the
                  test app (aerothon test). Any start without it flies the mission's fixed heights (user, 2026-10-30)
+              14 the hop's short preflight (test app, arm-take-off-land only): until the next reset or start
               11 FIELD TEST (props off, carried by hand; gcs/field_test): param2 = its code (field_proto.CODES: 1 start
                  / 2 stop = field_test.sh, the rest -> field_vision's /api/cmd), param3 its argument, param4 a press
                  number. While it runs: TUNNEL 32820 its guidance ~1 Hz + STATUSTEXT 'FT <result / event>'
@@ -54,7 +55,7 @@ from pymavlink import mavutil  # noqa: E402
 COMP = 194                       # MAV_COMP_ID_ONBOARD_COMPUTER2
 CMD = 31010                      # MAV_CMD_USER_1
 ACTIONS = {1: 'launch', 2: 'stop', 3: 'full', 4: 'delivery', 5: 'abort', 6: 'status', 7: 'segment', 8: 'operator',
-           9: 'geofence', 10: 'alt_trim', 11: 'field', 12: 'reset', 13: 'alts'}
+           9: 'geofence', 10: 'alt_trim', 11: 'field', 12: 'reset', 13: 'alts', 14: 'hop_preflight'}
 FIELD_SH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'field_test', 'field_test.sh')
 FIELD_URL = 'http://127.0.0.1:8097'   # field_test/field_vision.py
 T_FIELD = 32820                  # out: the field test's guidance (field_test/field_proto.py)
@@ -210,6 +211,8 @@ class Agent:
             return await self.api('stack_start', body)
         if action == 'stop':
             return await self.api('stack_stop', {})
+        if action == 'hop_preflight':                 # the test app's arm-take-off-land: until the next reset or start
+            return await self.api('hop_preflight', {})
         if action == 'alts':
             self.next_alts = {'takeoff': float(p2), 'tunnel': float(p3), 'search': float(p4)}
             return True, f'test heights for the next start: {self.next_alts}'
