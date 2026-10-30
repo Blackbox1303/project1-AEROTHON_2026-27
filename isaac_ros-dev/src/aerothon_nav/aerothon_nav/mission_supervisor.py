@@ -257,8 +257,8 @@ class MissionSupervisor(Node):
         p('entry_altitude_mode', 'fixed')
         p('return_altitude_mode', 'planner')
         p('return_reserve', 240.0)    # s
-        p('min_corridor_length', 2.2) # m: corridor_nav min_length (exit detection from here on): 0.6 x the 12 ft
-        #                               (3.66 m) tunnels of 2026-10-30 - the course block sets it (v3: 4.0 of 6.7 m)
+        p('min_corridor_length', 3.7) # m: corridor_nav min_length (exit detection from here on): 0.6 x the 20 ft 5 in
+        #                               (6.22 m) tunnels of 2026-10-30 - the course block sets it (v3: 4.0 of 6.7 m)
         p('length_slack', 1.5)        # m: return corridor min_length = entry corridor length - this
         p('deliver_reserve', 120.0)   # s: the climb down / up + deliver_min_time 45 s at 5 m (the winch: ~35 s of it)
         p('limit_takeoff', 90.0)     # s per state

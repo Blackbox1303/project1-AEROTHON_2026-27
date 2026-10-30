@@ -905,8 +905,9 @@ GF_FILE = DATA / 'geofence.json'
 GF_CAPS = {'arena': 4, 'qr': 4, 'extra': 2}
 # the course dimensions: the organisers' defaults (user, 2026-10-28), editable when new info comes. Tunnel width /
 # length / gap in m, heights in ft (as given); the gap = wall to wall between the entry and the exit tunnel
-# tunnel_length: 12 ft = 3.66 m (user, 2026-10-30; was 10 m) - exit detection is on the walls ending, from 0.6 x it
-COURSE_DEFAULT = {'tunnel_width': 3.5, 'tunnel_height_ft': 10.0, 'tunnel_ceiling_ft': 8.0, 'tunnel_length': 3.66,
+# tunnel_length: 20 ft 5 in = 6.22 m (user, 2026-10-30, "given inaccuracies"; was 10 m) - exit detection is on the walls
+# ending, from 0.6 x it; the hard stop at the length + 5 m
+COURSE_DEFAULT = {'tunnel_width': 3.5, 'tunnel_height_ft': 10.0, 'tunnel_ceiling_ft': 8.0, 'tunnel_length': 6.22,
                   'tunnel_gap': 0.0, 'qr_width': 30.0}
 FT = 0.3048
 
