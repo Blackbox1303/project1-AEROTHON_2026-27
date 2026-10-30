@@ -3,10 +3,11 @@
 #   aerothon mission  [radio]                                 THE FINAL MISSION, ONE COMMAND, AUTO: the radio dashboard
 #                                                             + geofence Apply, Launch stack, preflight, a 10 s countdown,
 #                                                             Start (ArUco). After it: MANUAL / LAND / RTL / KILL only
-#   aerothon onboard  [aruco|qr] [radio]                      the same dashboard by hand (buttons, no auto start)
-#   aerothon offboard [aruco|qr] [drop|nodrop] [radio] [video] [target]
+#   aerothon onboard  [aruco] [radio]                         the same dashboard by hand (buttons, no auto start)
+#   aerothon offboard [aruco] [drop|nodrop] [radio] [video] [target]
 #                                                             this laptop = the offboard ground station (VRX + SiK)
-#   aerothon sim      [aruco|qr]                              TESTING by Ethernet: the Jetson's full dashboard
+#   aerothon sim      [aruco]                                 TESTING by Ethernet: the Jetson's full dashboard
+#   (ArUco only since 2026-10-30: 'qr' is taken as aruco)
 #                                                             (Sim / Offboard Jetson / Real / Open Gazebo)
 #   aerothon fieldtest cable [jetson-ip] | radio [radio]      FIELD TEST, props OFF: the Jetson's cameras / detectors /
 #                                                             walk-through guidance + motor cues (http://127.0.0.1:8096)
@@ -107,6 +108,12 @@ find_radio() {
     echo "$dev:$baud"
 }
 radio_check() { [ -e "${1%%:*}" ] || say "WARNING: ${1%%:*} not found - plug the ground radio in (ls /dev/ttyUSB* /dev/ttyACM* /dev/serial/by-id/)"; }
+
+# the course has no QR codes any more (user, 2026-10-30): ArUco everywhere
+if [ "${2:-}" = qr ] && [[ "${1:-}" =~ ^(onboard|offboard|sim)$ ]]; then
+    say "QR is gone (ArUco only since 2026-10-30): running $1 aruco"
+    set -- "$1" aruco "${@:3}"
+fi
 
 case "${1:-}" in
   onboard)

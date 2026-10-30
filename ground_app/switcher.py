@@ -45,13 +45,15 @@ input,select{font:14px ui-monospace,monospace;padding:5px 7px;border:1px solid v
 </div>
 <div class=grid>
  <div class=card><h2>Onboard: the final mission</h2><p>The dashboard on the ground SiK radio. The Jetson flies on the drone.</p>
-  <div class=row><button class=go onclick="go('onboard','aruco')">ArUco</button><button class=go onclick="go('onboard','qr')">QR</button></div></div>
- <div class=card><h2>Offboard: this laptop</h2><p>VRX receiver + SiK radio on this laptop. QR area only. ArUco at 1 m, QR at 10 m.</p>
-  <div class=row><button class=go onclick="go('offboard','aruco')">ArUco</button><button class=go onclick="go('offboard','qr')">QR</button></div></div>
+  <p>ArUco only (no QR since 2026-10-30). For the flight itself use the <b>AeroTHON FINAL MISSION (auto)</b> icon or
+  <code>aerothon mission</code>; this button opens the same dashboard by hand (geofence, buttons).</p>
+  <div class=row><button class=go onclick="go('onboard','aruco')">Open the dashboard</button></div></div>
+ <div class=card><h2>Offboard: this laptop</h2><p>VRX receiver + SiK radio on this laptop. The marker area only, ArUco at 1 m.</p>
+  <div class=row><button class=go onclick="go('offboard','aruco')">Start</button></div></div>
  <div class=card><h2>Field test: props OFF</h2><p>Cameras, QR / red / banner / obstacle scans and the walk-through with motor cues. Cable: with video. Radio: text only.</p>
   <div class=row><button class=go onclick="go('fieldtest','cable')">By cable</button><button class=go onclick="go('fieldtest','radio')">Over the radio</button></div></div>
  <div class=card><h2>Sim testing: the Jetson</h2><p>Needs an Ethernet cable. The Jetson's full dashboard: Sim, Offboard Jetson, Real, Open Gazebo.</p>
-  <div class=row><button class=go onclick="go('sim','aruco')">ArUco (8084)</button><button class=go onclick="go('sim','qr')">QR (8080)</button></div></div>
+  <div class=row><button class=go onclick="go('sim','aruco')">Open (8084, ArUco)</button></div></div>
 </div>
 <div class=row><button onclick="go('stop')">Stop the running app</button><button onclick="go('status')">Status</button></div>
 <div id=st></div>

@@ -39,12 +39,9 @@ Categories=Utility;
 DESK
 }
 icon switcher        "AeroTHON switcher"                     "switcher"          "One page to switch between all the apps"
-icon onboard-aruco   "AeroTHON onboard - final mission, ArUco" "onboard aruco"   "The dashboard on the ground SiK radio"
-icon onboard-qr      "AeroTHON onboard - final mission, QR"    "onboard qr"      "The dashboard on the ground SiK radio"
-icon offboard-aruco  "AeroTHON offboard laptop, ArUco"        "offboard aruco"   "VRX + SiK radio on this laptop, search at 1 m"
-icon offboard-qr     "AeroTHON offboard laptop, QR"           "offboard qr"      "VRX + SiK radio on this laptop, search at 10 m"
-icon sim-aruco       "AeroTHON sim testing, ArUco (Jetson 8084)" "sim aruco"     "The Jetson's dashboard by Ethernet"
-icon sim-qr          "AeroTHON sim testing, QR (Jetson 8080)"    "sim qr"        "The Jetson's dashboard by Ethernet"
+icon onboard-aruco   "AeroTHON final mission dashboard (by hand: geofence)" "onboard aruco" "The 8080 dashboard on the ground SiK radio - ArUco"
+icon offboard-aruco  "AeroTHON offboard laptop"        "offboard aruco"   "VRX + SiK radio on this laptop, search at 1 m"
+icon sim-aruco       "AeroTHON sim testing (Jetson 8084)" "sim aruco"     "The Jetson's dashboard by Ethernet"
 icon fieldtest-cable "AeroTHON field test (cable, props off)"  "fieldtest cable"  "Jetson cameras + guidance by Ethernet"
 icon fieldtest-radio "AeroTHON field test (radio, props off)"  "fieldtest radio"  "Jetson scans + guidance over the SiK radio"
 icon stop            "AeroTHON stop the running app"          "stop"             "Close whichever AeroTHON app is running"
@@ -59,7 +56,7 @@ Exec=bash -c '"$HERE/aerothon" mission; echo; read -p "[aerothon] press Enter to
 Terminal=true
 Categories=Utility;
 DESK
-echo "app icons: FINAL MISSION (auto), switcher, onboard / offboard / sim testing x ArUco / QR, field test cable / radio, stop"
+echo "app icons: FINAL MISSION (auto), switcher, dashboard, offboard, sim testing (ArUco only), field test cable / radio, stop"
 case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) echo "note: ~/.local/bin is not on PATH yet - log out and in, or use $HERE/aerothon";; esac
 if id -nG | tr ' ' '\n' | grep -qx dialout; then
     echo "radio permission: OK (in the dialout group)"
