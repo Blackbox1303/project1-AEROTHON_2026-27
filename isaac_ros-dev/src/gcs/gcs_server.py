@@ -1414,7 +1414,7 @@ async def api(request):
                   state=(MAV.agent.get('s') if RADIO else S.ros.get('state')) or '', radio=bool(RADIO),
                   gf={k: len(gf.get(k) or []) for k in ('arena', 'qr', 'extra')},
                   link=fresh('HEARTBEAT', 3, S.tel_time), agent=fresh('agent', 5, S.tel_time) if RADIO else None)
-    if RADIO and what not in ('geofence', 'capture'):   # those two stay here: the corners are kept on this PC
+    if RADIO and what not in ('geofence', 'capture', 'geofence_clear'):   # those stay here: the corners are kept on this PC
         return ok(*(await loop.run_in_executor(None, radio_api, what, body)))
     if what == 'operator':                            # mav_agent action 8: the ground took over over the radio
         return ok(*(await loop.run_in_executor(None, lambda: ROS.call(ROS.cli_operator, ROS.Trigger.Request(), 3.0))))
@@ -1430,6 +1430,17 @@ async def api(request):
                 return ok(False, 'course dimensions must be numbers')
         save_gf(gf)
         return ok(True, 'geofence saved')
+    if what == 'geofence_clear':                      # the Clear geofence button: every point gone, the course kept
+        gf = load_gf()
+        n = sum(len(gf.get(k) or []) for k in GF_CAPS)
+        for k in GF_CAPS:
+            gf[k] = []
+        save_gf(gf)
+        applied = DATA / 'mission_geofence.json'
+        had = applied.exists()
+        applied.unlink(missing_ok=True)
+        return ok(True, f'geofence cleared: {n} point(s) erased{", the applied one too" if had else ""} (course kept)'
+                  + (' - the drone gets the new one at the next Apply / aerothon mission' if RADIO else ''))
     if what == 'capture':                             # the drone's GPS -> a corner of arena / QR area / extra
         lst = body.get('list')
         if lst not in GF_CAPS or S.tel.get('lat') is None:

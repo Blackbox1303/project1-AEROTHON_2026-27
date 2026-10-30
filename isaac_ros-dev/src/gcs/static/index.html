@@ -188,6 +188,7 @@
     <div class="row">
       <button onclick="saveGf()">Save</button>
       <button class="go" onclick="saveGf().then(() => post('apply', {mode: val('mode')}))">Save + Apply</button>
+      <button class="stop noflight" onclick="ask('Erase every geofence point (Arena, QR area, Extra)? The Course numbers stay.').then(y => y && post('geofence_clear').then(() => { gfDirty = false; }))">🗑 Clear geofence</button>
       <button class="noradio" onclick="ask('Replace with the sim world\'s arena + QR area?').then(y => y && post('from_world', {world: val('world')}).then(() => gfDirty=false))">Fill from sim world</button>
     </div>
     <div class="d">Apply converts to map coordinates (the autopilot's GPS origin) for the drone; relaunch the stack with "use my geofence".</div>
