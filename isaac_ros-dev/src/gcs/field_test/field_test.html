@@ -1,39 +1,58 @@
 <!doctype html><html><head><meta charset=utf-8><title>AeroTHON field test</title>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <style>
-:root{--bg:#f3f5f6;--panel:#fff;--ink:#18212b;--muted:#5a6876;--line:#d6dde3;--accent:#c2410c;--ok:#2f7d4f;--bad:#b42318;--warn:#a15c07}
-@media (prefers-color-scheme:dark){:root{--bg:#11171c;--panel:#182129;--ink:#e3e9ee;--muted:#9aa8b4;--line:#2b3844;--accent:#f0803c;--ok:#6cc890;--bad:#f97066;--warn:#f5b041}}
+/* the 8080 dashboard's look (gcs/static/index.html) */
+:root{--bg:#0f1318;--panel:#171d24;--ink:#dfe6ee;--muted:#8b98a6;--line:#2a333d;--accent:#4aa3ff;--ok:#3fbf6f;--bad:#e5484d;--warn:#f1a33b;--deep:#11161c}
 *{box-sizing:border-box}
-body{background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,sans-serif;margin:0;padding:12px}
-main{max-width:1400px;margin:0 auto;display:flex;flex-direction:column;gap:12px}
-h1{margin:0;font-size:20px} h2{margin:0 0 6px;font-size:14px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
-.bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-.pill{border:1px solid var(--line);border-radius:999px;padding:2px 10px;font-size:12px;background:var(--panel)}
-.pill.ok{color:var(--ok);border-color:var(--ok)} .pill.bad{color:var(--bad);border-color:var(--bad)} .pill.warn{color:var(--warn);border-color:var(--warn)}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px}
-.cols{display:grid;grid-template-columns:minmax(320px,1.1fr) minmax(320px,1fr);gap:12px}
-@media (max-width:900px){.cols{grid-template-columns:1fr}}
-#say{font-size:24px;font-weight:700;line-height:1.25;min-height:2.6em}
-#sub{color:var(--muted);font-family:ui-monospace,monospace;font-size:13px}
+body{background:var(--bg);color:var(--ink);font:13px/1.35 system-ui,sans-serif;margin:0}
+header{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:8px 12px;background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+header h1{font-size:15px;margin:0 8px 0 0}
+main{max-width:1500px;margin:0 auto;display:flex;flex-direction:column;gap:10px;padding:10px}
+h2{margin:0 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.pill{padding:3px 8px;border-radius:10px;background:#222b35;color:var(--muted);white-space:nowrap;font-size:12px}
+.pill.ok{background:#163323;color:var(--ok)} .pill.bad{background:#3a1517;color:var(--bad)} .pill.warn{background:#3a2a12;color:var(--warn)}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px;min-width:0}
+.cols{display:grid;grid-template-columns:minmax(320px,1.1fr) minmax(320px,1fr);gap:10px}
+@media (max-width:1000px){.cols{grid-template-columns:1fr}}
+#say{font-size:22px;font-weight:700;line-height:1.25;min-height:2.6em}
+#sub{color:var(--muted);font-family:ui-monospace,monospace;font-size:12px}
 .guide{display:grid;grid-template-columns:180px 1fr;gap:14px;align-items:center}
-.row{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:4px 0}
-button{font:600 13px system-ui;border:1px solid var(--line);background:var(--bg);color:var(--ink);border-radius:7px;padding:7px 10px;cursor:pointer}
-button.go{background:var(--accent);border-color:var(--accent);color:#fff} button.stop{border-color:var(--bad);color:var(--bad)}
-button:disabled{opacity:.45;cursor:default}
-input{font:13px ui-monospace,monospace;padding:4px 6px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);width:70px}
+.row{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:6px 0}
+button{background:#26313d;color:var(--ink);border:1px solid var(--line);border-radius:5px;padding:6px 10px;cursor:pointer;font:inherit}
+button:hover{border-color:var(--accent)}
+button.go{background:#1d5c36;border-color:#2b8a50} button.stop{background:#6b1f22;border-color:#a3343a}
+button:disabled{opacity:.35;cursor:not-allowed}
+input{background:var(--deep);color:var(--ink);border:1px solid var(--line);border-radius:4px;padding:5px 6px;font:inherit;width:70px}
 input.wide{width:220px}
-label{font-size:13px;color:var(--muted)}
+label{font-size:12px;color:var(--muted)}
 .views{display:grid;grid-template-columns:2fr 1fr;gap:8px} .views img{width:100%;border-radius:6px;background:#000;min-height:80px;display:block}
 .vcol{display:flex;flex-direction:column;gap:8px}
-#log{font:12px ui-monospace,monospace;max-height:320px;overflow:auto;white-space:pre-wrap}
+#log{font:12px/1.4 ui-monospace,monospace;max-height:280px;overflow:auto;white-space:pre-wrap;background:#0b0f13;padding:6px;border-radius:6px}
 #log div{border-bottom:1px solid var(--line);padding:2px 0}
-#msg{font:13px ui-monospace,monospace;white-space:pre-wrap;min-height:1.4em}
-#map{width:100%;height:260px;background:var(--bg);border-radius:6px}
+#msg{font:12px ui-monospace,monospace;white-space:pre-wrap;min-height:1.4em;color:var(--muted)}
+#map{width:100%;height:260px;background:#0b0f13;border-radius:6px}
 .legend{font-size:12px;color:var(--muted)}
 .hide{display:none!important}
-</style></head><body><main>
-<div class=bar><h1>AeroTHON field test</h1><span class="pill bad">PROPS OFF - carried by hand</span>
- <span id=link class=pill>-</span><span id=cams class=pill>-</span><span id=fcp class=pill>-</span><span id=mot class=pill>-</span></div>
+/* the results: one tile per check, its latest answer */
+.tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+@media (max-width:1000px){.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.tile{background:var(--deep);border-radius:6px;padding:8px 10px;border-left:4px solid var(--line);min-width:0}
+.tile .k{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.05em;display:flex;justify-content:space-between}
+.tile .v{display:block;font-size:20px;font-weight:700;margin:2px 0;overflow-wrap:anywhere}
+.tile .p{font:600 14px ui-monospace,monospace;color:var(--accent);overflow-wrap:anywhere}
+.tile .d{color:var(--muted);font-size:11px;overflow-wrap:anywhere;max-height:4.2em;overflow:hidden}
+.tile.ok{border-left-color:var(--ok)} .tile.ok .v{color:var(--ok)}
+.tile.bad{border-left-color:var(--bad)} .tile.bad .v{color:var(--bad)}
+.tile.warn{border-left-color:var(--warn)} .tile.warn .v{color:var(--warn)}
+.tile.info{border-left-color:var(--accent)} .tile.info .v{color:var(--accent)}
+.tile.fresh{animation:flash 1.2s}
+@keyframes flash{0%{background:#1f3f66}100%{background:var(--deep)}}
+</style></head><body>
+<header><h1>AeroTHON field test</h1><span class="pill bad">PROPS OFF - carried by hand</span>
+ <span id=link class=pill>-</span><span id=cams class=pill>-</span><span id=fcp class=pill>-</span><span id=mot class=pill>-</span></header>
+<main>
+<div class=card><h2>Results <span class=legend>(the latest answer of each check: press its button, or the walk-through reads boards)</span></h2>
+ <div class=tiles id=tiles></div></div>
 
 <div class=cols>
  <div class=card>
@@ -94,7 +113,7 @@ label{font-size:13px;color:var(--muted)}
 <div id=radionote class="card hide">Telemetry radio only: no video. The answers (what the QR says, match or not, red /
  banners / obstacles) and the guidance come down as text; the Pixhawk's height, GPS and heading from its telemetry.</div>
 
-<div class=card><h2>Results and events</h2><div id=log></div></div>
+<div class=card><h2>Events</h2><div id=log></div></div>
 </main>
 <script>
 const $ = id => document.getElementById(id);
@@ -178,6 +197,46 @@ function drawMap(s) {
   $('areainfo').textContent = s.area ? `${(s.lanes || []).length / 2} lanes` + (s.pose ? '' : ' - no GPS position') : 'corners: ' + (s.corners || []).map(c => c ? '✓' : '·').join(' ');
 }
 
+// the results panel: each check's latest answer -> a verdict word, its colour, the payload read
+const CHECK_NAME = {detect_qr:'Detect QR', scan_qr:'Scan QR (read)', start_qr:'Start QR', walk:'Walk: last board',
+                    red:'Red zone', green:'Green banner', blue:'Blue banner', obstacle:'Obstacles'};
+function verdict(k, r) {
+  const t = r.text || '', has = w => t.includes(w);
+  const pay = (t.match(/read '([^']*)'/) || t.match(/set: '([^']*)'/) || t.match(/typed: '([^']*)'/) ||
+               t.match(/^(?:QR|board) '([^']*)'/) || [])[1];
+  if (!r.ok) return ['FAILED', 'bad', ''];
+  if (k === 'detect_qr') { const n = (t.match(/(\d+) board/) || [])[1];
+    return n ? [`${n} QR SEEN`, 'ok', ''] : ['NO QR IN VIEW', 'warn', '']; }
+  if (k === 'scan_qr' || k === 'walk') {
+    if (has('no board')) return ['NO QR IN VIEW', 'warn', ''];
+    if (has('MATCH')) return ['MATCH ✓', 'ok', pay];
+    if (has('not the target') || has('another board')) return ['READ - NOT THE TARGET', 'info', pay];
+    if (has('NOT decoded') || has('not decoded') || has('unread')) return [has('unsure') ? 'NOT READ - unsure' : 'NOT READ', 'warn', pay];
+    if (pay !== undefined) return ['READ', 'info', pay];
+    if (k === 'walk') return [has('seen') ? 'QR SEEN' : has('lost') ? 'QR LOST' : 'board', has('lost') ? 'warn' : 'info', ''];
+    return ['?', '', ''];
+  }
+  if (k === 'start_qr') return has('set') || has('typed') ? ['SET', 'ok', pay] : ['NOT SET', 'warn', ''];
+  if (k === 'red') return has('none') ? ['NONE', 'ok', ''] : [has('UNDER') ? 'UNDER THE DRONE' : 'RED FOUND', 'bad', ''];
+  if (k === 'green' || k === 'blue') return has('FOUND') ? ['FOUND', 'ok', ''] : has('not a banner') ? ['COLOUR, NOT A BANNER', 'warn', ''] : ['NONE', 'warn', ''];
+  if (k === 'obstacle') return has('path clear') ? ['CLEAR', 'ok', ''] : ['OBSTACLE', 'warn', ''];
+  return ['', '', ''];
+}
+const tileN = {};
+function drawTiles(res) {
+  res = res || {};
+  const esc = x => String(x).replace(/&/g,'&amp;').replace(/</g,'&lt;');
+  $('tiles').innerHTML = Object.keys(CHECK_NAME).map(k => {
+    const r = res[k];
+    if (!r) return `<div class=tile><div class=k><span>${CHECK_NAME[k]}</span></div><span class=v style="color:var(--muted)">-</span><div class=d>not run yet</div></div>`;
+    const [v, cls, pay] = verdict(k, r), fresh = tileN[k] !== undefined && tileN[k] !== r.n;
+    tileN[k] = r.n;
+    return `<div class="tile ${cls}${fresh ? ' fresh' : ''}"><div class=k><span>${CHECK_NAME[k]}</span><span>${r.t} (${r.age} s ago)</span></div>` +
+      `<span class=v>${esc(v)}</span>` + (pay !== undefined && pay !== '' ? `<div class=p>"${esc(pay)}"</div>` : '') +
+      `<div class=d title="${esc(r.text)}">${esc(r.text)}</div></div>`;
+  }).join('');
+}
+
 function pill(id, text, cls) { const e = $(id); e.textContent = text; e.className = 'pill ' + (cls || ''); }
 
 async function poll() {
@@ -202,6 +261,7 @@ async function poll() {
               f.armed ? 'bad' : (f.fix >= 3 ? 'ok' : 'warn'));
     pill('mot', 'motor cues ' + (s.motors_on ? 'ON' : 'off') + (f.motor_msg ? ' - ' + f.motor_msg : ''), s.motors_on ? 'warn' : '');
     drawGuide(s.guide, s.motors_on);
+    drawTiles(s.results);
     if (link !== 'radio') { drawMap(s);
       if (s.levels && document.activeElement.tagName !== 'INPUT') for (const k of ['low','mid','high']) $('lvl_' + k).value = s.levels[k];
       if (s.settings && document.activeElement.tagName !== 'INPUT') { $('carry').value = s.settings.carry_height; $('lane').value = s.settings.lane_spacing; $('valt').value = s.settings.search_alt; }

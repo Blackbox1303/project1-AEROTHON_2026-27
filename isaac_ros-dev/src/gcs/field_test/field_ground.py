@@ -43,6 +43,38 @@ def side_words(rel):
     return f'forward-{lr}' if a < 60 else lr if a <= 120 else f'back-{lr}'
 
 
+# the results panel: the latest answer of each check, from its command's reply and the Jetson's events (both links)
+CHECKS = ('detect_qr', 'scan_qr', 'start_qr', 'walk', 'red', 'green', 'blue', 'obstacle')
+PREFIX = (('detect QR', 'detect_qr'), ('scan QR', 'scan_qr'), ('start QR', 'start_qr'), ('red zone', 'red'),
+          ('green', 'green'), ('blue', 'blue'), ('obstacles', 'obstacle'), ('QR ', 'walk'), ('board ', 'walk'))
+
+
+def check_of(text):
+    """An event's text -> the check it answers (None: not a result)."""
+    return next((k for p, k in PREFIX if text.startswith(p)), None)
+
+
+class Results:
+    def __init__(self):
+        self.r, self.lock = {}, threading.Lock()
+
+    def put(self, key, ok, text):
+        if key in CHECKS and text:
+            with self.lock:
+                old = self.r.get(key)
+                if old and old['text'] == text and time.time() - old['ts'] < 3:   # the reply and its event: once
+                    return
+                self.r[key] = {'ok': ok, 'text': text, 't': time.strftime('%H:%M:%S'), 'ts': time.time(),
+                               'n': (old or {}).get('n', 0) + 1}
+
+    def event(self, text):
+        self.put(check_of(text), True, text)
+
+    def get(self):
+        with self.lock:
+            return {k: dict(v, age=round(time.time() - v['ts'])) for k, v in self.r.items()}
+
+
 def say_of(st, yaw_tol=35):
     """The radio's compact guidance (TUNNEL 32820) -> words, as the Jetson says them."""
     parts = [st.get('s', '-')]
@@ -61,7 +93,8 @@ def say_of(st, yaw_tol=35):
 class Radio:
     """The SiK radio: this app owns it, relays everything to QGC, talks to the onboard agent."""
 
-    def __init__(self, dev, qgc):
+    def __init__(self, dev, qgc, results):
+        self.results = results
         os.environ['MAVLINK20'] = '1'
         from pymavlink import mavutil
         self.mavutil, self.dev, self.conn, self.err = mavutil, dev, None, 'opening'
@@ -152,14 +185,21 @@ class Radio:
         elif t == 'STATUSTEXT':
             txt = m.text.rstrip('\0')
             if m.id:
+                for k in [k for k in self.chunks if k != m.id]:   # a text of exactly 50 x n chars has no end chunk
+                    self.agent_text(self.chunks.pop(k))
                 self.chunks[m.id] = self.chunks.get(m.id, '') + txt
                 if len(txt) == 50:
                     return
                 txt = self.chunks.pop(m.id)
-            if txt.startswith(('FT ', 'AGT field')):
-                self.add_text(txt)
+            self.agent_text(txt)
         elif t == 'COMMAND_ACK' and m.command == fp.CMD:
             self.acks[fp.CMD] = (m.result, m.progress, now)
+
+    def agent_text(self, txt):
+        if txt.startswith(('FT ', 'AGT field')):
+            self.add_text(txt)
+        if txt.startswith('FT '):
+            self.results.event(txt[3:])
 
     def add_text(self, txt):
         with self.lock:
@@ -199,6 +239,10 @@ class Radio:
                 time.sleep(0.6)                       # its STATUSTEXT follows the ACK
                 with self.lock:
                     msg = next((t for _, t in reversed(self.texts) if t.startswith('AGT field')), '')
+                for pre in ('AGT field: OK ', 'AGT field: FAILED ', 'AGT field: OK', 'AGT field: FAILED'):
+                    if msg.startswith(pre):
+                        msg = msg[len(pre):]
+                        break
                 return ok, msg or ('accepted' if ok else 'FAILED')
             if a is None and time.time() - t_send > 1.5 and n < 4:   # no answer at all: send again (same press)
                 self.conn.mav.command_long_send(1, fp.AGENT_COMP, fp.CMD, 0, fp.ACTION_FIELD, code, arg,
@@ -226,12 +270,15 @@ class Radio:
                          'field': round(now - self.t_field, 1) if self.t_field else None,
                          'fc': round(now - self.t_fc, 1) if self.t_fc else None},
                 'mode': g['mode'], 'guide': g, 'motors_on': bool(st.get('mo')), 'fc': self.fc,
-                'settings': {'valt': st.get('va')}, 'boards_done': st.get('n'), 'events': ev}
+                'settings': {'valt': st.get('va')}, 'boards_done': st.get('n'), 'events': ev,
+                'results': self.results.get()}
 
 
 def build(a):
     app = web.Application()
-    radio = Radio(a.radio, a.qgc) if a.radio else None
+    results = Results()
+    radio = Radio(a.radio, a.qgc, results) if a.radio else None
+    seen = {'n': None}                                    # cable: the Jetson's events already taken
     jet = a.jetson.rstrip('/') if a.jetson else None
     host = urlparse(jet).hostname if jet else None
 
@@ -272,7 +319,18 @@ def build(a):
         if 'mode' not in d:
             return web.json_response({'link': 'cable', 'up': False, 'error': d.get('message'), 'guide': None,
                                       'events': []})
-        d.update(link='cable', up=True)
+        evs = [e for e in d.get('events') or [] if isinstance(e.get('n'), int)]
+        if seen['n'] is None:                             # first look: its 'last' answers, not its whole history
+            for k, v in (d.get('last') or {}).items():
+                results.put(k, True, v)
+        for e in evs:
+            if seen['n'] is not None and e['n'] > seen['n']:
+                results.event(e['text'])
+        if evs:
+            seen['n'] = max(e['n'] for e in evs)
+        elif seen['n'] is None:
+            seen['n'] = 0
+        d.update(link='cable', up=True, results=results.get())
         return web.json_response(d)
 
     async def cmd(request):
@@ -287,11 +345,14 @@ def build(a):
                                                                   'carries numbers): read it with the camera instead'})
             loop = asyncio.get_running_loop()
             ok, msg = await loop.run_in_executor(None, radio.command, code, float(body.get('arg') or 0))
+            results.put(name, ok, msg)
             return web.json_response({'ok': ok, 'message': msg})
         if name in ('start', 'stop'):
             ok, msg = await jetson_sh(name)
             return web.json_response({'ok': ok, 'message': msg})
-        return web.json_response(await proxy_json('POST', '/api/cmd', body))
+        d = await proxy_json('POST', '/api/cmd', body)
+        results.put(name, bool(d.get('ok')), str(d.get('message', '')))
+        return web.json_response(d)
 
     async def levels(request):
         if radio:
