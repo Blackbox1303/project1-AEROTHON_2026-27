@@ -53,6 +53,7 @@
   body.mode-real .offonly, body.mode-offboard .seg-full, body.mode-offboard .onlyros { display:none; }
   body.mode-radio .simonly, body.mode-radio .realonly, body.mode-radio .offonly, body.mode-radio .noradio { display:none; }
   body:not(.mode-radio) .radioonly { display:none; }
+  body.mode-radio.inflight .noflight { display:none !important; }   /* armed over the radio: MANUAL + LAND/RTL/KILL only */
   #vrxframe { width:100%; height:620px; border:0; border-radius:6px; background:#000; }
   @media (max-width: 1100px) { main, .bottom { grid-template-columns: 1fr; } }
 </style>
@@ -71,7 +72,7 @@
   <select id="world" class="simonly" title="sim world"><option>competition</option><option>comp_far1</option></select>
   <span class="pill radioonly" title="the final flight: this PC on the SiK radio; QGC gets every packet too">📻 RADIO - onboard Jetson flies</span>
   <label class="pill noradio"><input type="checkbox" id="usegf"> use my geofence</label>
-  <select id="segment" title="what to fly: sim - Launch starts it by itself once the stack is READY and the preflight is green; the real drone - press Start after the preflight">
+  <select class="noflight" id="segment" title="what to fly: sim - Launch starts it by itself once the stack is READY and the preflight is green; the real drone - press Start after the preflight">
     <option value="full" class="seg-full">Whole mission</option>
     <option value="qr">QR area only (no drop)</option>
     <option value="tunnel" class="seg-full">Tunnels + banners only</option>
@@ -81,9 +82,9 @@
   <select id="corridor" class="noradio onlyros" onchange="corridorUi()" title="who flies the tunnels. current: our corridor_nav / entry_align on the flight controller's estimate + 2D SLAM (D435 depth, emitter on). AeroTHON: the ~/AeroTHON_2026/vio_cuda_ws code in its own container - cuVSLAM VIO on the D435 IR pair + the Pixhawk IMU, its corridor_nav (gap follower, Nav2), entry_align, obstacle_scan; banners still by drone_qr_detector's detector on the Arducam">
     <option value="current">corridor: current</option><option value="aerothon">corridor: AeroTHON (cuVSLAM stereo + IMU)</option></select>
   <label class="pill noradio onlyros" id="viofcwrap" title="AeroTHON corridor only: send its VIO velocity to ArduPilot EKF3 and fly the tunnels on it (source set 2, switched at the entrance, back to GPS at the exit). The sim gets the params itself; the REAL flight controller needs EK3_SRC2_VELXY 6 + VISO_TYPE 1 set first (vio_bringup/config) - off: VIO is only computed and checked"><input type="checkbox" id="viofc"> VIO → EKF3</label>
-  <button class="go" id="launchbtn" onclick="launchStack()" title="Gazebo + autopilot SITL + MAVROS + the mission nodes (sim), or the drone's whole stack (real); 1-3 min">▶ Launch stack</button>
+  <button class="go noflight" id="launchbtn" onclick="launchStack()" title="Gazebo + autopilot SITL + MAVROS + the mission nodes (sim), or the drone's whole stack (real); 1-3 min">▶ Launch stack</button>
   <button class="simonly" id="gzbtn" onclick="gz('start', 'sync=1')" title="sync the worlds / models from the Jetson, then open the Gazebo GUI on this PC (it waits for the sim if it is still starting)">🖥 Open Gazebo (sync)</button>
-  <button class="stop" id="stopbtn" onclick="stopStack()" title="stop everything: Gazebo, the autopilot SITL / link, MAVROS, the mission nodes - and close the Gazebo GUI here. Nothing starts again until you press Launch">■ Stop stack</button>
+  <button class="stop noflight" id="stopbtn" onclick="stopStack()" title="stop everything: Gazebo, the autopilot SITL / link, MAVROS, the mission nodes - and close the Gazebo GUI here. Nothing starts again until you press Launch">■ Stop stack</button>
   <span class="pill simonly" id="gzgui" title="Gazebo GUI on this PC (needs the Lenovo helper: install_lenovo_agent.sh)">Gazebo GUI: ?</span>
   <span class="pill" id="stack">stack: -</span>
   <span class="pill" id="link">link: -</span>
@@ -113,18 +114,18 @@
     <div class="card" style="margin-top:10px">
       <h2>Mission (supervisor FSM)</h2>
       <div class="fsm" id="fsm"></div>
-      <div class="row" style="margin-top:10px">
+      <div class="row noflight" style="margin-top:10px">
         <input id="payload" placeholder="target payload (optional, else read the start QR)" style="flex:1">
       </div>
-      <div class="row">
+      <div class="row noflight">
         <label><input type="checkbox" id="readqr" checked> read start QR at take-off</label>
         <label><input type="checkbox" id="override"> ignore preflight</label>
       </div>
-      <div class="row">
+      <div class="row noflight">
         <button class="go big mbtn" id="startbtn" onclick="startMission(val('segment'))" title="start the segment chosen at the top (the sim starts it by itself after Launch)">▶ Start</button>
         <button class="stop big noradio" onclick="ask('Abort the mission? (failsafe: hold, then land in place)').then(y => y && post('mission_abort'))">■ Abort</button>
       </div>
-      <div class="row" title="search height trim, in flight: the explorer flies its search height + the trim at once (never below its minimum); back to 0 at the next search start. Over the radio in the final mission.">
+      <div class="row noflight" title="search height trim, in flight: the explorer flies its search height + the trim at once (never below its minimum); back to 0 at the next search start. Over the radio in the final mission.">
         <b>Search height</b>
         <button onclick="post('alt_trim', {delta: -0.5})">▼ 0.5 m</button>
         <span id="trimv" class="pill">trim +0.0 m</span>
@@ -136,13 +137,8 @@
         <button class="stop" onclick="ask('RTL now? It climbs to RTL_ALT (15 m) and flies STRAIGHT home - not inside a roofed tunnel!').then(y => y && post('rtl'))">RTL (straight)</button>
         <button class="stop" onclick="ask('KILL MOTORS? The drone falls.').then(y => y && ask('Really kill the motors?')).then(y => y && post('kill'))">KILL</button>
       </div>
-      <div class="row" title="hand the drone to the RC pilot: the flight mode is set on the autopilot, the onboard mission stops sending setpoints (no failsafe flight). Over the radio too.">
-        <b>Take over</b>
-        <button onclick="ask('LOITER: holds position + height (GPS / EKF) - the mission stops, you fly it on the RC?').then(y => y && post('loiter'))">LOITER</button>
-        <button onclick="ask('POSHOLD: holds position, brakes when the sticks are centred - the mission stops, you fly it?').then(y => y && post('poshold'))">POSHOLD</button>
-        <button onclick="ask('ALT_HOLD: holds only the HEIGHT, it will drift - the mission stops, you fly it on the RC?').then(y => y && post('alt_hold'))">ALT_HOLD</button>
-        <button onclick="ask('STABILIZE: fully manual, throttle from the RC sticks at once - the mission stops, you fly it?').then(y => y && ask('STABILIZE: is the RC throttle at hover?')).then(y => y && post('stabilize'))">STABILIZE</button>
-        <button onclick="ask('BRAKE: stops dead and hovers - the mission stops?').then(y => y && post('brake'))">BRAKE</button>
+      <div class="row" title="hand the drone to the RC pilot: STABILIZE on the autopilot (fully manual, throttle from the RC stick), the onboard mission stops sending setpoints (no failsafe flight). Over the radio too. The RC mode switch does the same.">
+        <button class="stop big" style="flex:1" onclick="ask('MANUAL: STABILIZE - fully manual, the throttle comes from the RC stick AT ONCE. The mission stops. Is the pilot ready, throttle at hover?').then(y => y && post('stabilize'))">✋ MANUAL (pilot takes over)</button>
       </div>
       <div id="msg"></div>
     </div>
@@ -169,7 +165,7 @@
     <h2>Preflight</h2>
     <div class="checks" id="checks"></div>
   </div>
-  <div class="card">
+  <div class="card noflight">
     <h2>Geofence (GPS)</h2>
     <div class="d">The organisers' 6 points: fill the arena OR the QR area (whichever their 4 corners are), the other 2 in
       Extra. Arena only: the QR area's back + side walls are the arena's, its front wall = the entry tunnel's exit line (found in flight).</div>
@@ -335,6 +331,7 @@ function drawMap(s) {
 // ---- render
 function render(s) {
   snap = s; const t = s.tel;
+  document.body.classList.toggle('inflight', !!(s.radio && t.armed));   // radio + armed: MANUAL + LAND/RTL/KILL only
   if (s.radio) { if (val('mode') !== 'radio') setMode('radio'); }
   else if (s.stack.running && s.stack.mode && s.stack.mode !== val('mode')) setMode(s.stack.mode);   // follow what runs
   if (s.radio) { const a = s.radio.agent_age;

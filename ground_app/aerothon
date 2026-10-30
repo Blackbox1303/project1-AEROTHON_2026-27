@@ -1,6 +1,9 @@
 #!/bin/bash
 # AeroTHON ground apps - ONE launcher that switches between them (one app at a time: starting one stops the other).
-#   aerothon onboard  [aruco|qr] [radio]                      THE FINAL MISSION: dashboard on the ground SiK radio
+#   aerothon mission  [radio]                                 THE FINAL MISSION, ONE COMMAND, AUTO: the radio dashboard
+#                                                             + geofence Apply, Launch stack, preflight, a 10 s countdown,
+#                                                             Start (ArUco). After it: MANUAL / LAND / RTL / KILL only
+#   aerothon onboard  [aruco|qr] [radio]                      the same dashboard by hand (buttons, no auto start)
 #   aerothon offboard [aruco|qr] [drop|nodrop] [radio] [video] [target]
 #                                                             this laptop = the offboard ground station (VRX + SiK)
 #   aerothon sim      [aruco|qr]                              TESTING by Ethernet: the Jetson's full dashboard
@@ -111,6 +114,15 @@ case "${1:-}" in
     pyenv; stop_ours; free_port 8080 || exit 1; radio_check "$DEV"
     say "onboard ($M boards): the dashboard on the radio $DEV - QGC: SiK auto-connect OFF, UDP 14550 ON"
     launch "onboard-$M" http://127.0.0.1:8080 python3 -s "$HERE/apps/dashboard/gcs_server.py" --radio "$DEV" --port 8080 --marker "$M" ;;
+  mission)
+    # THE FINAL MISSION in one command (user, 2026-10-30): the ArUco radio dashboard, then auto_mission.py drives it -
+    # geofence Apply, Launch stack, READY, preflight, countdown (Ctrl-C cancels), Start; then it watches until landed
+    DEV=$(find_radio "${2:-/dev/ttyUSB0:57600}")
+    pyenv; stop_ours; free_port 8080 || exit 1; radio_check "$DEV"
+    say "THE FINAL MISSION (ArUco, auto) on the radio $DEV - QGC: SiK auto-connect OFF, UDP 14550 ON"
+    launch "mission-aruco" http://127.0.0.1:8080 python3 -s "$HERE/apps/dashboard/gcs_server.py" --radio "$DEV" \
+        --port 8080 --marker aruco || exit 1
+    exec python3 -s "$HERE/apps/dashboard/auto_mission.py" --url http://127.0.0.1:8080 ;;
   offboard)
     M=${2:-aruco}; DROP=${3:-drop}; DEV=$(find_radio "${4:-/dev/ttyUSB0:57600}"); VIDEO=${5:-}; TARGET=${6:-}
     ALT=1.0; [ "$M" = qr ] && ALT=9.0      # never above 10 m (airspace rule there)

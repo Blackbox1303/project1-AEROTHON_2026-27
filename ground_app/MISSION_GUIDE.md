@@ -21,64 +21,54 @@ scp szyfrowac@10.42.0.247:~/aerothon_here_we_come.tar.gz ~/Downloads/
 rm -rf ~/aerothon_here_we_come && tar xzf ~/Downloads/aerothon_here_we_come.tar.gz -C ~ && ~/aerothon_here_we_come/install.sh
 ```
 
-## 2. Launch sequence — the final mission (over the telemetry radio)
+## 2. The final mission — ONE command, AUTO
 
-1. **Drone on the red start zone**, nose roughly towards the entry tunnel; the **start ArUco 1 m ahead** of it (the
-   drone takes off to 5 m, moves 1 m forward and reads it from straight above). Battery in, Jetson booted (~1 min).
-2. **RC (ELRS) on**, mode switch in a pilot mode (LOITER). Don't touch the switch during the mission unless you are
-   taking over — any pilot mode (LOITER / POSHOLD / ALT_HOLD / STABILIZE / BRAKE …) ends the autonomy at once.
-3. **Lenovo**: ground SiK radio plugged in, then
+The final mission is its own app (`aerothon mission`); offboard, sim and the field test are separate commands, one
+at a time.
+
+**Before the slot (once, any time before):** `aerothon onboard aruco` → http://127.0.0.1:8080 → **Geofence (GPS)**
+card: the organisers' points (Arena or QR area: 4, Extra: 2 — typed, or **⊕ Capture drone GPS** carrying the drone to
+each corner); **Course**: tunnel length **6.22 m**, the width as measured, height 10 ft, max inside 8 ft → **Save**.
+It stays saved on this PC. Close it (`aerothon stop`).
+
+**At the slot:**
+1. **Drone on the red start zone**, nose roughly towards the entry tunnel; the **start ArUco 1 m ahead** (it takes off
+   to 5 m, moves 1 m forward and keeps the marker's image). Battery in, Jetson booted (~1 min).
+2. **RC (ELRS) on.** Don't touch the mode switch unless you take over: any pilot mode on it (STABILIZE, ALT_HOLD,
+   LOITER …) hands the drone to the pilot at once.
+3. **Lenovo**, ground SiK radio plugged in:
    ```bash
-   aerothon onboard aruco
+   aerothon mission
    ```
-   It finds the radio itself (`/dev/ttyUSB0`, else the one SiK / FTDI / CP210x plugged in). Page:
-   **http://127.0.0.1:8080**. QGroundControl (optional): UDP 14550 on, SiK auto-connect **off**.
-4. Header: **📻 RADIO** pill, **link** pill green (telemetry over the radio), **stack: stopped**.
-5. **Geofence (GPS)** card: fill the organisers' points (Arena or QR area: 4, Extra: 2) — type them, or carry the drone
-   to each corner and press **⊕ Capture drone GPS**. **Course**: tunnel length **6.22 m**, width as measured, height
-   10 ft, max inside 8 ft. **Save + Apply** (sent up the radio; the drone saves it).
-6. Segment drop-down: **Whole mission**. **▶ Launch stack** → 1–3 min → **stack: READY**, the **Preflight** list
-   green.
-7. Leave **target payload** empty and **read start QR at take-off** ticked (the start ArUco's image is taken in flight).
-8. Everyone clear, **▶ Start**. The mission state shows in **Mission (supervisor FSM)** and the log:
-   TAKEOFF (5 m) → READ_START_QR (the start marker's image) → OVERHEAD_GREEN (finds the green doormat from 5 m) →
-   ALIGN_GREEN (2.3 m, wall fit) → ENTRY_CORRIDOR (1.5 m through the tunnel, end found by the walls) → climb to 9 m →
-   SEARCH_DELIVERY (markers matched to the start marker; unsure ones: hover, deep read, 0.5 m lower) → DELIVER (down to
-   5 m over the match, winch, **45 s** at 5 m) → back to 9 m → ALIGN_EXIT (the **blue** banner) → the exit tunnel →
-   RETURN_HOME → LAND on the start zone.
-9. After landing: **■ Stop stack**.
+   It opens http://127.0.0.1:8080 and, in the terminal: radio + autopilot heard → Jetson heard → geofence Apply (up
+   the radio) → **Launch stack** (1–3 min) → **READY** → **preflight green** → **10 s countdown** (Ctrl-C cancels:
+   nothing flies) → **START, auto**. Then it prints every state / flight-mode change until landed and disarmed.
+   To only test the link (nothing sent to the drone): with `aerothon onboard aruco` running,
+   `python3 ~/aerothon_here_we_come/apps/dashboard/auto_mission.py --check`.
+4. The mission flies itself: TAKEOFF (5 m) → READ_START_QR (the start marker's image) → OVERHEAD_GREEN (the green
+   doormat from 5 m) → ALIGN_GREEN (2.3 m, wall fit) → ENTRY_CORRIDOR (1.5 m, end found by the walls) → climb to 9 m →
+   SEARCH_DELIVERY (markers matched to the start marker; unsure: hover, deep read, 0.5 m lower) → DELIVER (5 m over the
+   match, winch, **45 s** at 5 m) → 9 m → ALIGN_EXIT (the **blue** banner) → exit tunnel → RETURN_HOME → LAND on the
+   start zone.
+5. After landing: **■ Stop stack** on the page, `aerothon stop`.
 
-## 3. The buttons (8080, radio mode)
+## 3. The page while it flies (8080)
 
-**Header**
-
-| button / pill | what it does |
-|---|---|
-| segment drop-down | what Start flies: Whole mission · QR area only (no drop) · Tunnels + banners only · QR area + payload drop |
-| ▶ Launch stack | starts the drone's whole stack (cameras, MAVROS, navigation, supervisor) over the radio; on the ground only |
-| ■ Stop stack | stops it (ground only) |
-| stack / link / state / mission / QR area pills | stack phase · radio link · supervisor state · mission time · time in the marker area |
-
-**Mission card**
+Once the drone is armed the page shows only these (the rest is hidden):
 
 | button | what it does |
 |---|---|
-| ▶ Start | starts the chosen segment (needs READY + green preflight; "ignore preflight" overrides — don't) |
-| Search height ▼ 0.5 m / ▲ 0.5 m | trims the search height in flight (never above 9.5 m, never below 5.5 m) |
+| **✋ MANUAL (pilot takes over)** | **STABILIZE** on the autopilot — fully manual, the throttle comes from the RC stick AT ONCE (it asks: pilot ready, throttle at hover?). The onboard mission stops sending setpoints, no failsafe flight. |
 | LAND | autopilot LAND where it is; the mission stops |
-| RTH (retrace) | SmartRTL: flies its own path back (through the tunnels) and lands |
-| RTL (straight) | climbs to RTL_ALT and flies straight home — **not inside / near a roofed tunnel** |
+| RTH (retrace) | SmartRTL: its own path back (through the tunnels), lands |
+| RTL (straight) | climbs to RTL_ALT, straight home — **not inside / near a roofed tunnel** |
 | KILL | motors off at once (asks twice) — the drone falls |
-| **Take over: LOITER** | holds position + height (GPS); the mission stops; you fly on the RC |
-| **POSHOLD** | like LOITER, brakes when the sticks are centred |
-| **ALT_HOLD** | holds only the height (drifts with wind) |
-| **STABILIZE** | fully manual — throttle from the stick at once (asks if the throttle is at hover) |
-| **BRAKE** | stops dead and hovers |
 
-Every one of those also tells the onboard mission "operator took over": it stops sending setpoints and does **no**
-failsafe flight. Flipping the RC mode switch to a pilot mode does the same by itself.
+The RC mode switch to any pilot mode does the same as MANUAL. Pills: stack · link (radio) · state (supervisor) ·
+mission time · time in the marker area. The **Mission (supervisor FSM)** row lights the state; the log shows the events.
 
-**Geofence card**: ⊕ Capture drone GPS (the drone's GPS into a row) · + row · Course table · Save · **Save + Apply**.
+On the ground (disarmed) the page also has, for doing it by hand: segment drop-down, ▶ Launch stack, ■ Stop stack,
+▶ Start, search height ▼▲ 0.5 m (9.5 m max), the Geofence card (Capture, + row, Course, Save, Save + Apply), Preflight.
 
 ## 4. Props-off test (field test page, 8096)
 

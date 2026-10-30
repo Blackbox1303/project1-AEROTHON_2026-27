@@ -8,7 +8,7 @@ SRC=${1:-$HOME/workspaces/isaac_ros-dev/src}
 [ -f "$SRC/gcs/gcs_server.py" ] || { echo "no $SRC/gcs/gcs_server.py"; exit 1; }
 D=$HERE/apps/dashboard O=$HERE/apps/offboard
 mkdir -p "$D/static" "$O/src/gcs/vrx_explore" "$O/src/gcs/laptop_vrx" "$O/src/aerothon_nav/aerothon_nav"
-cp "$SRC/gcs/gcs_server.py" "$D/"; cp "$SRC/gcs/static/index.html" "$D/static/"
+cp "$SRC/gcs/gcs_server.py" "$SRC/gcs/auto_mission.py" "$D/"; cp "$SRC/gcs/static/index.html" "$D/static/"
 cp "$SRC/gcs/vrx_explore/vrx_explore.py" "$SRC/gcs/vrx_explore/vrx_explore.html" "$O/src/gcs/vrx_explore/"
 cp "$SRC/gcs/laptop_vrx/laptop_vrx_mission.py" "$O/src/gcs/laptop_vrx/"
 F=$HERE/apps/fieldtest; mkdir -p "$F"                       # the field test's laptop half (+ the page)

@@ -69,12 +69,7 @@
   <button class="stop" onclick="post('land')">Land</button>
   <button class="stop" onclick="if (confirm('Kill the motors?')) post('kill')">Kill</button>
   <span class="sep"></span>
-  <b title="hand the drone to the RC pilot: the flight mode is set, the explorer stops sending setpoints">Take over</b>
-  <button onclick="if (confirm('LOITER: holds position + height - the explorer stops, you fly it on the RC?')) post('loiter')">LOITER</button>
-  <button onclick="if (confirm('POSHOLD: holds position - the explorer stops, you fly it?')) post('poshold')">POSHOLD</button>
-  <button onclick="if (confirm('ALT_HOLD: holds only the HEIGHT, it will drift - the explorer stops, you fly it?')) post('alt_hold')">ALT_HOLD</button>
-  <button onclick="if (confirm('STABILIZE: fully manual, throttle from the RC at once - the explorer stops?') && confirm('Is the RC throttle at hover?')) post('stabilize')">STABILIZE</button>
-  <button onclick="if (confirm('BRAKE: stops dead and hovers - the explorer stops?')) post('brake')">BRAKE</button>
+  <button class="stop" title="hand the drone to the RC pilot: STABILIZE (fully manual), the explorer stops sending setpoints" onclick="if (confirm('MANUAL: STABILIZE - throttle from the RC stick at once, the explorer stops. Pilot ready, throttle at hover?')) post('stabilize')">✋ MANUAL</button>
   <span class="sep"></span>
   <button onclick="post('alt', {delta: -0.5})" title="search height down 0.5 m, in flight too">▼ 0.5 m</button>
   <button onclick="post('alt', {delta: 0.5})" title="search height up 0.5 m">▲ 0.5 m</button>

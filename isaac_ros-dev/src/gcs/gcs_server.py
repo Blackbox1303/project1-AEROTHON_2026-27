@@ -1406,6 +1406,14 @@ async def api(request):
     body = await request.json() if request.can_read_body else {}
     print(f'[api] {time.strftime("%H:%M:%S")} {request.remote} {what} {json.dumps(body)[:200]}', flush=True)
     loop = asyncio.get_running_loop()
+    if what == 'auto_status':                         # `aerothon mission` (auto_mission.py): read-only, any mode
+        gf = load_gf()
+        failing = [c['name'] for c in preflight(STACK.mode or ('radio' if RADIO else 'sim'))
+                   if c['critical'] and not c['ok']]
+        return ok(True, stack_phase(), failing=failing, armed=S.tel.get('armed'), fc_mode=S.tel.get('mode'),
+                  state=(MAV.agent.get('s') if RADIO else S.ros.get('state')) or '', radio=bool(RADIO),
+                  gf={k: len(gf.get(k) or []) for k in ('arena', 'qr', 'extra')},
+                  link=fresh('HEARTBEAT', 3, S.tel_time), agent=fresh('agent', 5, S.tel_time) if RADIO else None)
     if RADIO and what not in ('geofence', 'capture'):   # those two stay here: the corners are kept on this PC
         return ok(*(await loop.run_in_executor(None, radio_api, what, body)))
     if what == 'operator':                            # mav_agent action 8: the ground took over over the radio
