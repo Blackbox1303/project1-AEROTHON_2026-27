@@ -1758,11 +1758,12 @@ async def index(request):
     html = html.replace('<title>AeroTHON Ground Station</title>', '<title>AeroTHON ArUco Delivery</title>')
     html = html.replace('<option>competition</option><option>comp_far1</option>',
                         '<option>competition_aruco</option><option>comp_far1_aruco</option>')
-    html = html.replace('<option value="full" class="seg-full">Whole mission</option>', '')     # QR area only
-    html = html.replace('<option value="tunnel" class="seg-full">Tunnels + banners only</option>', '')
+    # every segment, as the QR mission had them: the whole mission (start marker, tunnels, the marker area, the drop,
+    # back) - only the boards changed, QR codes -> ArUco markers (user, 2026-10-30; the old delivery-only ArUco page
+    # dropped Whole mission / Tunnels here)
     html = html.replace('<body>', '<body><div style="background:#1d4ed8;color:#fff;font:600 13px system-ui;'
-                        'padding:4px 10px">ArUco delivery (:8084) - the 8080 QR-area mission with ArUco markers 3x3 .. 6x6 '
-                        'instead of QR codes</div>', 1)
+                        'padding:4px 10px">AeroTHON final mission - ArUco markers (matched to the start marker) instead '
+                        'of QR codes; everything else as before</div>', 1)
     return web.Response(text=html, content_type='text/html')
 
 
